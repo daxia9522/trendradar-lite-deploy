@@ -88,6 +88,20 @@ cd trendradar-lite-deploy
 systemctl --user list-timers 'trendradar-*'
 ```
 
+首次部署后可以立即强制执行一次，用于验证采集、报告生成和邮件发送：
+
+```bash
+cd ~/trendradar-lite-deploy
+(
+  set -a
+  source ~/.config/trendradar-lite/env
+  set +a
+  .venv/bin/python -m trendradar --force-run
+)
+```
+
+`--force-run` 会绕过当前推送时间窗口和 once 去重；如果已启用 AI，也会产生一次 AI 调用并立即发送邮件。
+
 以后重新打开配置页：
 
 ```bash
@@ -157,6 +171,14 @@ cd trendradar-lite-deploy
 ```bash
 ./deploy/docker/install.sh --configure
 ```
+
+首次部署后可以立即强制执行一次，验证采集、报告生成和邮件发送：
+
+```bash
+docker compose exec trendradar python -m trendradar --force-run
+```
+
+`--force-run` 会绕过当前推送时间窗口和 once 去重；如果已启用 AI，也会产生一次 AI 调用并立即发送邮件。
 
 Compose 使用一个轻量前台调度器：
 
