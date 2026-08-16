@@ -10,6 +10,14 @@ TrendRadar Lite 的精简部署发行版：聚合多平台热榜与 RSS，按关
 
 > 本仓库是基于 `sansan0/TrendRadar` 修改的非官方发行版，不是上游项目的官方部署仓库。
 
+原生 Linux 和 Docker Compose 均提供首次安装配置页。克隆仓库后也可以直接运行统一入口，选择部署方式：
+
+```bash
+./install.sh
+```
+
+配置页仅监听 `127.0.0.1`，不会把邮箱密码或 AI 密钥暴露到公网。远程 VPS 安装时，安装器会显示对应的 SSH 端口转发命令。
+
 ## 功能
 
 - 11 个热榜来源与自定义 RSS 聚合
@@ -68,15 +76,22 @@ cd trendradar-lite-deploy
 安装器会：
 
 1. 创建 `.venv` 并安装依赖。
-2. 在 `~/.config/trendradar-lite/env` 生成权限为 `600` 的环境文件。
-3. 安装每小时采集和周日 12:30（Asia/Shanghai）周报的 systemd user timer。
-4. 运行 `--doctor`。
+2. 打开配置页，填写邮件和可选 AI 参数。
+3. 在 `~/.config/trendradar-lite/env` 保存权限为 `600` 的环境文件。
+4. 安装每小时采集和周日 12:30（Asia/Shanghai）周报的 systemd user timer。
+5. 运行 `--doctor`。
 
-填写环境文件后检查状态：
+安装完成后检查状态：
 
 ```bash
 ./deploy/linux/status.sh
 systemctl --user list-timers 'trendradar-*'
+```
+
+以后重新打开配置页：
+
+```bash
+./deploy/linux/install.sh --configure
 ```
 
 更新与卸载：
@@ -134,10 +149,13 @@ AI 分析还需要 `AI_MODEL` 和 `AI_API_KEY`；中转服务可设置 `AI_API_B
 ```bash
 git clone https://github.com/daxia9522/trendradar-lite-deploy.git
 cd trendradar-lite-deploy
-cp .env.example .env
-# 编辑 .env 后启动
-docker compose up -d --build
-docker compose logs -f
+./deploy/docker/install.sh
+```
+
+安装器会检查 Docker Compose、创建运行目录和私密 `.env`，通过一次性 setup 容器打开配置页，保存后自动构建并启动服务。以后重新配置：
+
+```bash
+./deploy/docker/install.sh --configure
 ```
 
 Compose 使用一个轻量前台调度器：
@@ -173,7 +191,7 @@ python weekly_report/weekly_ai_report_email.py
 ```bash
 python -m compileall -q trendradar weekly_report deploy tests
 python -m unittest discover -s tests -v
-bash -n deploy/linux/*.sh
+bash -n install.sh deploy/linux/*.sh deploy/docker/*.sh
 cp .env.example .env
 docker compose config --quiet
 docker build -t trendradar-lite-deploy:local .

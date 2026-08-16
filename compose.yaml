@@ -1,4 +1,22 @@
 services:
+  setup:
+    profiles: ["setup"]
+    build:
+      context: .
+    image: trendradar-lite-deploy:local
+    user: "0:0"
+    entrypoint:
+      - python
+      - deploy/configure.py
+      - --output
+      - /setup/.env
+      - --host
+      - 0.0.0.0
+    ports:
+      - "127.0.0.1:${SETUP_PORT:-8765}:8765"
+    volumes:
+      - ./.env:/setup/.env
+
   trendradar:
     build:
       context: .

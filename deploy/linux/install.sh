@@ -8,13 +8,18 @@ ENV_FILE=$CONFIG_DIR/env
 UNIT_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
 PYTHON_BIN=${PYTHON_BIN:-python3}
 ENABLE_TIMERS=true
+FORCE_CONFIGURE=false
 
-if [[ ${1:-} == "--no-enable" ]]; then
-  ENABLE_TIMERS=false
-elif [[ $# -gt 0 ]]; then
-  echo "Usage: $0 [--no-enable]" >&2
-  exit 2
-fi
+for arg in "$@"; do
+  case "$arg" in
+    --no-enable) ENABLE_TIMERS=false ;;
+    --configure) FORCE_CONFIGURE=true ;;
+    *)
+      echo "Usage: $0 [--no-enable] [--configure]" >&2
+      exit 2
+      ;;
+  esac
+done
 
 command -v "$PYTHON_BIN" >/dev/null || {
   echo "Python 3 is required." >&2
@@ -32,12 +37,19 @@ command -v systemctl >/dev/null || {
 
 mkdir -p "$CONFIG_DIR" "$UNIT_DIR" "$APP_DIR/output"
 
+NEW_ENV=false
 if [[ ! -f $ENV_FILE ]]; then
   install -m 600 "$APP_DIR/.env.example" "$ENV_FILE"
-  echo "Created $ENV_FILE. Fill in SMTP and optional AI settings before delivery."
+  NEW_ENV=true
+  echo "Created $ENV_FILE."
 else
   chmod 600 "$ENV_FILE"
   echo "Preserved existing environment file: $ENV_FILE"
+fi
+
+if [[ $NEW_ENV == true || $FORCE_CONFIGURE == true ]]; then
+  echo "Starting the configuration page. Installation continues after you save it."
+  "$PYTHON_BIN" "$APP_DIR/deploy/configure.py" --output "$ENV_FILE"
 fi
 
 if [[ ! -x $APP_DIR/.venv/bin/python ]]; then
@@ -91,4 +103,5 @@ fi
 
 echo "Native Linux installation completed."
 echo "Environment: $ENV_FILE"
+echo "Reconfigure: $APP_DIR/deploy/linux/install.sh --configure"
 echo "Status: $APP_DIR/deploy/linux/status.sh"
