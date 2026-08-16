@@ -12,6 +12,14 @@ services:
       - /setup/.env
       - --host
       - 0.0.0.0
+      - --public-port
+      - "${SETUP_PORT:-8765}"
+      - --ssh-user
+      - "${SETUP_SSH_USER:-}"
+      - --ssh-host
+      - "${SETUP_SSH_HOST:-}"
+      - --ssh-port
+      - "${SETUP_SSH_PORT:-0}"
     ports:
       - "127.0.0.1:${SETUP_PORT:-8765}:8765"
     volumes:

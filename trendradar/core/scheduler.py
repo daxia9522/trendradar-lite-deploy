@@ -7,6 +7,7 @@
 """
 
 import copy
+import os
 import re
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
@@ -93,6 +94,18 @@ class Scheduler:
         # 确保 periods 是 dict（可能为空 {}）
         if timeline.get("periods") is None:
             timeline["periods"] = {}
+
+        push_time_overrides = {
+            "morning_brief": "MORNING_PUSH_TIME",
+            "noon_brief": "NOON_PUSH_TIME",
+            "afternoon_brief": "EVENING_PUSH_TIME",
+            "nightly_daily": "DAILY_SUMMARY_TIME",
+        }
+        for period_key, env_key in push_time_overrides.items():
+            value = os.environ.get(env_key, "").strip()
+            if value and period_key in timeline["periods"]:
+                timeline["periods"][period_key]["start"] = value
+                timeline["periods"][period_key]["end"] = value
 
         return timeline
 
@@ -335,11 +348,6 @@ class Scheduler:
                 )
             self._validate_hhmm(period["start"], f"{period_key}.start")
             self._validate_hhmm(period["end"], f"{period_key}.end")
-            if period["start"] == period["end"]:
-                raise ValueError(
-                    f"period '{period_key}' 的 start 与 end 不能相同: {period['start']}"
-                )
-
         # 检查冲突策略下的重叠
         policy = timeline.get("overlap", {}).get("policy", "error_on_overlap")
         if policy == "error_on_overlap":

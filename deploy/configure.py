@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import html
 import os
+import re
 import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -26,6 +28,10 @@ FIELDS = [
     ("AI_FALLBACK_MODELS", "备用模型", False, "用逗号分隔"),
     ("TZ", "时区", True, "Asia/Shanghai"),
     ("CRAWLER_MINUTE", "每小时采集分钟", False, "0-59"),
+    ("MORNING_PUSH_TIME", "早间推送时间", False, "07:00"),
+    ("NOON_PUSH_TIME", "午间推送时间", False, "12:00"),
+    ("EVENING_PUSH_TIME", "傍晚推送时间", False, "18:00"),
+    ("DAILY_SUMMARY_TIME", "全天汇总时间", False, "22:00"),
     ("WEEKLY_HOUR", "周报小时", False, "0-23"),
     ("WEEKLY_MINUTE", "周报分钟", False, "0-59"),
 ]
@@ -61,16 +67,23 @@ def write_env(path: Path, values: dict[str, str]) -> None:
 
 
 def render(values: dict[str, str], errors: list[str] | None = None, saved: bool = False) -> str:
-    inputs = []
+    sections = {"邮件推送": [], "AI 分析": [], "执行时间": []}
     for key, label, required, hint in FIELDS:
         value = "" if key in SECRET_FIELDS else values.get(key, "")
         placeholder = "已保存，留空保持不变" if key in SECRET_FIELDS and values.get(key) else hint
-        inputs.append(
+        input_type = "password" if key in SECRET_FIELDS else "time" if key.endswith("_PUSH_TIME") or key == "DAILY_SUMMARY_TIME" else "text"
+        field = (
             f'<label><span>{html.escape(label)}{" *" if required else ""}</span>'
-            f'<input name="{key}" type="{"password" if key in SECRET_FIELDS else "text"}" '
+            f'<input name="{key}" type="{input_type}" '
             f'value="{html.escape(value)}" placeholder="{html.escape(placeholder)}"'
             f'{" required" if required and not values.get(key) else ""}></label>'
         )
+        section = "邮件推送" if key.startswith("EMAIL_") else "AI 分析" if key.startswith("AI_") else "执行时间"
+        sections[section].append(field)
+    section_html = "".join(
+        f'<section><h2>{title}</h2>{"".join(fields)}</section>'
+        for title, fields in sections.items()
+    )
     notice = "<div class=ok>配置已保存，可以关闭此页面。</div>" if saved else ""
     error = ""
     if errors:
@@ -81,13 +94,13 @@ def render(values: dict[str, str], errors: list[str] | None = None, saved: bool 
 <style>
 body{{font:16px system-ui,sans-serif;max-width:760px;margin:32px auto;padding:0 18px;color:#17202a;background:#f5f7fa}}
 main{{background:white;padding:28px;border:1px solid #d9e0e7;border-radius:8px;box-shadow:0 2px 8px #0001}}
-h1{{font-size:24px;margin-top:0}} p{{color:#52606d}} form{{display:grid;gap:15px}}
-label{{display:grid;gap:6px;font-weight:600}} input{{font:inherit;padding:10px;border:1px solid #b8c2cc;border-radius:5px}}
+h1{{font-size:24px;margin-top:0}} h2{{font-size:17px;margin:0 0 13px}} p{{color:#52606d}} form{{display:grid;gap:24px}}
+section{{display:grid;gap:13px}} label{{display:grid;gap:6px;font-weight:600}} input{{font:inherit;padding:10px;border:1px solid #b8c2cc;border-radius:5px}}
 button{{font:inherit;padding:11px 16px;background:#1769aa;color:white;border:0;border-radius:5px;cursor:pointer}}
 .ok{{padding:12px;background:#e3f6e8;color:#176b35;margin:14px 0}} .error{{padding:12px;background:#fde8e8;color:#a11;margin:14px 0}}
 </style><main><h1>TrendRadar Lite 配置</h1>
-<p>邮件配置为必填，AI 分析可选。密码和密钥不会回显。</p>
-{notice}{error}<form method="post">{"".join(inputs)}<button type="submit">保存配置并继续安装</button></form></main></html>"""
+<p>邮件配置为必填，AI 分析可选。四个日更推送时间按所选时区执行，密码和密钥不会回显。</p>
+{notice}{error}<form method="post">{section_html}<button type="submit">保存配置并继续安装</button></form></main></html>"""
 
 
 def validate(values: dict[str, str]) -> list[str]:
@@ -106,10 +119,56 @@ def validate(values: dict[str, str]) -> list[str]:
             continue
         if not minimum <= number <= maximum:
             errors.append(f"{key} 必须在 {minimum}-{maximum} 之间")
+    time_keys = ("MORNING_PUSH_TIME", "NOON_PUSH_TIME", "EVENING_PUSH_TIME", "DAILY_SUMMARY_TIME")
+    for key in time_keys:
+        if values.get(key) and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", values[key]):
+            errors.append(f"{key} 必须使用 HH:MM 格式")
     return errors
 
 
-def serve(output: Path, host: str, port: int) -> None:
+def write_systemd_timer(path: Path, values: dict[str, str]) -> None:
+    crawler_minute = int(values.get("CRAWLER_MINUTE") or "5")
+    push_times = [
+        values.get("MORNING_PUSH_TIME", "07:00"),
+        values.get("NOON_PUSH_TIME", "12:00"),
+        values.get("EVENING_PUSH_TIME", "18:00"),
+        values.get("DAILY_SUMMARY_TIME", "22:00"),
+    ]
+    calendars = [f"*-*-* *:{crawler_minute:02d}:00"]
+    calendars.extend(f"*-*-* {value}:00" for value in push_times)
+    calendars = list(dict.fromkeys(calendars))
+    lines = [
+        "[Unit]",
+        "Description=Run TrendRadar Lite for hourly collection and configured delivery times",
+        "",
+        "[Timer]",
+        *(f"OnCalendar={value}" for value in calendars),
+        "Persistent=true",
+        "AccuracySec=1min",
+        "",
+        "[Install]",
+        "WantedBy=timers.target",
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def detect_ssh_target(user: str, host: str, ssh_port: int) -> tuple[str, str, int]:
+    connection = os.environ.get("SSH_CONNECTION", "").split()
+    if not host and len(connection) == 4:
+        host = connection[2]
+    if ssh_port == 0 and len(connection) == 4 and connection[3].isdigit():
+        ssh_port = int(connection[3])
+    login_user = user or os.environ.get("SUDO_USER") or os.environ.get("USER") or getpass.getuser()
+    return login_user, host or "server", ssh_port or 22
+
+
+def ssh_tunnel_command(user: str, host: str, ssh_port: int, setup_port: int) -> str:
+    port_option = f" -p {ssh_port}" if ssh_port != 22 else ""
+    return f"ssh{port_option} -L {setup_port}:127.0.0.1:{setup_port} {user}@{host}"
+
+
+def serve(output: Path, host: str, port: int, public_port: int, ssh_user: str, ssh_host: str, ssh_port: int) -> None:
     current = read_env(output)
     done = threading.Event()
 
@@ -144,10 +203,13 @@ def serve(output: Path, host: str, port: int) -> None:
             done.set()
 
     server = HTTPServer((host, port), Handler)
-    actual_port = server.server_port
-    print(f"配置页面：http://{host}:{actual_port}/", flush=True)
-    print(f"远程 VPS 请另开终端执行：ssh -L {actual_port}:127.0.0.1:{actual_port} user@server", flush=True)
-    print("然后在本机浏览器打开上面的地址。", flush=True)
+    setup_port = public_port or server.server_port
+    user, target_host, target_port = detect_ssh_target(ssh_user, ssh_host, ssh_port)
+    command = ssh_tunnel_command(user, target_host, target_port, setup_port)
+    print(f"配置页面：http://127.0.0.1:{setup_port}/", flush=True)
+    print("远程 VPS 请在本机终端直接复制执行：", flush=True)
+    print(command, flush=True)
+    print("保持该终端运行，再用本机浏览器打开配置页面。", flush=True)
     while not done.is_set():
         server.handle_request()
     server.server_close()
@@ -158,8 +220,16 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--public-port", type=int, default=0)
+    parser.add_argument("--ssh-user", default="")
+    parser.add_argument("--ssh-host", default="")
+    parser.add_argument("--ssh-port", type=int, default=0)
+    parser.add_argument("--render-systemd-timer", type=Path)
     args = parser.parse_args()
-    serve(args.output, args.host, args.port)
+    if args.render_systemd_timer:
+        write_systemd_timer(args.render_systemd_timer, read_env(args.output))
+        return 0
+    serve(args.output, args.host, args.port, args.public_port, args.ssh_user, args.ssh_host, args.ssh_port)
     return 0
 
 

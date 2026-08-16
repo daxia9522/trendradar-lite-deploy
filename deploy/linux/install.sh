@@ -82,6 +82,10 @@ for name in trendradar-lite trendradar-weekly; do
   install -m 644 "$APP_DIR/deploy/systemd/$name.timer" "$UNIT_DIR/$name.timer"
 done
 
+"$PYTHON_BIN" "$APP_DIR/deploy/configure.py" \
+  --output "$ENV_FILE" \
+  --render-systemd-timer "$UNIT_DIR/trendradar-lite.timer"
+
 systemctl --user daemon-reload
 if [[ $ENABLE_TIMERS == true ]]; then
   systemctl --user enable --now trendradar-lite.timer trendradar-weekly.timer

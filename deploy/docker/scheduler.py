@@ -17,6 +17,12 @@ from zoneinfo import ZoneInfo
 STATE_PATH = Path("output/meta/docker-scheduler.json")
 TIMEZONE = ZoneInfo(os.environ.get("TZ", "Asia/Shanghai"))
 CRAWLER_MINUTE = int(os.environ.get("CRAWLER_MINUTE", "0"))
+PUSH_TIMES = {
+    os.environ.get("MORNING_PUSH_TIME", "07:00"),
+    os.environ.get("NOON_PUSH_TIME", "12:00"),
+    os.environ.get("EVENING_PUSH_TIME", "18:00"),
+    os.environ.get("DAILY_SUMMARY_TIME", "22:00"),
+}
 WEEKLY_WEEKDAY = int(os.environ.get("WEEKLY_WEEKDAY", "6"))  # Monday=0
 WEEKLY_HOUR = int(os.environ.get("WEEKLY_HOUR", "12"))
 WEEKLY_MINUTE = int(os.environ.get("WEEKLY_MINUTE", "30"))
@@ -61,7 +67,8 @@ def main() -> int:
     print(
         "[scheduler] ready: crawler hourly at minute "
         f"{CRAWLER_MINUTE:02d}; weekly at weekday={WEEKLY_WEEKDAY} "
-        f"{WEEKLY_HOUR:02d}:{WEEKLY_MINUTE:02d} ({TIMEZONE.key})",
+        f"{WEEKLY_HOUR:02d}:{WEEKLY_MINUTE:02d} ({TIMEZONE.key}); "
+        f"deliveries at {', '.join(sorted(PUSH_TIMES))}",
         flush=True,
     )
 
@@ -69,7 +76,8 @@ def main() -> int:
         now = datetime.now(TIMEZONE)
         minute_marker = now.strftime("%Y-%m-%dT%H:%M")
 
-        if now.minute == CRAWLER_MINUTE and state.get("crawler") != minute_marker:
+        crawler_due = now.minute == CRAWLER_MINUTE or now.strftime("%H:%M") in PUSH_TIMES
+        if crawler_due and state.get("crawler") != minute_marker:
             _run("crawler", [sys.executable, "-m", "trendradar"], minute_marker, state)
 
         weekly_due = (

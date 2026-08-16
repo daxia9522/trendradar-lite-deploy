@@ -1,6 +1,8 @@
+import os
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 import yaml
 
@@ -47,6 +49,19 @@ class SchedulerContractTests(unittest.TestCase):
                 self.assertTrue(schedule.analyze)
                 self.assertTrue(schedule.push)
                 self.assertFalse(hasattr(schedule, "ai_mode"))
+
+    def test_environment_can_override_delivery_time(self):
+        with patch.dict(os.environ, {"MORNING_PUSH_TIME": "08:30"}):
+            scheduler = Scheduler(
+                schedule_config={"enabled": True, "preset": "custom"},
+                timeline_data=yaml.safe_load(Path("config/timeline.yaml").read_text(encoding="utf-8")),
+                storage_backend=MemoryExecutionStorage(),
+                get_time_func=lambda: datetime(2026, 8, 11, 8, 30),
+                fallback_report_mode="current",
+            )
+            schedule = scheduler.resolve()
+        self.assertEqual(schedule.period_key, "morning_brief")
+        self.assertTrue(schedule.push)
 
     def test_default_window_collects_without_delivery(self):
         schedule = self.resolve_at(10)

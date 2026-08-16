@@ -16,7 +16,7 @@ TrendRadar Lite 的精简部署发行版：聚合多平台热榜与 RSS，按关
 ./install.sh
 ```
 
-配置页仅监听 `127.0.0.1`，不会把邮箱密码或 AI 密钥暴露到公网。远程 VPS 安装时，安装器会显示对应的 SSH 端口转发命令。
+配置页仅监听 `127.0.0.1`，不会把邮箱密码或 AI 密钥暴露到公网。远程 VPS 安装时，安装器会自动识别 SSH 用户、服务器 IP 和端口，显示一条可直接复制的端口转发命令。
 
 ## 功能
 
@@ -160,7 +160,7 @@ cd trendradar-lite-deploy
 
 Compose 使用一个轻量前台调度器：
 
-- 每小时运行 `python -m trendradar`
+- 每小时在指定分钟采集一次，并在四个自定义日更时间准确运行推送
 - 每周日 12:30（`TZ` 指定时区）运行 AI 周报
 - `output/` 保存于 Docker volume
 - `config/` 从宿主机只读挂载
@@ -169,7 +169,11 @@ Compose 使用一个轻量前台调度器：
 
 | 变量 | 默认值 |
 |---|---:|
-| `CRAWLER_MINUTE` | `0` |
+| `CRAWLER_MINUTE` | `5`，每小时采集分钟 |
+| `MORNING_PUSH_TIME` | `07:00`，早间推送 |
+| `NOON_PUSH_TIME` | `12:00`，午间推送 |
+| `EVENING_PUSH_TIME` | `18:00`，傍晚推送 |
+| `DAILY_SUMMARY_TIME` | `22:00`，全天汇总 |
 | `WEEKLY_WEEKDAY` | `6`，Python 约定周日 |
 | `WEEKLY_HOUR` | `12` |
 | `WEEKLY_MINUTE` | `30` |
