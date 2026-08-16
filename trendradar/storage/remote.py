@@ -123,7 +123,7 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
         self._batch_mode = False
         self._batch_dirty: set = set()  # 待上传的 (date, db_type) 集合
 
-        print(f"[远程存储] 初始化完成，存储桶: {bucket_name}，签名版本: {signature_version}")
+        print(f"[远程存储] 初始化完成，签名版本: {signature_version}")
 
     @property
     def backend_name(self) -> str:

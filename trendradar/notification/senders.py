@@ -46,11 +46,11 @@ def send_to_email(
     """发送 HTML 报告邮件。"""
     try:
         if not html_file_path or not Path(html_file_path).exists():
-            print(f"错误：HTML文件不存在或未提供: {html_file_path}")
+            print("错误：HTML 文件不存在或未提供")
             return False
 
         source_path = Path(html_file_path)
-        print(f"使用HTML文件: {source_path}")
+        print("已加载 HTML 报告文件")
         with open(source_path, "r", encoding="utf-8") as f:
             html_content = f.read()
 
@@ -66,7 +66,7 @@ def send_to_email(
             smtp_port = config["port"]
             use_tls = config["encryption"] == "TLS"
         else:
-            print(f"未识别的邮箱服务商: {domain}，使用通用 SMTP 配置")
+            print("未识别的邮箱服务商，使用通用 SMTP 配置")
             smtp_server = f"smtp.{domain}"
             smtp_port = 587
             use_tls = True
@@ -97,9 +97,7 @@ def send_to_email(
         msg.attach(MIMEText(text_content, "plain", "utf-8"))
         msg.attach(MIMEText(html_content, "html", "utf-8"))
 
-        print(f"正在发送邮件到 {to_email}...")
-        print(f"SMTP 服务器: {smtp_server}:{smtp_port}")
-        print(f"发件人: {from_email}")
+        print("正在发送邮件...")
 
         # 显式校验 SMTP 证书（Python 默认 starttls/SMTP_SSL context 不校验）
         tls_context = ssl.create_default_context()
@@ -121,31 +119,27 @@ def send_to_email(
         server.login(from_email, password)
         server.send_message(msg)
         server.quit()
-        print(f"邮件发送成功 [{report_type}] -> {to_email}")
+        print(f"邮件发送成功 [{report_type}]")
         return True
 
-    except smtplib.SMTPAuthenticationError as e:
+    except smtplib.SMTPAuthenticationError:
         print("邮件发送失败：认证错误，请检查邮箱和密码/授权码")
-        print(f"详细错误: {e}")
         return False
-    except smtplib.SMTPRecipientsRefused as e:
-        print(f"邮件发送失败：收件人地址被拒绝 {e}")
+    except smtplib.SMTPRecipientsRefused:
+        print("邮件发送失败：收件人地址被拒绝")
         return False
-    except smtplib.SMTPSenderRefused as e:
-        print(f"邮件发送失败：发件人地址被拒绝 {e}")
+    except smtplib.SMTPSenderRefused:
+        print("邮件发送失败：发件人地址被拒绝")
         return False
-    except smtplib.SMTPDataError as e:
-        print(f"邮件发送失败：邮件数据错误 {e}")
+    except smtplib.SMTPDataError:
+        print("邮件发送失败：邮件数据错误")
         return False
-    except smtplib.SMTPConnectError as e:
+    except smtplib.SMTPConnectError:
         print(f"邮件发送失败：无法连接到 SMTP 服务器")
-        print(f"详细错误: {e}")
         return False
     except smtplib.SMTPServerDisconnected:
         print("邮件发送失败：服务器意外断开连接，请检查网络或稍后重试")
         return False
     except Exception as e:
-        print(f"邮件发送失败 [{report_type}]：{e}")
-        import traceback
-        traceback.print_exc()
+        print(f"邮件发送失败 [{report_type}]：{type(e).__name__}")
         return False
