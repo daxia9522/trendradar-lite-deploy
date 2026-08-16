@@ -93,6 +93,10 @@ fi
 
 (
   cd "$APP_DIR"
+  set -a
+  # The setup wizard creates this private shell-compatible environment file.
+  source "$ENV_FILE"
+  set +a
   "$APP_DIR/.venv/bin/python" -m trendradar --doctor
 )
 
