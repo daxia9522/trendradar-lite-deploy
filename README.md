@@ -199,27 +199,40 @@ docker compose logs --tail=50 trendradar
 ./deploy/docker/install.sh --configure
 ```
 
-卸载 Docker 部署：
+卸载 Docker 部署时，以下三种模式只能选择一种：
 
 ```bash
+cd ~/trendradar-lite-deploy
+
 # 仅停止并删除容器和网络，保留数据、密钥和镜像
 ./deploy/docker/uninstall.sh
 
-# 删除容器、网络、数据卷和私密 .env，保留本地镜像和 Git 仓库
+# 或：删除容器、网络、数据卷和私密 .env，保留本地镜像和 Git 仓库
 ./deploy/docker/uninstall.sh --purge-data
 
-# 在上述基础上同时删除本地 TrendRadar 镜像
+# 或：彻底清除容器、网络、数据卷、私密 .env 和本地 TrendRadar 镜像
 ./deploy/docker/uninstall.sh --purge-all
 ```
 
-彻底清空后如不再需要代码仓库：
+如果要彻底删除 TrendRadar Docker 部署和代码仓库，只执行下面这一组完整命令：
 
 ```bash
-cd ..
-rm -rf -- trendradar-lite-deploy
+cd ~/trendradar-lite-deploy
+./deploy/docker/uninstall.sh --purge-all
+cd ~
+rm -rf -- ~/trendradar-lite-deploy
 ```
 
-`--purge-data` 和 `--purge-all` 会永久删除 Docker volume 中的报告、数据库和采集记录，无法恢复。
+验证是否清理完成：
+
+```bash
+docker ps -a --filter name=trendradar
+docker volume ls | grep trendradar || echo "TrendRadar volumes removed"
+docker images | grep trendradar || echo "TrendRadar images removed"
+test ! -e ~/trendradar-lite-deploy && echo "TrendRadar repository removed"
+```
+
+`--purge-data` 和 `--purge-all` 会永久删除 Docker volume 中的报告、数据库和采集记录，无法恢复。上述命令不会卸载 Docker Engine，也不会影响名称不含 `trendradar` 的其他项目。
 
 首次部署后可以立即强制执行一次，验证采集、报告生成和邮件发送：
 
