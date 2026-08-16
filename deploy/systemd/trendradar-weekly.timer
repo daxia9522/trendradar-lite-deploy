@@ -1,0 +1,10 @@
+[Unit]
+Description=Run TrendRadar Lite weekly report on Sunday 12:30 Asia/Shanghai
+
+[Timer]
+OnCalendar=Sun *-*-* 12:30:00 Asia/Shanghai
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

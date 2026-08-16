@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trendradar-lite-deploy"
+version = "6.6.0"
+description = "Deployment-focused TrendRadar Lite distribution"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "GPL-3.0-only" }
+dependencies = [
+  "requests>=2.32.5,<3.0.0",
+  "pytz>=2025.2,<2026.0",
+  "PyYAML>=6.0.3,<7.0.0",
+  "boto3>=1.35.0,<2.0.0",
+  "feedparser>=6.0.0,<7.0.0",
+  "litellm==1.82.6",
+  "tenacity==8.5.0",
+]
+
+[project.scripts]
+trendradar-lite = "trendradar.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["trendradar*"]
+
+[tool.setuptools.package-data]
+"trendradar.storage" = ["*.sql"]

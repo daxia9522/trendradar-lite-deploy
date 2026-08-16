@@ -1,0 +1,11 @@
+TrendRadar Lite Deploy
+
+This project is a modified, deployment-focused distribution based on
+sansan0/TrendRadar: https://github.com/sansan0/TrendRadar
+
+The upstream project and its contributors retain copyright in their work.
+This repository is not an official upstream distribution. Changes made in
+this repository are maintained by this repository's contributors.
+
+The complete work is distributed under the GNU General Public License v3.0.
+See LICENSE for the full license text.

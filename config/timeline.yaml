@@ -1,0 +1,75 @@
+custom:
+  default:
+    collect: true
+    analyze: false
+    push: false
+    report_mode: current
+    once:
+      analyze: false
+      push: false
+
+  periods:
+    morning_brief:
+      name: 早间速览
+      start: "07:00"
+      end: "07:59"
+      collect: true
+      analyze: true
+      push: true
+      report_mode: current
+      once:
+        analyze: true
+        push: true
+
+    noon_brief:
+      name: 午间速览
+      start: "12:00"
+      end: "12:59"
+      collect: true
+      analyze: true
+      push: true
+      report_mode: current
+      once:
+        analyze: true
+        push: true
+
+    afternoon_brief:
+      name: 傍晚速览
+      start: "18:00"
+      end: "18:59"
+      collect: true
+      analyze: true
+      push: true
+      report_mode: current
+      once:
+        analyze: true
+        push: true
+
+    nightly_daily:
+      name: 全天汇总
+      start: "22:00"
+      end: "22:59"
+      collect: true
+      analyze: true
+      push: true
+      report_mode: daily
+      once:
+        analyze: true
+        push: true
+
+  day_plans:
+    all_day:
+      periods:
+        - morning_brief
+        - noon_brief
+        - afternoon_brief
+        - nightly_daily
+
+  week_map:
+    1: all_day
+    2: all_day
+    3: all_day
+    4: all_day
+    5: all_day
+    6: all_day
+    7: all_day

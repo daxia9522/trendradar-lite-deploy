@@ -1,0 +1,10 @@
+[Unit]
+Description=Run TrendRadar Lite hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

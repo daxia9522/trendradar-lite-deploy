@@ -1,0 +1,143 @@
+# Rebuilt on 2026-04-01 after host bind-mount config directory was missing
+app:
+  timezone: Asia/Shanghai
+
+platforms:
+  enabled: true
+  # 主源：自建 NewsNow（Cloudflare Pages）
+  # 也可用环境变量 PLATFORMS_API_URL 覆盖
+  api_url: "https://daynews.pages.dev/api/s"
+  # 主源超时/失败后按序 fallback；也可用 PLATFORMS_API_FALLBACK_URLS（逗号分隔）
+  api_fallback_urls:
+    - "https://newsnow.busiyi.world/api/s"
+  sources:
+    - id: baidu
+      name: 百度热搜
+      expected_domain: baidu.com
+    - id: thepaper
+      name: 澎湃新闻
+      expected_domain: thepaper.cn
+    - id: ifeng
+      name: 凤凰网
+      expected_domain: ifeng.com
+    - id: cankaoxiaoxi
+      name: 参考消息
+    # 卫星通讯社已停更（NewsNow 主/备源整榜停在 2026-07-11/12），已移除
+    - id: zaobao
+      name: 联合早报
+    - id: wallstreetcn-hot
+      name: 华尔街见闻 最热
+      expected_domain: wallstreetcn.com
+    - id: wallstreetcn-quick
+      name: 华尔街见闻 快讯
+      expected_domain: wallstreetcn.com
+    - id: cls-hot
+      name: 财联社热门
+      expected_domain: cls.cn
+    - id: weibo
+      name: 微博
+      expected_domain: weibo.com
+    - id: douyin
+      name: 抖音
+      expected_domain: douyin.com
+    - id: zhihu
+      name: 知乎
+      expected_domain: zhihu.com
+
+report:
+  mode: current
+  display_mode: keyword
+  rank_threshold: 10
+  sort_by_position_first: false
+  max_news_per_keyword: 0
+
+notification:
+  enabled: true
+
+schedule:
+  enabled: true
+  preset: custom
+
+rss:
+  enabled: true
+  freshness_filter:
+    enabled: true
+    max_age_days: 3
+  feeds:
+    # 新华网时政/新华社国际 RSS 已停更（条目停在 2022-12-14），已移除
+    - id: chinanews-scroll
+      name: 中新网即时
+      url: https://www.chinanews.com.cn/rss/scroll-news.xml
+    - id: bbc-world
+      name: BBC World
+      url: https://feeds.bbci.co.uk/news/world/rss.xml
+    - id: guardian-world
+      name: 卫报 World
+      url: https://www.theguardian.com/world/rss
+    # 雅虎财经已移除：与见闻/财联重叠低价值，且非快讯
+
+ai:
+  # 运行时由环境变量 / GitHub Secrets 注入；此处保持空占位，便于切换中转站或 Gemini 官方
+  # AI_MODEL=provider/model（中转示例 openai/gpt-5.6-luna；Gemini 官方 gemini/gemini-2.5-flash）
+  # AI_API_BASE=中转根地址（原样使用，不自动加 /v1）；走 Gemini 官方时留空
+  # AI_FALLBACK_MODELS=可选备用，逗号分隔；首项同时作周报关键词便宜模型
+  # AI_API_KEY=密钥（切勿写入本文件）
+  model: ""
+  api_base: ""
+  timeout: 240
+  fallback_models: []
+
+
+ai_analysis:
+  enabled: false
+  language: Chinese
+  prompt_file: ai_analysis_prompt.txt
+  max_events_for_analysis: 120
+  include_rank_timeline: true
+
+
+storage:
+  backend: auto
+  formats:
+    sqlite: true
+    txt: true
+    html: true
+  local:
+    data_dir: output
+    retention_days: 0
+  pull:
+    enabled: false
+    days: 7
+
+display:
+  region_order:
+    - new_items
+    - ai_analysis
+    - hotlist
+    - rss
+    - standalone
+  regions:
+    hotlist: true
+    rss: true
+    new_items: true
+    standalone: true
+    ai_analysis: true
+  standalone:
+    platforms: ["weibo", "zhihu"]
+    rss_feeds: []
+    max_items: 20
+
+advanced:
+  debug: false
+  crawler:
+    request_interval: 2000
+    use_proxy: false
+    default_proxy: ""
+  rss:
+    request_interval: 2000
+    timeout: 15
+    use_proxy: false
+  weight:
+    rank: 0.6
+    frequency: 0.3
+    hotness: 0.1

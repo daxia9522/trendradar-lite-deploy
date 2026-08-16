@@ -1,0 +1,13 @@
+[Unit]
+Description=TrendRadar Lite hourly collection and scheduled delivery
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=@APP_DIR@
+EnvironmentFile=-@ENV_FILE@
+ExecStart=@PYTHON@ -m trendradar
+
+[Install]
+WantedBy=default.target

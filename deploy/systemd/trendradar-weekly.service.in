@@ -1,0 +1,13 @@
+[Unit]
+Description=TrendRadar Lite weekly AI report
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=@APP_DIR@
+EnvironmentFile=-@ENV_FILE@
+ExecStart=@PYTHON@ weekly_report/weekly_ai_report_email.py
+
+[Install]
+WantedBy=default.target

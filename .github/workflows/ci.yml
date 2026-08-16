@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Compile Python
+        run: python -m compileall -q trendradar weekly_report deploy tests
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+      - name: Run doctor
+        run: python -m trendradar --doctor
+      - name: Check CLI
+        run: python -m trendradar --help
+      - name: Check shell scripts
+        run: bash -n deploy/linux/*.sh
+
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Prepare Compose environment
+        run: cp .env.example .env
+      - name: Validate Compose
+        run: docker compose config --quiet
+      - name: Build image
+        run: docker build --tag trendradar-lite-deploy:ci .
