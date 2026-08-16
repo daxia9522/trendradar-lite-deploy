@@ -199,6 +199,28 @@ docker compose logs --tail=50 trendradar
 ./deploy/docker/install.sh --configure
 ```
 
+卸载 Docker 部署：
+
+```bash
+# 仅停止并删除容器和网络，保留数据、密钥和镜像
+./deploy/docker/uninstall.sh
+
+# 删除容器、网络、数据卷和私密 .env，保留本地镜像和 Git 仓库
+./deploy/docker/uninstall.sh --purge-data
+
+# 在上述基础上同时删除本地 TrendRadar 镜像
+./deploy/docker/uninstall.sh --purge-all
+```
+
+彻底清空后如不再需要代码仓库：
+
+```bash
+cd ..
+rm -rf -- trendradar-lite-deploy
+```
+
+`--purge-data` 和 `--purge-all` 会永久删除 Docker volume 中的报告、数据库和采集记录，无法恢复。
+
 首次部署后可以立即强制执行一次，验证采集、报告生成和邮件发送：
 
 ```bash
