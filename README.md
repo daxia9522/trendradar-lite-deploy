@@ -52,7 +52,12 @@ chmod 600 .env
 
 ## 方式一：原生 Linux
 
-推荐 Debian 12+ 或 Ubuntu 22.04/24.04+，需要 Python 3.10+ 和 systemd。
+推荐 Debian 12+ 或 Ubuntu 22.04+，需要 Python 3.10+、Python venv 和 systemd。最小化安装的 Ubuntu/Debian 请先安装系统依赖：
+
+```bash
+sudo apt update
+sudo apt install -y git python3 python3-venv
+```
 
 ```bash
 git clone https://github.com/daxia9522/trendradar-lite-deploy.git

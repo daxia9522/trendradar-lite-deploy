@@ -41,7 +41,12 @@ else
 fi
 
 if [[ ! -x $APP_DIR/.venv/bin/python ]]; then
-  "$PYTHON_BIN" -m venv "$APP_DIR/.venv"
+  if ! "$PYTHON_BIN" -m venv "$APP_DIR/.venv"; then
+    rm -rf -- "$APP_DIR/.venv"
+    echo "Failed to create a virtual environment." >&2
+    echo "Install the Python venv package first (Ubuntu/Debian: apt install python3-venv)." >&2
+    exit 1
+  fi
 fi
 "$APP_DIR/.venv/bin/python" -m pip install --upgrade pip
 "$APP_DIR/.venv/bin/python" -m pip install -r "$APP_DIR/requirements.txt"
