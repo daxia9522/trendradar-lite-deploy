@@ -160,13 +160,40 @@ AI 分析还需要 `AI_MODEL` 和 `AI_API_KEY`；中转服务可设置 `AI_API_B
 
 ## 方式三：Docker Compose
 
+安装器需要 Docker Engine 和 Docker Compose v2。全新 Ubuntu/Debian 服务器先安装并启动 Docker：
+
+```bash
+sudo apt update
+sudo apt install -y docker.io docker-compose-v2
+sudo systemctl enable --now docker
+
+docker --version
+docker compose version
+docker info >/dev/null && echo "Docker 运行正常"
+```
+
+如果当前不是 root 用户，安装后还需要把当前用户加入 `docker` 组，然后退出 SSH 并重新登录一次：
+
+```bash
+sudo usermod -aG docker "$USER"
+```
+
+Docker 验证通过后再部署 TrendRadar：
+
 ```bash
 git clone https://github.com/daxia9522/trendradar-lite-deploy.git
 cd trendradar-lite-deploy
 ./deploy/docker/install.sh
 ```
 
-安装器会检查 Docker Compose、创建运行目录和私密 `.env`，通过一次性 setup 容器打开配置页，保存后自动构建并启动服务。以后重新配置：
+安装器会检查 Docker Compose、创建权限为 `600` 的私密 `.env`，通过一次性 setup 容器打开配置页；保存配置后会自动构建镜像、启动服务并显示容器状态。安装完成后检查：
+
+```bash
+docker compose ps trendradar
+docker compose logs --tail=50 trendradar
+```
+
+`trendradar` 状态应为 `healthy`。以后重新配置：
 
 ```bash
 ./deploy/docker/install.sh --configure
