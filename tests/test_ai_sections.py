@@ -1,7 +1,8 @@
 # coding=utf-8
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from trendradar.ai.analyzer import AIAnalyzer
 from trendradar.ai.formatter import render_ai_analysis_html_rich
@@ -54,13 +55,42 @@ class AISectionContractTests(unittest.TestCase):
     def test_invalid_outputs_are_rejected(self):
         cases = (
             "## 新标题\n内容。",
-            "## 行动建议\n内容。\n\n## 核心态势\n内容。",
+            VALID_CURRENT_RESPONSE + "\n## 核心态势\n重复内容。",
         )
         for response in cases:
             with self.subTest(response=response):
                 result = self.analyzer._parse_response(response)
                 self.assertFalse(result.success)
                 self.assertTrue(result.error)
+
+    def test_heading_variants_reorder_and_preserve_subtitles(self):
+        response = """### 综合研判：
+不同来源形成交叉验证。
+
+# 核心态势
+- **第一条主线。** 具体分析。
+### 1. 政策面变动
+政策面的细节。
+
+## 舆情分化
+存在传播温差。
+
+## 异动信号：
+出现异常轨迹。
+
+### 行动建议
+继续观察后续变化。
+"""
+        result = self.analyzer._parse_response(response)
+        self.assertTrue(result.success, result.error)
+        self.assertEqual(
+            [section.title for section in result.sections],
+            ["核心态势", "舆情分化", "异动信号", "综合研判", "行动建议"],
+        )
+        self.assertIn("### 1. 政策面变动", result.sections[0].content)
+        html = render_ai_analysis_html_rich(result)
+        self.assertIn("<li><strong>第一条主线。</strong> 具体分析。</li>", html)
+        self.assertIn('<div class="ai-subtitle">1. 政策面变动</div>', html)
 
     def test_titles_can_change_without_python_field_mapping(self):
         contract = """# AI_SECTION: 今日核心态势|required|events
@@ -102,7 +132,46 @@ class AISectionContractTests(unittest.TestCase):
         ):
             _, user_prompt, specs = self.analyzer._load_prompt_template("unused.txt")
         self.assertEqual([spec.title for spec in specs], ["契约标题"])
-        self.assertTrue(user_prompt.endswith("## 契约标题"))
+        self.assertIn("必须使用以下 Markdown 二级标题", user_prompt)
+        self.assertIn("## 契约标题", user_prompt)
+        self.assertTrue(user_prompt.endswith("不要输出 JSON、代码块、分析过程或其他内容。"))
+
+    def test_generation_retries_once_after_parse_failure(self):
+        analyzer = object.__new__(AIAnalyzer)
+        analyzer.section_specs = self.analyzer.section_specs
+        analyzer.client = SimpleNamespace(last_finish_reason="", last_model="test-model")
+        analyzer._call_ai = Mock(side_effect=["格式错误", VALID_CURRENT_RESPONSE])
+
+        result = analyzer._generate_and_parse("测试提示词")
+
+        self.assertTrue(result.success, result.error)
+        self.assertEqual(result.model, "test-model")
+        self.assertEqual(analyzer._call_ai.call_count, 2)
+
+    def test_generation_stops_after_second_parse_failure(self):
+        analyzer = object.__new__(AIAnalyzer)
+        analyzer.section_specs = self.analyzer.section_specs
+        analyzer.client = SimpleNamespace(last_finish_reason="", last_model="test-model")
+        analyzer._call_ai = Mock(side_effect=["第一次错误", "第二次错误"])
+
+        result = analyzer._generate_and_parse("测试提示词")
+
+        self.assertFalse(result.success)
+        self.assertIn("首次校验失败", result.error)
+        self.assertIn("重试仍失败", result.error)
+        self.assertEqual(analyzer._call_ai.call_count, 2)
+
+    def test_generation_retries_once_after_truncation(self):
+        analyzer = object.__new__(AIAnalyzer)
+        analyzer.section_specs = self.analyzer.section_specs
+        analyzer.client = SimpleNamespace(last_finish_reason="length", last_model="test-model")
+        analyzer._call_ai = Mock(side_effect=["截断内容", VALID_CURRENT_RESPONSE])
+        analyzer._last_ai_call_was_truncated = Mock(side_effect=[True, False])
+
+        result = analyzer._generate_and_parse("测试提示词")
+
+        self.assertTrue(result.success, result.error)
+        self.assertEqual(analyzer._call_ai.call_count, 2)
 
     def test_generic_prose_contract_does_not_require_lead_module(self):
         analyzer = object.__new__(AIAnalyzer)

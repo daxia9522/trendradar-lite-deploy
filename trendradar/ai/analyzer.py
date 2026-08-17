@@ -130,7 +130,13 @@ class AIAnalyzer:
         output_structure = "\n\n".join(
             f"## {spec.title}" for spec in section_specs
         )
-        user_prompt = f"{user_prompt.rstrip()}\n\n{output_structure}"
+        user_prompt = (
+            f"{user_prompt.rstrip()}\n\n"
+            "必须使用以下 Markdown 二级标题，并在每个标题下填写对应内容。"
+            "标题不得修改、遗漏、重复或新增：\n\n"
+            f"{output_structure}\n\n"
+            "除上述标题及其正文外，不要输出 JSON、代码块、分析过程或其他内容。"
+        )
 
         return system_prompt, user_prompt, section_specs
 
@@ -263,30 +269,12 @@ class AIAnalyzer:
 
         # 调用 AI API
         try:
-            response = self._call_ai(user_prompt)
-            if self._last_ai_call_was_truncated():
-                reason = getattr(self.client, "last_finish_reason", None) or "length"
-                return AIAnalysisResult(
-                    success=False,
-                    error=(
-                        f"AI 输出被截断（finish_reason={reason}），为避免展示不完整内容，本轮不使用该结果。"
-                        "请压缩 AI 分析提示词或换用支持更长输出的模型。"
-                    ),
-                    total_news=total_news,
-                    analyzed_news=analyzed_count,
-                    max_news_limit=self.max_news,
-                )
-
-            # 记录正文分析实际模型
-            used_model = getattr(self.client, "last_model", None) or ""
-
-            result = self._parse_response(response)
+            result = self._generate_and_parse(user_prompt)
 
             # 填充统计数据
             result.total_news = total_news
             result.analyzed_news = analyzed_count
             result.max_news_limit = self.max_news
-            result.model = used_model
             return result
         except Exception as e:
             error_type = type(e).__name__
@@ -406,6 +394,40 @@ class AIAnalyzer:
             return False
         return reason in {"length", "max_tokens", "token_limit"} or "length" in reason or "max_tokens" in reason
 
+    def _generate_and_parse(self, user_prompt: str) -> AIAnalysisResult:
+        """生成并解析分析结果；结构失败或截断时最多重试一次。"""
+        first_error = ""
+        retry_prompt = user_prompt
+        for attempt in range(2):
+            response = self._call_ai(retry_prompt)
+            used_model = getattr(self.client, "last_model", None) or ""
+            if self._last_ai_call_was_truncated():
+                reason = getattr(self.client, "last_finish_reason", None) or "length"
+                result = AIAnalysisResult(
+                    raw_response=response,
+                    error=f"AI 输出被截断（finish_reason={reason}）",
+                    model=used_model,
+                )
+            else:
+                result = self._parse_response(response)
+                result.model = used_model
+
+            if result.success:
+                return result
+            if attempt == 0:
+                first_error = result.error
+                print(f"[AI] 输出校验失败，准备重试一次: {first_error}")
+                retry_prompt = (
+                    f"{user_prompt}\n\n"
+                    f"上一版输出未通过校验：{first_error}\n"
+                    "请重新生成完整简报，确保所有规定板块均有内容，并严格保留规定标题。"
+                )
+                continue
+            result.error = f"首次校验失败：{first_error}；重试仍失败：{result.error}"
+            return result
+
+        raise RuntimeError("AI 分析重试流程异常结束")
+
     def _format_time_range(self, first_time: str, last_time: str) -> str:
         """格式化时间范围（简化显示，只保留时分）"""
         def extract_time(time_str: str) -> str:
@@ -485,7 +507,7 @@ class AIAnalyzer:
         return ""
 
     def _parse_response(self, response: str) -> AIAnalysisResult:
-        """严格解析事件中心 Markdown；JSON、旧标题和变体均失败。"""
+        """解析固定板块；容忍标题层级、空格、冒号和顺序差异。"""
         if not response or not response.strip():
             return AIAnalysisResult(raw_response=response, error="AI 返回空响应")
 
@@ -493,16 +515,15 @@ class AIAnalyzer:
         result = AIAnalysisResult(raw_response=response)
         specs = self.section_specs
         section_specs = {spec.title: spec for spec in specs}
+        titles_pattern = "|".join(map(re.escape, section_specs))
         pattern = re.compile(
-            r"(?m)^## (" + "|".join(map(re.escape, section_specs)) + r")$"
+            rf"(?m)^\s*#{{1,3}}\s*({titles_pattern})\s*[:：]?\s*$"
         )
         matches = list(pattern.finditer(markdown))
         if not matches:
-            result.error = "未识别当前固定 Markdown 标题"
+            result.error = "未识别规定的 Markdown 板块标题"
             return result
 
-        all_h2_titles = re.findall(r"(?m)^##(?!#)(?:\s+)?([^\r\n]*)$", markdown)
-        invalid_titles = [title for title in all_h2_titles if title not in section_specs]
         matched_titles = [match.group(1) for match in matches]
         duplicate_titles = sorted({t for t in matched_titles if matched_titles.count(t) > 1})
         missing_titles = [
@@ -510,24 +531,13 @@ class AIAnalyzer:
             for spec in specs
             if spec.required and spec.title not in matched_titles
         ]
-        expected_titles = [
-            spec.title for spec in specs if spec.title in matched_titles
-        ]
-        wrong_order = not duplicate_titles and matched_titles != expected_titles
-        prefix = markdown[: matches[0].start()].strip()
-        if invalid_titles or duplicate_titles or missing_titles or wrong_order or prefix:
+        if duplicate_titles or missing_titles:
             problems = []
-            if invalid_titles:
-                problems.append(f"未知标题：{'、'.join(invalid_titles)}")
             if duplicate_titles:
                 problems.append(f"重复标题：{'、'.join(duplicate_titles)}")
             if missing_titles:
                 problems.append(f"缺少标题：{'、'.join(missing_titles)}")
-            if wrong_order:
-                problems.append("标题顺序与当前固定结构不一致")
-            if prefix:
-                problems.append("首个固定标题前存在正文")
-            result.error = "Markdown 固定标题校验失败（" + "；".join(problems) + "）"
+            result.error = "Markdown 板块校验失败（" + "；".join(problems) + "）"
             return result
 
         contents: Dict[str, str] = {}
