@@ -7,7 +7,7 @@ AI 分析器模块
 """
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -16,12 +16,31 @@ from trendradar.ai.selector import SelectedNewsCluster, select_ai_news
 
 
 @dataclass
+class AIAnalysisSection:
+    """一个经过契约校验的 AI 分析模块。"""
+    title: str
+    content: str
+    render_style: str = "prose"
+
+
+@dataclass(frozen=True)
+class AISectionSpec:
+    """AI 输出模块的结构与渲染契约。"""
+    title: str
+    required: bool = False
+    content_type: str = "prose"
+    render_style: str = "prose"
+
+
+AI_SECTION_PRESENCE = {"required", "optional"}
+AI_SECTION_CONTENT_TYPES = {"lead_and_events", "bullet_list", "prose"}
+AI_SECTION_RENDER_STYLES = {"numbered_subtitles", "ordered_bullets", "prose"}
+
+
+@dataclass
 class AIAnalysisResult:
     """AI 分析结果"""
-    # 事件中心成品结构
-    key_news: str = ""                   # 重点新闻
-    brief_updates: str = ""              # 简明动态
-    practical_guidance: str = ""         # 实用提示
+    sections: List[AIAnalysisSection] = field(default_factory=list)
 
     # 基础元数据
     raw_response: str = ""               # 原始响应
@@ -72,21 +91,25 @@ class AIAnalyzer:
         self.include_rank_timeline = analysis_config.get("INCLUDE_RANK_TIMELINE", False)
         self.language = analysis_config.get("LANGUAGE", "Chinese")
 
-        # 加载提示词模板
-        self.system_prompt, self.user_prompt_template = self._load_prompt_template(
+        # 加载提示词模板及其输出模块契约
+        (
+            self.system_prompt,
+            self.user_prompt_template,
+            self.section_specs,
+        ) = self._load_prompt_template(
             analysis_config.get("PROMPT_FILE", "ai_analysis_prompt.txt")
         )
 
     def _load_prompt_template(self, prompt_file: str) -> tuple:
-        """加载提示词模板"""
+        """加载提示词模板及文件头中的模块契约。"""
         config_dir = Path(__file__).parent.parent.parent / "config"
         prompt_path = config_dir / prompt_file
 
         if not prompt_path.exists():
-            print(f"[AI] 提示词文件不存在: {prompt_path}")
-            return "", ""
+            raise FileNotFoundError(f"AI 提示词文件不存在: {prompt_path}")
 
         content = prompt_path.read_text(encoding="utf-8")
+        section_specs = self._parse_section_specs(content)
 
         # 解析 [system] 和 [user] 部分
         system_prompt = ""
@@ -106,7 +129,56 @@ class AIAnalyzer:
             # 整个文件作为 user prompt
             user_prompt = content
 
-        return system_prompt, user_prompt
+        template_titles = re.findall(r"(?m)^## ([^\r\n]+)$", user_prompt)
+        spec_titles = [spec.title for spec in section_specs]
+        if template_titles != spec_titles:
+            raise ValueError(
+                "AI 模块契约与提示词二级标题不一致："
+                f"契约={spec_titles}，提示词={template_titles}"
+            )
+
+        return system_prompt, user_prompt, section_specs
+
+    @staticmethod
+    def _parse_section_specs(content: str) -> tuple:
+        """从提示词头部读取并校验 `# AI_SECTION:` 模块契约。"""
+        directive_lines = re.findall(r"(?m)^# AI_SECTION:.*$", content)
+        if not directive_lines:
+            raise ValueError("AI 提示词缺少 # AI_SECTION 模块契约")
+
+        pattern = re.compile(
+            r"^# AI_SECTION:\s*([^|]+)\|([^|]+)\|([^|]+)\|([^|]+)\s*$"
+        )
+        specs = []
+        for line in directive_lines:
+            match = pattern.match(line)
+            if not match:
+                raise ValueError(f"AI 模块契约格式错误：{line}")
+            title, presence, content_type, render_style = (
+                value.strip() for value in match.groups()
+            )
+            if presence not in AI_SECTION_PRESENCE:
+                raise ValueError(f"AI 模块 {title} 的必选性无效：{presence}")
+            if content_type not in AI_SECTION_CONTENT_TYPES:
+                raise ValueError(f"AI 模块 {title} 的内容类型无效：{content_type}")
+            if render_style not in AI_SECTION_RENDER_STYLES:
+                raise ValueError(f"AI 模块 {title} 的渲染样式无效：{render_style}")
+            specs.append(
+                AISectionSpec(
+                    title=title,
+                    required=presence == "required",
+                    content_type=content_type,
+                    render_style=render_style,
+                )
+            )
+
+        titles = [spec.title for spec in specs]
+        duplicate_titles = sorted({title for title in titles if titles.count(title) > 1})
+        if duplicate_titles:
+            raise ValueError(f"AI 模块契约包含重复标题：{'、'.join(duplicate_titles)}")
+        if not any(spec.required for spec in specs):
+            raise ValueError("AI 模块契约至少需要一个必选模块")
+        return tuple(specs)
 
     def analyze(
         self,
@@ -395,6 +467,33 @@ class AIAnalyzer:
             r"(?im)^\s*```(?:markdown|md|text)?\s*$", "", response or ""
         ).strip()
 
+    @staticmethod
+    def _validate_lead_and_events(title: str, content: str) -> str:
+        """校验“单句总领 + 三级事件标题 + 事件正文”模块。"""
+        subtitles = list(re.finditer(r"(?m)^### ([^\r\n]+)$", content))
+        if not subtitles:
+            return f"{title}必须至少包含一个严格的三级事件标题"
+        subtitle_names = [match.group(1) for match in subtitles]
+        if len(set(subtitle_names)) != len(subtitle_names):
+            return f"{title}包含重复的三级事件标题"
+        lead = content[:subtitles[0].start()].strip()
+        if not lead:
+            return f"{title}必须在首个事件标题前包含一句总领"
+        if "\n" in lead or re.match(r"^(?:[-*]|\d+[.、])\s+", lead):
+            return f"{title}总领必须是单独一个自然段"
+        sentence_ends = re.findall(r"[。！？]", lead)
+        if len(sentence_ends) != 1 or not re.search(r"[。！？][”’」』】]?$", lead):
+            return f"{title}总领必须只写一句话并以句号、问号或感叹号结尾"
+        for index, subtitle in enumerate(subtitles):
+            end = (
+                subtitles[index + 1].start()
+                if index + 1 < len(subtitles)
+                else len(content)
+            )
+            if not content[subtitle.end():end].strip():
+                return f"{title}事件缺少正文：{subtitle.group(1)}"
+        return ""
+
     def _parse_response(self, response: str) -> AIAnalysisResult:
         """严格解析事件中心 Markdown；JSON、旧标题和变体均失败。"""
         if not response or not response.strip():
@@ -402,13 +501,10 @@ class AIAnalyzer:
 
         markdown = self._strip_markdown_fences(response)
         result = AIAnalysisResult(raw_response=response)
-        section_fields = {
-            "重点新闻": "key_news",
-            "简明动态": "brief_updates",
-            "实用提示": "practical_guidance",
-        }
+        specs = self.section_specs
+        section_specs = {spec.title: spec for spec in specs}
         pattern = re.compile(
-            r"(?m)^## (" + "|".join(map(re.escape, section_fields)) + r")$"
+            r"(?m)^## (" + "|".join(map(re.escape, section_specs)) + r")$"
         )
         matches = list(pattern.finditer(markdown))
         if not matches:
@@ -416,11 +512,17 @@ class AIAnalyzer:
             return result
 
         all_h2_titles = re.findall(r"(?m)^##(?!#)(?:\s+)?([^\r\n]*)$", markdown)
-        invalid_titles = [title for title in all_h2_titles if title not in section_fields]
+        invalid_titles = [title for title in all_h2_titles if title not in section_specs]
         matched_titles = [match.group(1) for match in matches]
         duplicate_titles = sorted({t for t in matched_titles if matched_titles.count(t) > 1})
-        missing_titles = ["重点新闻"] if "重点新闻" not in matched_titles else []
-        expected_titles = [t for t in section_fields if t in matched_titles]
+        missing_titles = [
+            spec.title
+            for spec in specs
+            if spec.required and spec.title not in matched_titles
+        ]
+        expected_titles = [
+            spec.title for spec in specs if spec.title in matched_titles
+        ]
         wrong_order = not duplicate_titles and matched_titles != expected_titles
         prefix = markdown[: matches[0].start()].strip()
         if invalid_titles or duplicate_titles or missing_titles or wrong_order or prefix:
@@ -448,43 +550,30 @@ class AIAnalyzer:
                 return result
             contents[title] = content
 
-        key_news = contents.get("重点新闻", "")
-        subtitles = list(re.finditer(r"(?m)^### ([^\r\n]+)$", key_news))
-        if not subtitles:
-            result.error = "重点新闻必须至少包含一个严格的三级事件标题"
-            return result
-        subtitle_names = [m.group(1) for m in subtitles]
-        if len(set(subtitle_names)) != len(subtitle_names):
-            result.error = "重点新闻包含重复的三级事件标题"
-            return result
-        lead = key_news[:subtitles[0].start()].strip()
-        if not lead:
-            result.error = "重点新闻必须在首个事件标题前包含一句总领"
-            return result
-        if "\n" in lead or re.match(r"^(?:[-*]|\d+[.、])\s+", lead):
-            result.error = "重点新闻总领必须是单独一个自然段"
-            return result
-        sentence_ends = re.findall(r"[。！？]", lead)
-        if len(sentence_ends) != 1 or not re.search(r"[。！？][”’」』】]?$", lead):
-            result.error = "重点新闻总领必须只写一句话并以句号、问号或感叹号结尾"
-            return result
-        for index, subtitle in enumerate(subtitles):
-            end = subtitles[index + 1].start() if index + 1 < len(subtitles) else len(key_news)
-            if not key_news[subtitle.end():end].strip():
-                result.error = f"重点新闻事件缺少正文：{subtitle.group(1)}"
-                return result
-
-        for title in ("简明动态", "实用提示"):
-            content = contents.get(title, "")
-            if content and any(
+        for spec in specs:
+            content = contents.get(spec.title, "")
+            if not content:
+                continue
+            if spec.content_type == "lead_and_events":
+                validation_error = self._validate_lead_and_events(spec.title, content)
+                if validation_error:
+                    result.error = validation_error
+                    return result
+            elif spec.content_type == "bullet_list" and any(
                 line.strip() and not re.match(r"^-\s+\S", line.strip())
                 for line in content.splitlines()
             ):
-                result.error = f"{title}必须只包含无序列表项"
+                result.error = f"{spec.title}必须只包含无序列表项"
                 return result
 
-        result.key_news = key_news
-        result.brief_updates = contents.get("简明动态", "")
-        result.practical_guidance = contents.get("实用提示", "")
+        result.sections = [
+            AIAnalysisSection(
+                title=spec.title,
+                content=contents[spec.title],
+                render_style=spec.render_style,
+            )
+            for spec in specs
+            if spec.title in contents
+        ]
         result.success = True
         return result
