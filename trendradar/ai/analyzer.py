@@ -20,7 +20,7 @@ class AIAnalysisSection:
     """一个经过契约校验的 AI 分析模块。"""
     title: str
     content: str
-    render_style: str = "prose"
+    format_type: str = "prose"
 
 
 @dataclass(frozen=True)
@@ -28,13 +28,11 @@ class AISectionSpec:
     """AI 输出模块的结构与渲染契约。"""
     title: str
     required: bool = False
-    content_type: str = "prose"
-    render_style: str = "prose"
+    format_type: str = "prose"
 
 
 AI_SECTION_PRESENCE = {"required", "optional"}
-AI_SECTION_CONTENT_TYPES = {"lead_and_events", "bullet_list", "prose"}
-AI_SECTION_RENDER_STYLES = {"numbered_subtitles", "ordered_bullets", "prose"}
+AI_SECTION_FORMATS = {"events", "bullets", "prose"}
 
 
 @dataclass
@@ -129,13 +127,10 @@ class AIAnalyzer:
             # 整个文件作为 user prompt
             user_prompt = content
 
-        template_titles = re.findall(r"(?m)^## ([^\r\n]+)$", user_prompt)
-        spec_titles = [spec.title for spec in section_specs]
-        if template_titles != spec_titles:
-            raise ValueError(
-                "AI 模块契约与提示词二级标题不一致："
-                f"契约={spec_titles}，提示词={template_titles}"
-            )
+        output_structure = "\n\n".join(
+            f"## {spec.title}" for spec in section_specs
+        )
+        user_prompt = f"{user_prompt.rstrip()}\n\n{output_structure}"
 
         return system_prompt, user_prompt, section_specs
 
@@ -146,29 +141,24 @@ class AIAnalyzer:
         if not directive_lines:
             raise ValueError("AI 提示词缺少 # AI_SECTION 模块契约")
 
-        pattern = re.compile(
-            r"^# AI_SECTION:\s*([^|]+)\|([^|]+)\|([^|]+)\|([^|]+)\s*$"
-        )
+        pattern = re.compile(r"^# AI_SECTION:\s*([^|]+)\|([^|]+)\|([^|]+)\s*$")
         specs = []
         for line in directive_lines:
             match = pattern.match(line)
             if not match:
                 raise ValueError(f"AI 模块契约格式错误：{line}")
-            title, presence, content_type, render_style = (
+            title, presence, format_type = (
                 value.strip() for value in match.groups()
             )
             if presence not in AI_SECTION_PRESENCE:
                 raise ValueError(f"AI 模块 {title} 的必选性无效：{presence}")
-            if content_type not in AI_SECTION_CONTENT_TYPES:
-                raise ValueError(f"AI 模块 {title} 的内容类型无效：{content_type}")
-            if render_style not in AI_SECTION_RENDER_STYLES:
-                raise ValueError(f"AI 模块 {title} 的渲染样式无效：{render_style}")
+            if format_type not in AI_SECTION_FORMATS:
+                raise ValueError(f"AI 模块 {title} 的格式无效：{format_type}")
             specs.append(
                 AISectionSpec(
                     title=title,
                     required=presence == "required",
-                    content_type=content_type,
-                    render_style=render_style,
+                    format_type=format_type,
                 )
             )
 
@@ -468,7 +458,7 @@ class AIAnalyzer:
         ).strip()
 
     @staticmethod
-    def _validate_lead_and_events(title: str, content: str) -> str:
+    def _validate_events(title: str, content: str) -> str:
         """校验“单句总领 + 三级事件标题 + 事件正文”模块。"""
         subtitles = list(re.finditer(r"(?m)^### ([^\r\n]+)$", content))
         if not subtitles:
@@ -554,12 +544,12 @@ class AIAnalyzer:
             content = contents.get(spec.title, "")
             if not content:
                 continue
-            if spec.content_type == "lead_and_events":
-                validation_error = self._validate_lead_and_events(spec.title, content)
+            if spec.format_type == "events":
+                validation_error = self._validate_events(spec.title, content)
                 if validation_error:
                     result.error = validation_error
                     return result
-            elif spec.content_type == "bullet_list" and any(
+            elif spec.format_type == "bullets" and any(
                 line.strip() and not re.match(r"^-\s+\S", line.strip())
                 for line in content.splitlines()
             ):
@@ -570,7 +560,7 @@ class AIAnalyzer:
             AIAnalysisSection(
                 title=spec.title,
                 content=contents[spec.title],
-                render_style=spec.render_style,
+                format_type=spec.format_type,
             )
             for spec in specs
             if spec.title in contents

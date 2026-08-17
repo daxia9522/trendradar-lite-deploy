@@ -42,7 +42,6 @@ def _render_markdown_fragment(
     use_subtitle_numbers = number_subtitles and subtitle_count >= 2
     use_ordered_bullets = order_bullets_when_multiple and bullet_count >= 2
     subtitle_index = 0
-    ordered_item_index = 0
     parts = ['<div class="ai-markdown">']
     list_type = None
     def close_list():
@@ -64,19 +63,15 @@ def _render_markdown_fragment(
                 subtitle_text = f"{subtitle_index}. {subtitle_text}"
             parts.append(f'<div class="ai-subtitle">{_inline_markdown_to_html(subtitle_text)}</div>')
             continue
-        ordered = re.match(r"^\d+[.、]\s*(.+)$", line)
+        ordered = re.match(r"^(\d+)[.、]\s*(.+)$", line)
         if ordered:
             if list_type != "ol":
                 close_list()
-                start_attr = (
-                    f' start="{ordered_item_index + 1}"'
-                    if ordered_item_index
-                    else ""
-                )
+                start = int(ordered.group(1))
+                start_attr = f' start="{start}"' if start != 1 else ""
                 parts.append(f"<ol{start_attr}>")
                 list_type = "ol"
-            parts.append(f"<li>{_inline_markdown_to_html(ordered.group(1))}</li>")
-            ordered_item_index += 1
+            parts.append(f"<li>{_inline_markdown_to_html(ordered.group(2))}</li>")
             continue
         bullet = re.match(r"^[-*]\s+(.+)$", line)
         if bullet:
@@ -117,8 +112,8 @@ def render_ai_analysis_html_rich(result: AIAnalysisResult) -> str:
     for section in result.sections:
         content_html = _render_markdown_fragment(
             section.content,
-            number_subtitles=section.render_style == "numbered_subtitles",
-            order_bullets_when_multiple=section.render_style == "ordered_bullets",
+            number_subtitles=section.format_type == "events",
+            order_bullets_when_multiple=section.format_type == "bullets",
         )
         ai_html += f"""
                     <div class="ai-block">

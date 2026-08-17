@@ -63,8 +63,8 @@ class AISectionContractTests(unittest.TestCase):
                 self.assertTrue(result.error)
 
     def test_titles_can_change_without_python_field_mapping(self):
-        contract = """# AI_SECTION: 今日核心态势|required|lead_and_events|numbered_subtitles
-# AI_SECTION: 全天变化|optional|bullet_list|ordered_bullets
+        contract = """# AI_SECTION: 今日核心态势|required|events
+# AI_SECTION: 全天变化|optional|bullets
 """
         analyzer = object.__new__(AIAnalyzer)
         analyzer.section_specs = analyzer._parse_section_specs(contract)
@@ -80,50 +80,49 @@ class AISectionContractTests(unittest.TestCase):
     def test_contract_rejects_typos_and_duplicate_titles(self):
         bad_contracts = (
             "没有模块契约",
-            "# AI_SECTION: 主模块|required|prose",
-            "# AI_SECTION: 主模块|requried|prose|prose",
-            "# AI_SECTION: 主模块|required|unknown|prose",
-            "# AI_SECTION: 主模块|required|prose|unknown",
-            "# AI_SECTION: 主模块|required|prose|prose\n# AI_SECTION: 主模块|optional|prose|prose",
+            "# AI_SECTION: 主模块|required",
+            "# AI_SECTION: 主模块|requried|prose",
+            "# AI_SECTION: 主模块|required|unknown",
+            "# AI_SECTION: 主模块|required|prose\n# AI_SECTION: 主模块|optional|prose",
         )
         for contract in bad_contracts:
             with self.subTest(contract=contract):
                 with self.assertRaises(ValueError):
                     AIAnalyzer._parse_section_specs(contract)
 
-    def test_prompt_headings_must_match_contract(self):
-        prompt = """# AI_SECTION: 契约标题|required|prose|prose
+    def test_prompt_headings_are_generated_from_contract(self):
+        prompt = """# AI_SECTION: 契约标题|required|prose
 [system]
 系统提示
 [user]
-## 实际标题
-正文
+正文要求
 """
         with patch.object(Path, "exists", return_value=True), patch.object(
             Path, "read_text", return_value=prompt
         ):
-            with self.assertRaisesRegex(ValueError, "模块契约与提示词二级标题不一致"):
-                self.analyzer._load_prompt_template("unused.txt")
+            _, user_prompt, specs = self.analyzer._load_prompt_template("unused.txt")
+        self.assertEqual([spec.title for spec in specs], ["契约标题"])
+        self.assertTrue(user_prompt.endswith("## 契约标题"))
 
     def test_generic_prose_contract_does_not_require_lead_module(self):
         analyzer = object.__new__(AIAnalyzer)
         analyzer.section_specs = analyzer._parse_section_specs(
-            "# AI_SECTION: 摘要|required|prose|prose"
+            "# AI_SECTION: 摘要|required|prose"
         )
         result = analyzer._parse_response("## 摘要\n这是普通段落。")
         self.assertTrue(result.success, result.error)
 
-    def test_ordered_points_continue_numbering_across_explanatory_paragraphs(self):
+    def test_ordered_points_preserve_explicit_start_across_paragraphs(self):
         response = VALID_CURRENT_RESPONSE.replace(
             "AI 资本投入趋于审慎，资金与产业关注点正在重新分布。",
-            "1. **第一条主线。**\n\n第一条说明。\n\n1. **第二条主线。**\n\n第二条说明。",
+            "1. **第一条主线。**\n\n第一条说明。\n\n5. **第五条主线。**\n\n第五条说明。",
         )
         result = self.analyzer._parse_response(response)
         self.assertTrue(result.success, result.error)
         html = render_ai_analysis_html_rich(result)
         self.assertIn("<ol><li><strong>第一条主线。</strong></li></ol>", html)
         self.assertIn(
-            '<ol start="2"><li><strong>第二条主线。</strong></li></ol>',
+            '<ol start="5"><li><strong>第五条主线。</strong></li></ol>',
             html,
         )
 
