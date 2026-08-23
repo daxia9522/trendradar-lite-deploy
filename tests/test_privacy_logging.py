@@ -7,10 +7,44 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from trendradar.notification.senders import send_to_email
+from trendradar.report.helpers import safe_report_url
 from trendradar.storage import remote as remote_storage
 
 
 class PrivacyLoggingTests(unittest.TestCase):
+    def test_email_rejects_empty_or_invalid_recipients(self):
+        self.assertFalse(send_to_email("sender@example.invalid", "password", "", "daily", "missing.html"))
+        self.assertFalse(send_to_email("sender@example.invalid", "password", "bad-address", "daily", "missing.html"))
+
+    def test_email_passes_explicit_envelope_recipients(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report = Path(temp_dir) / "report.html"
+            report.write_text("<html>report</html>", encoding="utf-8")
+            smtp = Mock()
+
+            with patch("trendradar.notification.senders.smtplib.SMTP_SSL", return_value=smtp):
+                sent = send_to_email(
+                    "sender@example.invalid",
+                    "test-password",
+                    "one@example.invalid, two@example.invalid",
+                    "daily",
+                    str(report),
+                    custom_smtp_server="smtp.example.invalid",
+                    custom_smtp_port=465,
+                )
+
+        self.assertTrue(sent)
+        self.assertEqual(
+            smtp.send_message.call_args.kwargs["to_addrs"],
+            ["one@example.invalid", "two@example.invalid"],
+        )
+
+    def test_report_url_allows_http_https_only(self):
+        self.assertEqual(safe_report_url(" https://example.com/a?x=1 "), "https://example.com/a?x=1")
+        self.assertEqual(safe_report_url("http://example.com"), "http://example.com")
+        self.assertIsNone(safe_report_url("javascript:alert(1)"))
+        self.assertIsNone(safe_report_url("//example.com/path"))
+
     def test_email_success_log_omits_addresses_and_server(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             report = Path(temp_dir) / "report.html"

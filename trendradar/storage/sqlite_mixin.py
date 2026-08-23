@@ -469,6 +469,24 @@ class SQLiteStorageMixin:
             print(f"[存储] 读取数据失败: {e}")
             return None
 
+    def _get_all_news_ids_impl(self, date: Optional[str] = None) -> List[Dict]:
+        """Return every news row ID and title for one date."""
+        try:
+            rows = self._get_connection(date).execute(
+                "SELECT id, title FROM news_items ORDER BY id"
+            ).fetchall()
+            return [{"id": row[0], "title": row[1]} for row in rows]
+        except Exception as e: print(f"[存储] 读取新闻 ID 失败: {e}"); return []
+
+    def _get_all_rss_ids_impl(self, date: Optional[str] = None) -> List[Dict]:
+        """Return every RSS row ID and title for one date."""
+        try:
+            rows = self._get_connection(date, db_type="rss").execute(
+                "SELECT id, title FROM rss_items ORDER BY id"
+            ).fetchall()
+            return [{"id": row[0], "title": row[1]} for row in rows]
+        except Exception as e: print(f"[存储] 读取 RSS ID 失败: {e}"); return []
+
     def _get_latest_crawl_data_impl(self, date: Optional[str] = None) -> Optional[NewsData]:
         """
         获取最新一次抓取的数据

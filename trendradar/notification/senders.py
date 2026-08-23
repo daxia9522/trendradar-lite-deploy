@@ -3,6 +3,7 @@
 
 import smtplib
 import ssl
+import re
 from datetime import datetime
 from email.header import Header
 from email.mime.multipart import MIMEMultipart
@@ -29,6 +30,8 @@ SMTP_CONFIGS = {
     "vip.163.com": {"server": "smtp.vip.163.com", "port": 465, "encryption": "SSL"},
 }
 
+_EMAIL_RE = re.compile(r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$")
+
 
 def send_to_email(
     from_email: str,
@@ -45,6 +48,15 @@ def send_to_email(
 ) -> bool:
     """发送 HTML 报告邮件。"""
     try:
+        if not _EMAIL_RE.fullmatch(from_email.strip()):
+            print("错误：发件人地址无效")
+            return False
+
+        recipients = [addr.strip() for addr in to_email.split(",") if addr.strip()]
+        if not recipients or any(not _EMAIL_RE.fullmatch(addr) for addr in recipients):
+            print("错误：收件人地址无效或为空")
+            return False
+
         if not html_file_path or not Path(html_file_path).exists():
             print("错误：HTML 文件不存在或未提供")
             return False
@@ -75,7 +87,6 @@ def send_to_email(
         sender_name = sender_name_override or "TrendRadar"
         msg["From"] = formataddr((sender_name, from_email))
 
-        recipients = [addr.strip() for addr in to_email.split(",") if addr.strip()]
         msg["To"] = recipients[0] if len(recipients) == 1 else ", ".join(recipients)
 
         now = get_time_func() if get_time_func else datetime.now()
@@ -117,7 +128,7 @@ def send_to_email(
             server.ehlo()
 
         server.login(from_email, password)
-        server.send_message(msg)
+        server.send_message(msg, from_addr=from_email, to_addrs=recipients)
         server.quit()
         print(f"邮件发送成功 [{report_type}]")
         return True

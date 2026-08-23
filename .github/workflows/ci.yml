@@ -28,7 +28,7 @@ jobs:
       - name: Check CLI
         run: python -m trendradar --help
       - name: Check shell scripts
-        run: bash -n deploy/linux/*.sh
+        run: bash -n install.sh deploy/linux/*.sh deploy/docker/*.sh
 
   container:
     runs-on: ubuntu-latest

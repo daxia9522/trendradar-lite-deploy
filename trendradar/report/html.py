@@ -9,7 +9,7 @@ import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Callable
 
-from trendradar.report.helpers import html_escape
+from trendradar.report.helpers import html_escape, safe_report_url
 from trendradar.utils.time import convert_time_for_display
 from trendradar.ai.formatter import render_ai_analysis_html_rich
 
@@ -134,7 +134,7 @@ def _render_report_body(
                 escaped_title = html_escape(title_data["title"])
                 link_url = title_data.get("mobile_url") or title_data.get("url", "")
 
-                if link_url:
+                if safe_report_url(link_url):
                     escaped_url = html_escape(link_url)
                     stats_html += f'<a href="{escaped_url}" target="_blank" class="news-link">{escaped_title}</a>'
                 else:
@@ -204,7 +204,7 @@ def _render_report_body(
                 escaped_title = html_escape(title_data["title"])
                 link_url = title_data.get("mobile_url") or title_data.get("url", "")
 
-                if link_url:
+                if safe_report_url(link_url):
                     escaped_url = html_escape(link_url)
                     new_titles_html += f'<a href="{escaped_url}" target="_blank" class="news-link">{escaped_title}</a>'
                 else:
@@ -306,7 +306,7 @@ def _render_report_body(
                             <div class="rss-title">"""
 
                 escaped_title = html_escape(item_title)
-                if url:
+                if safe_report_url(url):
                     escaped_url = html_escape(url)
                     rss_html += f'<a href="{escaped_url}" target="_blank" class="rss-link">{escaped_title}</a>'
                 else:
@@ -472,7 +472,7 @@ def _render_report_body(
 
                 # 标题和链接（复用 news-link 样式）
                 escaped_title = html_escape(title)
-                if url:
+                if safe_report_url(url):
                     escaped_url = html_escape(url)
                     standalone_html += f'<a href="{escaped_url}" target="_blank" class="news-link">{escaped_title}</a>'
                 else:
@@ -536,7 +536,7 @@ def _render_report_body(
                                 <div class="news-title">"""
 
                 escaped_title = html_escape(title)
-                if url:
+                if safe_report_url(url):
                     escaped_url = html_escape(url)
                     standalone_html += f'<a href="{escaped_url}" target="_blank" class="news-link">{escaped_title}</a>'
                 else:

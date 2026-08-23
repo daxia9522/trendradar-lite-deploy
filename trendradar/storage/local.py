@@ -247,9 +247,13 @@ class LocalStorageBackend(SQLiteStorageMixin, StorageBackend):
 
 
     def get_all_news_ids(self, date=None):
+        if not self._get_db_path(date, "news").exists():
+            return []
         return self._get_all_news_ids_impl(date)
 
     def get_all_rss_ids(self, date=None):
+        if not self._get_db_path(date, "rss").exists():
+            return []
         return self._get_all_rss_ids_impl(date)
 
     # ========================================

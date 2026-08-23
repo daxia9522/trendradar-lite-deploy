@@ -631,43 +631,31 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
             return 0
 
         deleted_count = 0
-        cutoff_date = self._get_configured_time() - timedelta(days=retention_days)
+        cutoff_date = (self._get_configured_time() - timedelta(days=retention_days)).date()
 
         try:
-            # 列出远程存储中 news/ 前缀下的所有对象
             paginator = self.s3_client.get_paginator('list_objects_v2')
-            pages = paginator.paginate(Bucket=self.bucket_name, Prefix="news/")
-
-            # 收集需要删除的对象键
             objects_to_delete = []
-            deleted_dates = set()
-
-            for page in pages:
-                if 'Contents' not in page:
-                    continue
-
-                for obj in page['Contents']:
-                    key = obj['Key']
-
-                    # 解析日期（格式: news/YYYY-MM-DD.db）
-                    folder_date = None
-                    date_str = None
-                    try:
-                        date_match = re.match(r'news/(\d{4})-(\d{2})-(\d{2})\.db$', key)
-                        if date_match:
-                            folder_date = datetime(
-                                int(date_match.group(1)),
-                                int(date_match.group(2)),
-                                int(date_match.group(3)),
-                                tzinfo=pytz.timezone(self.timezone)
-                            )
-                            date_str = f"{date_match.group(1)}-{date_match.group(2)}-{date_match.group(3)}"
-                    except Exception:
-                        continue
-
-                    if folder_date and folder_date < cutoff_date:
-                        objects_to_delete.append({'Key': key})
-                        deleted_dates.add(date_str)
+            for db_type in ("news", "rss"):
+                pages = paginator.paginate(
+                    Bucket=self.bucket_name,
+                    Prefix=f"{db_type}/",
+                )
+                pattern = re.compile(rf'{db_type}/(\d{{4}}-\d{{2}}-\d{{2}})\.db$')
+                for page in pages:
+                    for obj in page.get('Contents', []):
+                        key = obj['Key']
+                        date_match = pattern.fullmatch(key)
+                        if not date_match:
+                            continue
+                        try:
+                            object_date = datetime.strptime(
+                                date_match.group(1), "%Y-%m-%d"
+                            ).date()
+                        except ValueError:
+                            continue
+                        if object_date < cutoff_date:
+                            objects_to_delete.append({'Key': key})
 
             # 批量删除对象（每次最多 1000 个）
             if objects_to_delete:
@@ -675,19 +663,17 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
                 for i in range(0, len(objects_to_delete), batch_size):
                     batch = objects_to_delete[i:i + batch_size]
                     try:
-                        self.s3_client.delete_objects(
+                        response = self.s3_client.delete_objects(
                             Bucket=self.bucket_name,
                             Delete={'Objects': batch}
                         )
-                        print(f"[远程存储] 删除 {len(batch)} 个对象")
+                        batch_deleted = len(response.get('Deleted', []))
+                        deleted_count += batch_deleted
+                        print(f"[远程存储] 删除 {batch_deleted} 个对象")
                     except Exception as e:
                         print(f"[远程存储] 批量删除失败: {e}")
 
-                deleted_count = len(deleted_dates)
-                for date_str in sorted(deleted_dates):
-                    print(f"[远程存储] 清理过期数据: news/{date_str}.db")
-
-                print(f"[远程存储] 共清理 {deleted_count} 个过期日期数据库文件")
+                print(f"[远程存储] 共清理 {deleted_count} 个过期数据库文件")
 
             return deleted_count
 
@@ -736,34 +722,30 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
             date = now - timedelta(days=i)
             date_str = date.strftime("%Y-%m-%d")
 
-            # 本地目标路径
-            local_date_dir = local_dir / date_str
-            local_db_path = local_date_dir / "news.db"
+            for db_type in ("news", "rss"):
+                local_db_path = local_dir / db_type / f"{date_str}.db"
+                if local_db_path.exists():
+                    print(f"[远程存储] 跳过（本地已存在）: {db_type}/{date_str}.db")
+                    continue
 
-            # 如果本地已存在，跳过
-            if local_db_path.exists():
-                print(f"[远程存储] 跳过（本地已存在）: {date_str}")
-                continue
+                remote_key = self._get_remote_db_key(date_str, db_type)
+                if not self._check_object_exists(remote_key):
+                    print(f"[远程存储] 跳过（远程不存在）: {remote_key}")
+                    continue
 
-            # 远程对象键
-            remote_key = f"news/{date_str}.db"
-
-            # 检查远程是否存在
-            if not self._check_object_exists(remote_key):
-                print(f"[远程存储] 跳过（远程不存在）: {date_str}")
-                continue
-
-            # 下载（使用 get_object + iter_chunks 处理 chunked encoding）
-            try:
-                local_date_dir.mkdir(parents=True, exist_ok=True)
-                response = self.s3_client.get_object(Bucket=self.bucket_name, Key=remote_key)
-                with open(local_db_path, 'wb') as f:
-                    for chunk in response['Body'].iter_chunks(chunk_size=1024*1024):
-                        f.write(chunk)
-                print(f"[远程存储] 已拉取: {remote_key} -> {local_db_path}")
-                pulled_count += 1
-            except Exception as e:
-                print(f"[远程存储] 拉取失败 ({date_str}): {e}")
+                partial_path = local_db_path.with_suffix(".db.part")
+                try:
+                    local_db_path.parent.mkdir(parents=True, exist_ok=True)
+                    response = self.s3_client.get_object(Bucket=self.bucket_name, Key=remote_key)
+                    with open(partial_path, 'wb') as f:
+                        for chunk in response['Body'].iter_chunks(chunk_size=1024*1024):
+                            f.write(chunk)
+                    partial_path.replace(local_db_path)
+                    print(f"[远程存储] 已拉取: {remote_key} -> {local_db_path}")
+                    pulled_count += 1
+                except Exception as e:
+                    partial_path.unlink(missing_ok=True)
+                    print(f"[远程存储] 拉取失败 ({remote_key}): {e}")
 
         print(f"[远程存储] 拉取完成，共下载 {pulled_count} 个数据库文件")
         return pulled_count
@@ -775,22 +757,21 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
         Returns:
             日期字符串列表（YYYY-MM-DD 格式）
         """
-        dates = []
+        dates = set()
 
         try:
             paginator = self.s3_client.get_paginator('list_objects_v2')
-            pages = paginator.paginate(Bucket=self.bucket_name, Prefix="news/")
-
-            for page in pages:
-                if 'Contents' not in page:
-                    continue
-
-                for obj in page['Contents']:
-                    key = obj['Key']
-                    # 解析日期
-                    date_match = re.match(r'news/(\d{4}-\d{2}-\d{2})\.db$', key)
-                    if date_match:
-                        dates.append(date_match.group(1))
+            for db_type in ("news", "rss"):
+                pages = paginator.paginate(
+                    Bucket=self.bucket_name,
+                    Prefix=f"{db_type}/",
+                )
+                pattern = re.compile(rf'{db_type}/(\d{{4}}-\d{{2}}-\d{{2}})\.db$')
+                for page in pages:
+                    for obj in page.get('Contents', []):
+                        date_match = pattern.fullmatch(obj['Key'])
+                        if date_match:
+                            dates.add(date_match.group(1))
 
             return sorted(dates, reverse=True)
 
