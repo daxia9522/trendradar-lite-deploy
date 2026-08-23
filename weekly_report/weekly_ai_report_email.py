@@ -24,12 +24,31 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from trendradar.storage.history_reader import HistoryReader
 from trendradar.ai.client import AIClient, build_keyword_client
-from trendradar.core.loader import load_ai_config
+from trendradar.context import AppContext
+from trendradar.core.loader import load_ai_config, load_config
 from trendradar.notification.senders import send_to_email
+from trendradar.utils.time import DEFAULT_TIMEZONE
 
 OUTPUT_DIR = PROJECT_ROOT / "output" / "weekly-ai-reports"
 WEEKLY_AI_PROMPT_FILE = PROJECT_ROOT / "config" / "weekly_ai_prompt.txt"
 WEEKLY_KEYWORD_PROMPT_FILE = PROJECT_ROOT / "config" / "weekly_keyword_prompt.txt"
+
+
+def build_report_context() -> AppContext:
+    """Load the same application timezone configuration used by the daily report."""
+    config_path = PROJECT_ROOT / "config" / "config.yaml"
+    try:
+        return AppContext(load_config(str(config_path)))
+    except (FileNotFoundError, OSError, ValueError, TypeError):
+        return AppContext({"TIMEZONE": DEFAULT_TIMEZONE})
+
+
+REPORT_CONTEXT = build_report_context()
+
+
+def report_now() -> datetime:
+    """Return the current time in the report display timezone."""
+    return REPORT_CONTEXT.get_time()
 
 # 周报参数（以后要调直接改这里）
 MAX_NEWS = 240
@@ -245,7 +264,7 @@ def resolve_date_range(start: Optional[str], end: Optional[str]) -> Tuple[dateti
         if start_date > end_date:
             raise SystemExit("--start 不能晚于 --end")
         return start_date, end_date
-    end_date = datetime.now()
+    end_date = report_now().replace(tzinfo=None)
     start_date = end_date - timedelta(days=6)
     return start_date, end_date
 
@@ -1380,7 +1399,7 @@ def render_html(title: str, date_range: str, model_name: str, statistics: Dict[s
         for part in keyword_text.split("/")
         if part.strip()
     )
-    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    generated_at = report_now().strftime("%Y-%m-%d %H:%M:%S")
     # 官方 Gemini 模型名直接展示（如 Gemini-3.5-flash），不再剥离 provider/ 前缀
     display_model_name = (model_name or "").strip() or "-"
     display_model_name = display_model_name[:1].upper() + display_model_name[1:]
@@ -1748,7 +1767,7 @@ def main() -> int:
         )
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    stamp = report_now().strftime("%Y%m%d-%H%M%S")
     dr = f"{start_s} ~ {end_s}"
     base_name = f"weekly-ai-{start_s}-to-{end_s}-{stamp}"
     html_path = OUTPUT_DIR / f"{base_name}.html"
