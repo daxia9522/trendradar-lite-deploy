@@ -116,7 +116,9 @@ class NewsAnalyzer:
 
     def _should_open_browser(self) -> bool:
         """判断是否应该打开浏览器"""
-        return not self.is_github_actions and not self.is_docker_container
+        if self.is_github_actions or self.is_docker_container:
+            return False
+        return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
     def _setup_proxy(self) -> None:
         """设置代理配置"""
@@ -169,6 +171,7 @@ class NewsAnalyzer:
         report_type: str,
         id_to_name: Optional[Dict],
         schedule: ResolvedSchedule = None,
+        standalone_data: Optional[Dict] = None,
     ) -> Optional[AIAnalysisResult]:
         """执行 AI 分析"""
         analysis_config = self.ctx.config.get("AI_ANALYSIS", {})
@@ -223,6 +226,7 @@ class NewsAnalyzer:
                 report_type=report_type,
                 platforms=platforms,
                 keywords=keywords,
+                standalone_data=standalone_data,
             )
 
             if result.success:
@@ -326,7 +330,7 @@ class NewsAnalyzer:
 
         纯数据准备方法，不检查 display.regions.standalone 开关。
         各消费者自行决定是否使用：
-        - AI 分析：只使用关键词命中结果，独立展示区不额外注入 AI
+        - AI 分析：由 ai_analysis.include_standalone 控制是否注入
         - 通知推送：由 display.regions.standalone 控制（在 dispatcher 层门控）
         - HTML 报告：始终包含（如果有数据）
 
@@ -478,6 +482,8 @@ class NewsAnalyzer:
         quiet: bool = False,
         rss_items: Optional[List[Dict]] = None,
         rss_new_items: Optional[List[Dict]] = None,
+        raw_rss_items: Optional[List[Dict]] = None,
+        rss_new_item_list: Optional[List[Dict]] = None,
         standalone_data: Optional[Dict] = None,
         schedule: ResolvedSchedule = None,
     ) -> Tuple[List[Dict], Optional[str]]:
@@ -498,7 +504,7 @@ class NewsAnalyzer:
                 self.ctx.rank_threshold,
             )
 
-        # AI 分析（如果启用，用于 HTML 报告）
+        # AI 主分析与推送共用关键词命中池；独立展示区另行注入且不占主额度。
         ai_result = None
         ai_config = self.ctx.config.get("AI_ANALYSIS", {})
         if ai_config.get("ENABLED", False) and (stats or rss_items):
@@ -506,7 +512,13 @@ class NewsAnalyzer:
             mode_strategy = self._get_mode_strategy()
             report_type = mode_strategy["report_type"]
             ai_result = self._run_ai_analysis(
-                stats, rss_items, mode, report_type, id_to_name, schedule=schedule
+                stats,
+                rss_items,
+                mode,
+                report_type,
+                id_to_name,
+                schedule=schedule,
+                standalone_data=standalone_data,
             )
 
         # HTML生成（如果启用）
@@ -734,30 +746,38 @@ class NewsAnalyzer:
             }
         )
 
-    def _crawl_rss_data(self) -> Tuple[Optional[List[Dict]], Optional[List[Dict]], Optional[List[Dict]]]:
+    def _crawl_rss_data(
+        self,
+    ) -> Tuple[
+        Optional[List[Dict]],
+        Optional[List[Dict]],
+        Optional[List[Dict]],
+        Optional[List[Dict]],
+    ]:
         """
         执行 RSS 数据抓取
 
         Returns:
-            (rss_items, rss_new_items, raw_rss_items) 元组：
+            (rss_items, rss_new_items, raw_rss_items, rss_new_item_list) 元组：
             - rss_items: 统计条目列表（按模式处理，用于统计区块）
             - rss_new_items: 新增条目列表（用于新增区块）
             - raw_rss_items: 原始 RSS 条目列表（用于独立展示区）
-            如果未启用或失败返回 (None, None, None)
+            - rss_new_item_list: 本次新增条目列表（用于 AI 输入标记 is_new）
+            如果未启用或失败返回 (None, None, None, None)
         """
         if not self.ctx.rss_enabled:
-            return None, None, None
+            return None, None, None, None
 
         rss_feeds = self.ctx.rss_feeds
         if not rss_feeds:
             print("[RSS] 未配置任何 RSS 源")
-            return None, None, None
+            return None, None, None, None
 
         try:
             fetcher = self._create_rss_fetcher(rss_feeds)
             if not fetcher.feeds:
                 print("[RSS] 没有启用的 RSS 源")
-                return None, None, None
+                return None, None, None, None
 
             # 抓取数据
             rss_data = fetcher.fetch_all()
@@ -770,17 +790,24 @@ class NewsAnalyzer:
                 return self._process_rss_data_by_mode(rss_data)
             else:
                 print(f"[RSS] 数据保存失败")
-                return None, None, None
+                return None, None, None, None
 
         except ImportError as e:
             print(f"[RSS] 缺少依赖: {e}")
             print("[RSS] 请安装 feedparser: pip install feedparser")
-            return None, None, None
+            return None, None, None, None
         except Exception as e:
             print(f"[RSS] 抓取失败: {e}")
-            return None, None, None
+            return None, None, None, None
 
-    def _process_rss_data_by_mode(self, rss_data) -> Tuple[Optional[List[Dict]], Optional[List[Dict]], Optional[List[Dict]]]:
+    def _process_rss_data_by_mode(
+        self, rss_data
+    ) -> Tuple[
+        Optional[List[Dict]],
+        Optional[List[Dict]],
+        Optional[List[Dict]],
+        Optional[List[Dict]],
+    ]:
         """
         按报告模式处理 RSS 数据，返回与热榜相同格式的统计结构
 
@@ -793,10 +820,11 @@ class NewsAnalyzer:
             rss_data: 当前抓取的 RSSData 对象
 
         Returns:
-            (rss_stats, rss_new_stats, raw_rss_items) 元组：
+            (rss_stats, rss_new_stats, raw_rss_items, new_items_list) 元组：
             - rss_stats: RSS 关键词统计列表（与热榜 stats 格式一致）
             - rss_new_stats: RSS 新增关键词统计列表（与热榜 stats 格式一致）
             - raw_rss_items: 原始 RSS 条目列表（用于独立展示区）
+            - new_items_list: 本次新增 RSS 条目列表（用于 AI 输入标记 is_new）
         """
         from trendradar.core.analyzer import count_rss_frequency
 
@@ -816,6 +844,7 @@ class NewsAnalyzer:
         rss_stats = None
         rss_new_stats = None
         raw_rss_items = None  # 原始 RSS 条目列表（用于独立展示区）
+        new_items_list = None
 
         # 1. 首先获取原始条目（用于独立展示区，不受 display.regions.rss 影响）
         # 根据模式获取原始条目
@@ -832,24 +861,23 @@ class NewsAnalyzer:
             if all_data:
                 raw_rss_items = self._convert_rss_items_to_list(all_data.items, all_data.id_to_name)
 
-        # 如果 RSS 展示未启用，跳过关键词分析，只返回原始条目用于独立展示区
-        if not rss_display_enabled:
-            return None, None, raw_rss_items
-
-        # 2. 获取新增条目（用于统计）
+        # 2. 获取新增条目（用于统计和 AI 输入的新增标记）
         new_items_dict = self.storage_manager.detect_new_rss_items(rss_data)
-        new_items_list = None
         if new_items_dict:
             new_items_list = self._convert_rss_items_to_list(new_items_dict, rss_data.id_to_name)
             if new_items_list:
                 print(f"[RSS] 检测到 {len(new_items_list)} 条新增")
+
+        # 如果 RSS 展示未启用，跳过关键词分析，只返回原始条目用于独立展示区
+        if not rss_display_enabled:
+            return None, None, raw_rss_items, new_items_list
 
         # 3. 根据模式获取统计条目
         if self.report_mode == "incremental":
             # 增量模式：统计条目就是新增条目
             if not new_items_list:
                 print("[RSS] 增量模式：没有新增 RSS 条目")
-                return None, None, raw_rss_items
+                return None, None, raw_rss_items, new_items_list
 
             rss_stats, total = count_rss_frequency(
                 rss_items=new_items_list,
@@ -866,7 +894,7 @@ class NewsAnalyzer:
             if not rss_stats:
                 print("[RSS] 增量模式：关键词匹配后没有内容")
                 # 即使关键词匹配为空，也返回原始条目用于独立展示区
-                return None, None, raw_rss_items
+                return None, None, raw_rss_items, new_items_list
 
         else:
             mode_label = (
@@ -874,7 +902,7 @@ class NewsAnalyzer:
             )
             if not raw_rss_items:
                 print(f"[RSS] {mode_label}：没有 RSS 数据")
-                return None, None, None
+                return None, None, None, None
 
             rss_stats, total = count_rss_frequency(
                 rss_items=raw_rss_items,
@@ -891,7 +919,7 @@ class NewsAnalyzer:
             if not rss_stats:
                 print(f"[RSS] {mode_label}：关键词匹配后没有内容")
                 # 即使关键词匹配为空，也返回原始条目用于独立展示区
-                return None, None, raw_rss_items
+                return None, None, raw_rss_items, new_items_list
 
             # 生成新增统计
             if new_items_list:
@@ -908,7 +936,7 @@ class NewsAnalyzer:
                     quiet=True,
                 )
 
-        return rss_stats, rss_new_stats, raw_rss_items
+        return rss_stats, rss_new_stats, raw_rss_items, new_items_list
 
     def _convert_rss_items_to_list(self, items_dict: Dict, id_to_name: Dict) -> List[Dict]:
         """将 RSS 条目字典转换为列表格式，并应用新鲜度过滤（用于推送）"""
@@ -1021,11 +1049,49 @@ class NewsAnalyzer:
         title_info = self._prepare_current_title_info(results, time_info)
         return results, id_to_name, title_info, new_titles
 
+    def _run_ai_filter_shadow(
+        self,
+        *,
+        results: Dict,
+        id_to_name: Dict,
+        title_info: Dict,
+        raw_rss_items: Optional[List[Dict]],
+        word_groups: List[Dict],
+        filter_words: List,
+        global_filters: List[str],
+    ) -> None:
+        """运行个人兴趣影子筛选；任何失败都不得影响现有流水线。"""
+        shadow_config = self.ctx.config.get("AI_FILTER_SHADOW", {})
+        if not shadow_config.get("ENABLED", False):
+            return
+        try:
+            from trendradar.ai.shadow_filter import ShadowInterestFilter
+
+            ShadowInterestFilter(self.ctx.config, self.ctx.get_time).run(
+                results=results,
+                id_to_name=id_to_name,
+                title_info=title_info,
+                raw_rss_items=raw_rss_items,
+                word_groups=word_groups,
+                filter_words=filter_words,
+                global_filters=global_filters,
+            )
+        except Exception as exc:
+            print(
+                "[AI影子筛选] 运行失败，不影响推送: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            if self.ctx.config.get("DEBUG", False):
+                import traceback
+
+                traceback.print_exc()
+
     def _execute_mode_strategy(
         self, results: Dict, id_to_name: Dict, failed_ids: List,
         rss_items: Optional[List[Dict]] = None,
         rss_new_items: Optional[List[Dict]] = None,
         raw_rss_items: Optional[List[Dict]] = None,
+        rss_new_item_list: Optional[List[Dict]] = None,
         schedule: ResolvedSchedule = None,
     ) -> Optional[str]:
         """执行模式特定逻辑，支持热榜+RSS合并推送
@@ -1047,6 +1113,15 @@ class NewsAnalyzer:
         results, id_to_name, title_info, new_titles = self._select_mode_data(
             results, id_to_name, new_titles, time_info
         )
+        self._run_ai_filter_shadow(
+            results=results,
+            id_to_name=id_to_name,
+            title_info=title_info,
+            raw_rss_items=raw_rss_items,
+            word_groups=word_groups,
+            filter_words=filter_words,
+            global_filters=global_filters,
+        )
         standalone_data = self._prepare_standalone_data(
             results, id_to_name, title_info, raw_rss_items
         )
@@ -1062,6 +1137,8 @@ class NewsAnalyzer:
             global_filters=global_filters,
             rss_items=rss_items,
             rss_new_items=rss_new_items,
+            raw_rss_items=raw_rss_items,
+            rss_new_item_list=rss_new_item_list,
             standalone_data=standalone_data,
             schedule=schedule,
         )
@@ -1105,14 +1182,15 @@ class NewsAnalyzer:
             # 抓取热榜数据
             results, id_to_name, failed_ids = self._crawl_data()
 
-            # 抓取 RSS 数据（如果启用），返回统计条目、新增条目和原始条目
-            rss_items, rss_new_items, raw_rss_items = self._crawl_rss_data()
+            # 抓取 RSS 数据（如果启用），返回统计、新增统计、原始条目和本次新增条目
+            rss_items, rss_new_items, raw_rss_items, rss_new_item_list = self._crawl_rss_data()
 
             # 执行模式策略，传递 RSS 数据用于合并推送
             self._execute_mode_strategy(
                 results, id_to_name, failed_ids,
                 rss_items=rss_items, rss_new_items=rss_new_items,
                 raw_rss_items=raw_rss_items,
+                rss_new_item_list=rss_new_item_list,
                 schedule=schedule,
             )
 

@@ -1,10 +1,39 @@
 # coding=utf-8
-"""为 AI 分析选择关键词命中的新闻，并按事件保守去重。"""
+"""为 AI 分析选择关键词命中新闻，保守聚类后按事件评分。"""
 
 import re
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+from trendradar.ai.dataflow import is_market_dataflow_title
+
+# 默认单来源软上限；运行时可由 ai_analysis.source_cap_ratio 覆盖。
+SOURCE_CAP_RATIO = 0.30
+EVENT_SIMILARITY_THRESHOLD = 0.90
+
+_EXPLICIT_DATE_RE = re.compile(
+    r"(?:19|20)\d{2}[年/-]\d{1,2}(?:[月/-]\d{1,2}日?)?|\d{1,2}月\d{1,2}日"
+)
+_NUMBER_RE = re.compile(r"\d+(?:\.\d+)?%?")
+_POSITIVE_DIRECTION_RE = re.compile(r"上涨|上升|增长|增加|大涨|转盈|扭亏|回升")
+_NEGATIVE_DIRECTION_RE = re.compile(r"下跌|下降|减少|大跌|转亏|亏损|回落")
+_CONFLICT_TOKEN_RES = (
+    re.compile(r"小组赛|淘汰赛|十六强|八强|四强|半决赛|决赛"),
+    re.compile(r"红色|橙色|黄色|蓝色"),
+    re.compile(r"一审|二审|再审|终审"),
+)
+
+
+def _normalize_source_cap_ratio(value: Any) -> float:
+    """归一化单来源软上限，非法/缺失值回退默认值。"""
+    if value is None:
+        return SOURCE_CAP_RATIO
+    try:
+        ratio = float(value)
+    except (TypeError, ValueError):
+        return SOURCE_CAP_RATIO
+    return max(0.01, min(ratio, 1.0))
 
 
 @dataclass
@@ -17,11 +46,12 @@ class SelectedNewsCluster:
     group_indexes: Set[int] = field(default_factory=set)
     sources: Set[str] = field(default_factory=set)
     score: float = 0.0
+    is_dataflow: bool = False
 
 
 @dataclass
 class AIInputSelection:
-    """关键词命中新闻聚簇后的选择结果。"""
+    """关键词候选新闻聚簇后的选择结果。"""
 
     clusters: List[SelectedNewsCluster]
 
@@ -31,35 +61,80 @@ class AIInputSelection:
 
 
 def _normalize_title(value: object) -> str:
-    text = str(value or "").casefold()
-    # 仅移除明确的日期，保留型号、版本号和类似 15/16 的新闻事实。
-    text = re.sub(r"(?:19|20)\d{2}[年/-]\d{1,2}(?:[月/-]\d{1,2}日?)?", "", text)
-    text = re.sub(r"\d{1,2}月\d{1,2}日", "", text)
-    return re.sub(r"[\W_]+", "", text, flags=re.UNICODE)
+    """只移除标点，保留日期、主体、方向与事实数字。"""
+    return re.sub(r"[\W_]+", "", str(value or "").casefold(), flags=re.UNICODE)
 
 
-def _weighted_title(value: str) -> List[str]:
-    """将数字按更高事实权重展开，供一次相似度计算使用。"""
-    weighted: List[str] = []
-    for char in value:
-        weighted.extend([char] * (4 if char.isdigit() else 1))
-    return weighted
+def _fact_numbers(value: object) -> Set[str]:
+    """提取非年份数字；双方都有数字但完全不同时宁可不合并。"""
+    numbers = set()
+    for token in _NUMBER_RE.findall(str(value or "")):
+        plain = token.rstrip("%")
+        if len(plain) == 4 and plain.isdigit() and 1900 <= int(plain) <= 2099:
+            continue
+        numbers.add(token)
+    return numbers
 
 
-def _similarity(left: str, right: str) -> float:
-    if not left or not right:
-        return 0.0
-    return SequenceMatcher(
-        None,
-        _weighted_title(left),
-        _weighted_title(right),
-        autojunk=False,
-    ).ratio()
+def _has_direction_conflict(left: object, right: object) -> bool:
+    left_text = str(left or "")
+    right_text = str(right or "")
+    left_positive = bool(_POSITIVE_DIRECTION_RE.search(left_text))
+    left_negative = bool(_NEGATIVE_DIRECTION_RE.search(left_text))
+    right_positive = bool(_POSITIVE_DIRECTION_RE.search(right_text))
+    right_negative = bool(_NEGATIVE_DIRECTION_RE.search(right_text))
+    return (left_positive and right_negative) or (left_negative and right_positive)
 
 
-def _same_event(left: str, right: str, threshold: float = 0.82) -> bool:
-    """按一次事实加权相似度判断是否为同一事件。"""
-    return _similarity(left, right) >= threshold
+def _has_category_conflict(left: object, right: object) -> bool:
+    left_text = str(left or "")
+    right_text = str(right or "")
+    for pattern in _CONFLICT_TOKEN_RES:
+        left_tokens = set(pattern.findall(left_text))
+        right_tokens = set(pattern.findall(right_text))
+        if left_tokens and right_tokens and left_tokens.isdisjoint(right_tokens):
+            return True
+    return False
+
+
+def _has_date_conflict(left: object, right: object) -> bool:
+    left_dates = set(_EXPLICIT_DATE_RE.findall(str(left or "")))
+    right_dates = set(_EXPLICIT_DATE_RE.findall(str(right or "")))
+    return bool(left_dates and right_dates and left_dates.isdisjoint(right_dates))
+
+
+def _same_event(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
+    """保守判断两个候选是否是同一事件。
+
+    只接受高相似或长标题包含关系；方向冲突、事实数字完全冲突时拒绝
+    合并。这样会漏掉部分改写幅度大的同一事件，但避免把不同财报、
+    行情口径或伤亡进展误合并。
+    """
+    left_normalized = left["normalized"]
+    right_normalized = right["normalized"]
+    if left_normalized == right_normalized:
+        return True
+    if min(len(left_normalized), len(right_normalized)) < 8:
+        return False
+    if _has_direction_conflict(left["item"].get("title"), right["item"].get("title")):
+        return False
+    if _has_category_conflict(left["item"].get("title"), right["item"].get("title")):
+        return False
+    if _has_date_conflict(left["item"].get("title"), right["item"].get("title")):
+        return False
+
+    left_numbers = _fact_numbers(left["item"].get("title"))
+    right_numbers = _fact_numbers(right["item"].get("title"))
+    if left_numbers and right_numbers and left_numbers.isdisjoint(right_numbers):
+        return False
+
+    shorter, longer = sorted((left_normalized, right_normalized), key=len)
+    if shorter in longer and len(shorter) / len(longer) >= 0.82:
+        return True
+    return (
+        SequenceMatcher(None, left_normalized, right_normalized, autojunk=False).ratio()
+        >= EVENT_SIMILARITY_THRESHOLD
+    )
 
 
 def _rank_values(item: Dict[str, Any]) -> List[int]:
@@ -131,38 +206,39 @@ def _iter_candidates(
     return candidates
 
 
-def _merge_exact(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    buckets: Dict[Tuple[str, str], Dict[str, Any]] = {}
-    for candidate in candidates:
-        key = (candidate["source"].casefold(), candidate["normalized"])
-        existing = buckets.get(key)
-        if existing is None:
-            buckets[key] = candidate
-            continue
-        existing["group_indexes"].update(candidate["group_indexes"])
-        existing["keywords"].update(candidate["keywords"])
-    return list(buckets.values())
-
-
 def _cluster_candidates(candidates: List[Dict[str, Any]]) -> List[SelectedNewsCluster]:
-    """仅与事件簇代表标题比较，避免相似标题的链式误合并。"""
-    candidates = _merge_exact(candidates)
-    candidates.sort(
+    """精确去重后，仅与簇代表标题做保守相似事件聚类。"""
+    unique: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for candidate in candidates:
+        title = str(candidate["item"].get("title", "") or "")
+        if is_market_dataflow_title(title, candidate["source"]):
+            continue
+        key = (candidate["source"].casefold(), candidate["normalized"])
+        existing = unique.get(key)
+        if existing is None:
+            unique[key] = dict(candidate)
+            continue
+        existing["group_indexes"] |= candidate["group_indexes"]
+        existing["keywords"] |= candidate["keywords"]
+
+    prepared = list(unique.values())
+    prepared.sort(
         key=lambda candidate: (_item_score(candidate["item"]), -candidate["order"]),
         reverse=True,
     )
-    clusters: List[Dict[str, Any]] = []
-    for candidate in candidates:
+
+    grouped: List[Dict[str, Any]] = []
+    for candidate in prepared:
         target = next(
             (
                 cluster
-                for cluster in clusters
-                if _same_event(candidate["normalized"], cluster["representative"]["normalized"])
+                for cluster in grouped
+                if _same_event(candidate, cluster["representative"])
             ),
             None,
         )
         if target is None:
-            clusters.append({
+            grouped.append({
                 "representative": candidate,
                 "members": [candidate],
                 "group_indexes": set(candidate["group_indexes"]),
@@ -173,31 +249,26 @@ def _cluster_candidates(candidates: List[Dict[str, Any]]) -> List[SelectedNewsCl
         target["group_indexes"].update(candidate["group_indexes"])
         target["sources"].add(candidate["source"])
 
-    result: List[SelectedNewsCluster] = []
-    for index, cluster in enumerate(clusters):
-        members = cluster["members"]
-        cross_sources = len(cluster["sources"])
-        representative = cluster["representative"]
-        score = max(_item_score(member["item"], cross_sources) for member in members)
-        score += min(max(cross_sources - 1, 0), 5) * 8.0
-        merged_items = []
-        for member in members:
-            merged_item = dict(member["item"])
-            merged_item["_ai_source_kind"] = member["source_kind"]
-            merged_item["_ai_keywords"] = sorted(member["keywords"])
-            merged_items.append(merged_item)
-        representative_item = dict(representative["item"])
-        representative_item["_ai_source_kind"] = representative["source_kind"]
-        representative_item["_ai_keywords"] = sorted(representative["keywords"])
-        result.append(SelectedNewsCluster(
+    clusters: List[SelectedNewsCluster] = []
+    for index, cluster in enumerate(grouped):
+        member_items = []
+        for member in cluster["members"]:
+            item = dict(member["item"])
+            item["_ai_source_kind"] = member["source_kind"]
+            item["_ai_keywords"] = sorted(member["keywords"])
+            member_items.append(item)
+        representative_item = member_items[0]
+        clusters.append(SelectedNewsCluster(
             cluster_index=index,
-            representative_item=representative_item,
-            member_items=merged_items,
-            group_indexes=cluster["group_indexes"],
-            sources=cluster["sources"],
-            score=score,
+            representative_item=dict(representative_item),
+            member_items=member_items,
+            group_indexes=set(cluster["group_indexes"]),
+            sources=set(cluster["sources"]),
+            # 保持当前基础评分，不恢复旧版重复叠加的跨来源奖励。
+            score=max(_item_score(member["item"]) for member in cluster["members"]),
+            is_dataflow=False,
         ))
-    return result
+    return clusters
 
 
 def _cluster_sort_key(cluster: SelectedNewsCluster) -> Tuple:
@@ -210,19 +281,87 @@ def _cluster_sort_key(cluster: SelectedNewsCluster) -> Tuple:
     )
 
 
+def _select_with_quota(
+    clusters: List[SelectedNewsCluster],
+    total_limit: int,
+    source_cap_ratio: float = SOURCE_CAP_RATIO,
+) -> List[SelectedNewsCluster]:
+    """按事件分数与单来源软上限分配关键词候选名额。
+
+    行情/数据播报不分配名额。分配顺序：
+    1. 按 score 竞争，但受单来源软上限约束；
+    2. 仍有空额时放开单来源约束补齐，避免浪费上限。
+    """
+    if total_limit <= 0 or not clusters:
+        return []
+
+    source_cap_ratio = _normalize_source_cap_ratio(source_cap_ratio)
+    source_cap = max(1, int(total_limit * source_cap_ratio))
+
+    # 行情流已在聚簇前排除；这里保留过滤以兼容直接构造的测试簇。
+    narrative = [cluster for cluster in clusters if not cluster.is_dataflow]
+
+    selected: List[SelectedNewsCluster] = []
+    taken: Set[int] = set()
+    source_used: Dict[str, int] = {}
+
+    def primary_source(cluster: SelectedNewsCluster) -> str:
+        return sorted(cluster.sources)[0] if cluster.sources else ""
+
+    def take(cluster: SelectedNewsCluster, respect_source_cap: bool = True) -> bool:
+        key = id(cluster)
+        if key in taken or len(selected) >= total_limit:
+            return False
+        source = primary_source(cluster)
+        if respect_source_cap and source_used.get(source, 0) >= source_cap:
+            return False
+        taken.add(key)
+        selected.append(cluster)
+        source_used[source] = source_used.get(source, 0) + 1
+        return True
+
+    # 1. 全局按 score 竞争，同时限制单一来源占比。
+    for cluster in narrative:
+        if len(selected) >= total_limit:
+            break
+        take(cluster)
+
+    # 2. 补齐：来源不足时放开软上限（仍不引入行情流）。
+    if len(selected) < total_limit:
+        for cluster in narrative:
+            if len(selected) >= total_limit:
+                break
+            take(cluster, respect_source_cap=False)
+
+    selected.sort(key=_cluster_sort_key, reverse=True)
+    return selected[:total_limit]
+
+
 def select_ai_news(
     stats: Optional[List[Dict]],
     rss_stats: Optional[List[Dict]],
     total_limit: int,
+    source_cap_ratio: float = SOURCE_CAP_RATIO,
 ) -> AIInputSelection:
-    """将热榜与 RSS 的关键词命中统一成候选池，再按事件价值选择。"""
+    """将关键词命中的热榜与 RSS 聚成事件，再按新闻价值选择。"""
     total_limit = max(0, int(total_limit or 0))
     hot_group_count = len(stats or [])
     candidates = _iter_candidates(stats, "hotlist")
     candidates.extend(_iter_candidates(rss_stats, "rss", group_offset=hot_group_count))
     clusters = _cluster_candidates(candidates)
     clusters.sort(key=_cluster_sort_key, reverse=True)
-    return AIInputSelection(clusters=clusters[:total_limit])
+    return AIInputSelection(
+        clusters=_select_with_quota(
+            clusters,
+            total_limit,
+            source_cap_ratio,
+        )
+    )
 
 
-__all__ = ["AIInputSelection", "SelectedNewsCluster", "select_ai_news"]
+__all__ = [
+    "AIInputSelection",
+    "EVENT_SIMILARITY_THRESHOLD",
+    "SelectedNewsCluster",
+    "select_ai_news",
+]

@@ -92,8 +92,26 @@ ai_analysis:
   enabled: false
   language: Chinese
   prompt_file: ai_analysis_prompt.txt
+  # 关键词命中新闻聚簇后的主事件上限；独立源速览不占此额度。
   max_events_for_analysis: 120
+  # 单一来源软上限；来源不足以填满总量时会自动放宽。
+  source_cap_ratio: 0.30
   include_rank_timeline: true
+  include_standalone: true
+
+
+# 个人兴趣 AI 影子筛选：只记录关键词漏报，不改变推送或主分析。
+ai_filter_shadow:
+  enabled: false
+  model: ""
+  fallback_models: []
+  timeout: 90
+  batch_size: 100
+  min_confidence: 0.75
+  preview_total_limit: 30
+  preview_tag_limit: 5
+  preview_source_limit: 8
+  interests_file: ai_interests.txt
 
 
 storage:

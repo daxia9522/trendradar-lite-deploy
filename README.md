@@ -1,4 +1,4 @@
-# TrendRadar Lite Deploy
+# TrendRadar Lite Deploy v6.6.0
 
 TrendRadar Lite 的精简部署发行版：聚合多平台热榜与 RSS，按关键词筛选新闻，生成 HTML 日报和 AI 周报，并通过邮件推送。
 
@@ -23,7 +23,11 @@ TrendRadar Lite 的精简部署发行版：聚合多平台热榜与 RSS，按关
 - 11 个热榜来源与自定义 RSS 聚合
 - 关键词筛选、当前榜单和全天汇总
 - 热榜与 RSS 统一进入 AI 新闻事件分析管线
+- 行情数据流识别，避免指数、涨跌和经济指标模板污染事件分析
+- 保守事件聚类、来源配额和 RSS 新条目标记
 - HTML 邮件日报和每周 AI 报告
+- 独立来源速览，不占用主事件分析额度
+- 可选 AI 影子兴趣筛选，只记录结果，不改变正式推送
 - 本地 SQLite/TXT/HTML 或 R2/S3 持久化
 - 统一 CLI、配置、环境变量和 `--doctor` 体检
 
@@ -34,6 +38,8 @@ TrendRadar Lite 的精简部署发行版：聚合多平台热榜与 RSS，按关
 - `config/config.yaml`
 - `config/timeline.yaml`
 - `config/frequency_words.txt`
+- `config/ai_analysis_prompt.txt`
+- `config/ai_interests.txt`
 - `python -m trendradar`
 - `python -m trendradar --doctor`
 - `python weekly_report/weekly_ai_report_email.py`
@@ -52,11 +58,22 @@ chmod 600 .env
 | `STORAGE_BACKEND` | Linux/Docker 使用 `local`，Actions 使用 `remote` |
 | `AI_ANALYSIS_ENABLED` | 是否启用日报 AI 分析 |
 | `AI_MODEL` | LiteLLM 的 `provider/model` 格式 |
-| `AI_API_KEY` | AI 服务密钥 |
-| `AI_API_BASE` | 可选 OpenAI-compatible API 地址 |
+| `AI_API_KEY` | AI 服务密钥；Actions 使用 Secret，native Linux 也可改用文件型 Key |
+| `AI_API_KEY_FILE` | native Linux 上的密钥文件路径，与 `AI_API_KEY` 二选一 |
+| `AI_API_BASE` | 可选 OpenAI-compatible API 地址，原样使用，不自动追加 `/v1` |
 | `AI_FALLBACK_MODELS` | 可选备用模型，逗号分隔 |
-| `EMAIL_*` | SMTP 发件与收件配置 |
+| `AI_TIMEOUT` | AI 请求超时秒数，默认 `240` |
+| `AI_FILTER_SHADOW_ENABLED` | 是否启用个人兴趣影子筛选，默认关闭 |
+| `AI_FILTER_MODEL` | 影子筛选专用模型，留空则使用 `AI_MODEL` |
+| `AI_FILTER_FALLBACK_MODELS` | 影子筛选专用备用模型 |
+| `AI_FILTER_TIMEOUT` | 影子筛选单次请求超时，默认 `90` 秒 |
+| `EMAIL_FROM` / `EMAIL_PASSWORD` / `EMAIL_TO` | 必填的发件、密码或授权码、收件地址 |
+| `EMAIL_SMTP_SERVER` / `EMAIL_SMTP_PORT` | 可选；常见邮箱可自动识别，填写时必须同时填写 |
 | `S3_*` | GitHub Actions 使用的 R2/S3 凭据 |
+
+SMTP 自动识别支持 Gmail、QQ、163、126、189、Outlook、Sina、Sohu、阿里云、Yandex、iCloud 等常见域名。未识别的域名默认使用 `smtp.<发件域名>:587`。
+
+`config/ai_interests.txt` 用于影子筛选的个人兴趣标签。影子结果写入 `output/meta/ai_filter_shadow_latest.json`，不会改变正式日报、周报或关键词推送。
 
 ## 方式一：原生 Linux
 
@@ -78,8 +95,9 @@ cd trendradar-lite-deploy
 1. 创建 `.venv` 并安装依赖。
 2. 打开配置页，填写邮件和可选 AI 参数。
 3. 在 `~/.config/trendradar-lite/env` 保存权限为 `600` 的环境文件。
-4. 安装每小时采集和周日 12:30（Asia/Shanghai）周报的 systemd user timer。
-5. 运行 `--doctor`。
+4. 安装每小时采集、日更推送和按配置星期运行的周报 systemd user timer。
+5. 按配置页中的时间重新生成两个 timer。
+6. 运行 `--doctor`。
 
 安装完成后检查状态：
 
@@ -141,14 +159,14 @@ loginctl enable-linger "$USER"
 
 未设置 `ACTIONS_DEPLOYMENT_ENABLED=true` 时，cron 触发会安全跳过，避免未配置 Secrets 的新部署持续失败；`workflow_dispatch` 手动触发不受此开关限制。
 
-Actions 方案必须配置：
+两个 workflow 都包含过期队列保护：普通 run 在队列中等待超过阈值会跳过采集和邮件，手动 re-run 始终放行。crawler 阈值为 30 分钟，weekly report 阈值为 6 小时。
+
+Actions 需要配置：
 
 ```text
 EMAIL_FROM
 EMAIL_PASSWORD
 EMAIL_TO
-EMAIL_SMTP_SERVER
-EMAIL_SMTP_PORT
 S3_BUCKET_NAME
 S3_ACCESS_KEY_ID
 S3_SECRET_ACCESS_KEY
@@ -157,6 +175,8 @@ S3_REGION
 ```
 
 AI 分析还需要 `AI_MODEL` 和 `AI_API_KEY`；中转服务可设置 `AI_API_BASE`。
+
+`EMAIL_SMTP_SERVER` 和 `EMAIL_SMTP_PORT` 可选，但填写时必须成对出现。Actions 使用 `STORAGE_BACKEND=remote`，周报会从 R2/S3 拉取最近 7 天的数据库。
 
 ## 方式三：Docker Compose
 
@@ -245,11 +265,11 @@ docker compose exec trendradar python -m trendradar --force-run
 Compose 使用一个轻量前台调度器：
 
 - 每小时在指定分钟采集一次，并在四个自定义日更时间准确运行推送
-- 每周日 12:30（`TZ` 指定时区）运行 AI 周报
+- 每周在 `WEEKLY_WEEKDAY`、`WEEKLY_HOUR` 和 `WEEKLY_MINUTE` 指定的本地时间运行 AI 周报
 - `output/` 保存于 Docker volume
 - `config/` 从宿主机只读挂载
 
-可选调度变量：
+Docker scheduler 使用 `TZ` 指定的时区，并支持以下变量：
 
 | 变量 | 默认值 |
 |---|---:|
@@ -298,6 +318,7 @@ output/
 ├── html/latest/
 ├── weekly-ai-reports/
 └── meta/
+    └── ai_filter_shadow_latest.json
 ```
 
 ## 致谢与许可

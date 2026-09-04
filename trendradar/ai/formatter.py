@@ -113,7 +113,8 @@ def render_ai_analysis_html_rich(result: AIAnalysisResult) -> str:
         content_html = _render_markdown_fragment(
             section.content,
             number_subtitles=section.format_type == "events",
-            order_bullets_when_multiple=section.format_type == "bullets",
+            order_bullets_when_multiple=section.format_type
+            in ("bullets", "lead_points"),
         )
         ai_html += f"""
                     <div class="ai-block">

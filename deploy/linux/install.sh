@@ -86,6 +86,10 @@ done
   --output "$ENV_FILE" \
   --render-systemd-timer "$UNIT_DIR/trendradar-lite.timer"
 
+"$PYTHON_BIN" "$APP_DIR/deploy/configure.py" \
+  --output "$ENV_FILE" \
+  --render-systemd-weekly-timer "$UNIT_DIR/trendradar-weekly.timer"
+
 systemctl --user daemon-reload
 if [[ $ENABLE_TIMERS == true ]]; then
   systemctl --user enable --now trendradar-lite.timer trendradar-weekly.timer

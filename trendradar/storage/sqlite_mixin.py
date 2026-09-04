@@ -469,24 +469,6 @@ class SQLiteStorageMixin:
             print(f"[存储] 读取数据失败: {e}")
             return None
 
-    def _get_all_news_ids_impl(self, date: Optional[str] = None) -> List[Dict]:
-        """Return every news row ID and title for one date."""
-        try:
-            rows = self._get_connection(date).execute(
-                "SELECT id, title FROM news_items ORDER BY id"
-            ).fetchall()
-            return [{"id": row[0], "title": row[1]} for row in rows]
-        except Exception as e: print(f"[存储] 读取新闻 ID 失败: {e}"); return []
-
-    def _get_all_rss_ids_impl(self, date: Optional[str] = None) -> List[Dict]:
-        """Return every RSS row ID and title for one date."""
-        try:
-            rows = self._get_connection(date, db_type="rss").execute(
-                "SELECT id, title FROM rss_items ORDER BY id"
-            ).fetchall()
-            return [{"id": row[0], "title": row[1]} for row in rows]
-        except Exception as e: print(f"[存储] 读取 RSS ID 失败: {e}"); return []
-
     def _get_latest_crawl_data_impl(self, date: Optional[str] = None) -> Optional[NewsData]:
         """
         获取最新一次抓取的数据
@@ -847,31 +829,54 @@ class SQLiteStorageMixin:
             # 统计计数器
             new_count = 0
             updated_count = 0
+            feed_errors: Dict[str, List[str]] = {}
 
             for feed_id, rss_list in data.items.items():
                 for item in rss_list:
                     try:
                         item_guid = str(getattr(item, "guid", "") or "").strip()
                         item_url = str(item.url or "").strip()
-                        existing = None
+                        if not item_url and not item_guid:
+                            raise sqlite3.Error("缺少 URL 和 GUID")
 
-                        # 去重优先级：GUID + feed_id > URL + feed_id
+                        guid_row = None
+                        url_row = None
+
+                        # 优先按稳定 GUID 定位，URL 作为 GUID 缺失时的回退身份
                         if item_guid:
                             cursor.execute("""
-                                SELECT id, title FROM rss_items
+                                SELECT id, title, url, guid, first_crawl_time, last_crawl_time, crawl_count
+                                FROM rss_items
                                 WHERE guid = ? AND feed_id = ?
                             """, (item_guid, feed_id))
-                            existing = cursor.fetchone()
+                            guid_row = cursor.fetchone()
 
-                        if not existing and item_url:
+                        if item_url:
                             cursor.execute("""
-                                SELECT id, title FROM rss_items
+                                SELECT id, title, url, guid, first_crawl_time, last_crawl_time, crawl_count
+                                FROM rss_items
                                 WHERE url = ? AND feed_id = ?
                             """, (item_url, feed_id))
-                            existing = cursor.fetchone()
+                            url_row = cursor.fetchone()
 
+                        existing = guid_row or url_row
                         if existing:
                             existing_id = existing[0]
+                            crawl_count = existing[6] + 1
+                            first_crawl_time = existing[4] or data.crawl_time
+
+                            # GUID 与 URL 分别命中两条记录：保留 GUID 行，合并 URL 行
+                            if guid_row and url_row and url_row[0] != guid_row[0]:
+                                crawl_count = existing[6] + url_row[6] + 1
+                                first_crawl_time = min(
+                                    existing[4] or data.crawl_time,
+                                    url_row[4] or data.crawl_time,
+                                )
+                                cursor.execute(
+                                    "DELETE FROM rss_items WHERE id = ?",
+                                    (url_row[0],),
+                                )
+
                             cursor.execute("""
                                 UPDATE rss_items SET
                                     title = ?,
@@ -880,8 +885,9 @@ class SQLiteStorageMixin:
                                     published_at = ?,
                                     summary = ?,
                                     author = ?,
+                                    first_crawl_time = ?,
                                     last_crawl_time = ?,
-                                    crawl_count = crawl_count + 1,
+                                    crawl_count = ?,
                                     updated_at = ?
                                 WHERE id = ?
                             """, (
@@ -891,39 +897,39 @@ class SQLiteStorageMixin:
                                 item.published_at,
                                 item.summary,
                                 item.author,
+                                first_crawl_time,
                                 data.crawl_time,
+                                crawl_count,
                                 now_str,
                                 existing_id,
                             ))
                             updated_count += 1
-                        elif item_url or item_guid:
-                            try:
-                                cursor.execute("""
-                                    INSERT INTO rss_items
-                                    (title, feed_id, url, guid, published_at, summary, author,
-                                     first_crawl_time, last_crawl_time, crawl_count,
-                                     created_at, updated_at)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-                                """, (
-                                    item.title,
-                                    feed_id,
-                                    item_url,
-                                    item_guid,
-                                    item.published_at,
-                                    item.summary,
-                                    item.author,
-                                    data.crawl_time,
-                                    data.crawl_time,
-                                    now_str,
-                                    now_str,
-                                ))
-                                new_count += 1
-                            except sqlite3.IntegrityError:
-                                # 同一批次或并发写入产生的重复项，保持已有记录
-                                pass
+                        else:
+                            cursor.execute("""
+                                INSERT INTO rss_items
+                                (title, feed_id, url, guid, published_at, summary, author,
+                                 first_crawl_time, last_crawl_time, crawl_count,
+                                 created_at, updated_at)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                            """, (
+                                item.title,
+                                feed_id,
+                                item_url,
+                                item_guid,
+                                item.published_at,
+                                item.summary,
+                                item.author,
+                                data.crawl_time,
+                                data.crawl_time,
+                                now_str,
+                                now_str,
+                            ))
+                            new_count += 1
 
                     except sqlite3.Error as e:
-                        print(f"{log_prefix} 保存 RSS 条目失败 [{item.title[:30]}...]: {e}")
+                        error_text = f"{item.title[:30]}...: {e}"
+                        feed_errors.setdefault(feed_id, []).append(error_text)
+                        print(f"{log_prefix} 保存 RSS 条目失败 [{error_text}]")
 
             total_items = new_count + updated_count
 
@@ -942,15 +948,17 @@ class SQLiteStorageMixin:
             if record_row:
                 crawl_record_id = record_row[0]
 
-                # 记录成功的源
+                # 记录成功的源（存在条目级失败的源不标记 success）
                 for feed_id in data.items.keys():
+                    if feed_id in feed_errors:
+                        continue
                     cursor.execute("""
                         INSERT OR REPLACE INTO rss_crawl_status
                         (crawl_record_id, feed_id, status)
                         VALUES (?, ?, 'success')
                     """, (crawl_record_id, feed_id))
 
-                # 记录失败的源
+                # 记录抓取级失败的源
                 for failed_id in data.failed_ids:
                     cursor.execute("""
                         INSERT OR IGNORE INTO rss_feeds (id, name, updated_at)
@@ -962,6 +970,20 @@ class SQLiteStorageMixin:
                         (crawl_record_id, feed_id, status)
                         VALUES (?, ?, 'failed')
                     """, (crawl_record_id, failed_id))
+
+                # 记录条目级失败的源
+                for failed_feed_id, errors in feed_errors.items():
+                    error_message = f"{len(errors)} 条 RSS 条目保存失败: " + "; ".join(errors[:3])
+                    cursor.execute("""
+                        INSERT OR IGNORE INTO rss_feeds (id, name, updated_at)
+                        VALUES (?, ?, ?)
+                    """, (failed_feed_id, failed_feed_id, now_str))
+
+                    cursor.execute("""
+                        INSERT OR REPLACE INTO rss_crawl_status
+                        (crawl_record_id, feed_id, status, error_message)
+                        VALUES (?, ?, 'failed', ?)
+                    """, (crawl_record_id, failed_feed_id, error_message))
 
             conn.commit()
 
@@ -1205,6 +1227,55 @@ class SQLiteStorageMixin:
         except Exception as e:
             print(f"[存储] 获取最新 RSS 数据失败: {e}")
             return None
+
+    def _get_all_news_ids_impl(self, date: Optional[str] = None) -> List[Dict]:
+        """获取当日所有新闻的 ID 和标题。"""
+        try:
+            conn = self._get_connection(date)
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT n.id, n.title, n.platform_id, p.name as platform_name
+                FROM news_items n
+                LEFT JOIN platforms p ON n.platform_id = p.id
+                ORDER BY n.id
+            """)
+            return [
+                {
+                    "id": row[0],
+                    "title": row[1],
+                    "source_id": row[2],
+                    "source_name": row[3] or row[2],
+                }
+                for row in cursor.fetchall()
+            ]
+        except Exception as e:
+            print(f"[存储] 获取新闻列表失败: {e}")
+            return []
+
+    def _get_all_rss_ids_impl(self, date: Optional[str] = None) -> List[Dict]:
+        """获取当日所有 RSS 条目的 ID 和标题。"""
+        try:
+            conn = self._get_connection(date, db_type="rss")
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT i.id, i.title, i.feed_id, f.name as feed_name, i.published_at
+                FROM rss_items i
+                LEFT JOIN rss_feeds f ON i.feed_id = f.id
+                ORDER BY i.id
+            """)
+            return [
+                {
+                    "id": row[0],
+                    "title": row[1],
+                    "source_id": row[2],
+                    "source_name": row[3] or row[2],
+                    "published_at": row[4] or "",
+                }
+                for row in cursor.fetchall()
+            ]
+        except Exception as e:
+            print(f"[存储] 获取 RSS 列表失败: {e}")
+            return []
 
     # ========================================
     # AI 智能筛选 - 标签管理

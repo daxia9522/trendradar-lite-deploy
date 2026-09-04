@@ -24,6 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from trendradar.storage.history_reader import HistoryReader
 from trendradar.ai.client import AIClient, build_keyword_client
+from trendradar.ai.dataflow import is_market_dataflow_title
 from trendradar.context import AppContext
 from trendradar.core.loader import load_ai_config, load_config
 from trendradar.notification.senders import send_to_email
@@ -79,6 +80,9 @@ RSS_SCALE_BY_AVAILABLE_DAYS = True
 SOFT_TOPIC_PENALTY = 0.45
 SOFT_FORMAT_PENALTY = 0.55
 COLUMN_PENALTY = 0.08
+# 行情/经济数据播报：允许入池垫底，但不得占据叙事分析的 Top 位。
+# 实测旧逻辑下跨天 TOP12 全部是单平台行情流（span7d、成员至8）。
+DATAFLOW_PENALTY = 0.10
 
 STOPWORDS = {
     "今日", "本周", "最新", "热点", "表示", "消息", "中国", "美国", "公司", "市场", "已经", "进行", "相关", "发布", "报道", "工作", "记者",
@@ -340,6 +344,7 @@ def score_cluster(
     platform_count: int,
     source_type: str,
     title: str = "",
+    platforms: Any = None,
 ) -> float:
     """核心三维（可参考 config advanced.weight）+ 周尺度跨天/跨平台；栏目/软话题/软格式降权。"""
     span_bonus = min(max(date_span, 1), 7) * 3.0
@@ -369,6 +374,9 @@ def score_cluster(
     if is_column_title(title):
         # 模板帖允许进池垫底，但不该占 Top
         score *= COLUMN_PENALTY
+    elif is_market_dataflow_title(title, platforms):
+        # 行情/数据播报：模板化数字流，不是叙事事件
+        score *= DATAFLOW_PENALTY
     else:
         # 纯体育/娱乐高热（如「詹姆斯加盟76人」）轻降权，不删除
         if is_soft_topic_title(title):
@@ -437,7 +445,12 @@ def _title_similarity(a: str, b: str) -> float:
 
 
 def aggregate_similar_items(items: List[Dict[str, Any]], threshold: float) -> List[Dict[str, Any]]:
-    """上游风格：按权重降序，Jaccard 粗筛 + SequenceMatcher 精算，合并为事件簇。"""
+    """上游风格：按权重降序，Jaccard 粗筛 + SequenceMatcher 精算，合并为事件簇。
+
+    行情/经济数据播报不参与跨条目合并：这类标题是「同一模板 + 每日变化的数字」，
+    strip_title_dates 之后模板骨架高度重合，而周报侧不做数字加权，已实测把
+    「涨5%」与「跌2.3%」、「澳洲CPI」与「德国PPI」合并成 span7d 的假事件簇并顶到榜首。
+    """
     if not items:
         return []
 
@@ -445,7 +458,12 @@ def aggregate_similar_items(items: List[Dict[str, Any]], threshold: float) -> Li
     for item in items:
         title = item["title"]
         char_set = set(title)
-        prepared.append({"data": item, "char_set": char_set, "set_len": len(char_set)})
+        prepared.append({
+            "data": item,
+            "char_set": char_set,
+            "set_len": len(char_set),
+            "is_dataflow": is_market_dataflow_title(title, item.get("platforms")),
+        })
 
     prepared.sort(key=lambda x: x["data"].get("score", 0), reverse=True)
     used = set()
@@ -466,12 +484,17 @@ def aggregate_similar_items(items: List[Dict[str, Any]], threshold: float) -> Li
         member_titles = list(base.get("member_titles") or [base["title"]])
         agg_score = float(base.get("score") or 0)
         source_type = base.get("source_type") or "news"
+        base_is_dataflow = item["is_dataflow"]
         used.add(i)
 
-        for j in range(i + 1, len(prepared)):
+        # 行情播报自成一簇，不向外吸收成员
+        inner = [] if base_is_dataflow else range(i + 1, len(prepared))
+        for j in inner:
             if j in used:
                 continue
             other_prep = prepared[j]
+            if other_prep["is_dataflow"]:
+                continue
             other = other_prep["data"]
             other_set = other_prep["char_set"]
             other_len = other_prep["set_len"]
@@ -521,6 +544,7 @@ def aggregate_similar_items(items: List[Dict[str, Any]], threshold: float) -> Li
             len(platforms),
             source_type if source_type != "mixed" else "news",
             title=base.get("title") or "",
+            platforms=platforms,
         )
         final_score = recomputed if is_column else max(agg_score, recomputed)
 
@@ -618,6 +642,7 @@ def _finalize_exact_items(bucket: Dict[str, Dict[str, Any]]) -> List[Dict[str, A
             len(platforms),
             "news" if source_type == "mixed" else source_type,
             title=data.get("title") or "",
+            platforms=platforms,
         )
         items.append(
             {
@@ -761,6 +786,11 @@ def collect_news(
     stats["selected_news"] = sum(1 for x in selected if x.get("source_type") in ("news", "mixed"))
     stats["selected_rss"] = sum(1 for x in selected if x.get("source_type") == "rss")
     stats["selected_column"] = sum(1 for x in selected if x.get("is_column"))
+    stats["selected_dataflow"] = sum(
+        1
+        for x in selected
+        if is_market_dataflow_title(x.get("title") or "", x.get("platforms"))
+    )
     stats["selected_soft_topic"] = sum(1 for x in selected if is_soft_topic_title(x.get("title") or ""))
     stats["selected_soft_format"] = sum(1 for x in selected if is_soft_format_title(x.get("title") or ""))
 

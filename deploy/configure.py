@@ -19,11 +19,12 @@ FIELDS = [
     ("EMAIL_FROM", "发件邮箱", True, "news@example.com"),
     ("EMAIL_PASSWORD", "邮箱密码或授权码", True, ""),
     ("EMAIL_TO", "收件邮箱", True, "多个地址用逗号分隔"),
-    ("EMAIL_SMTP_SERVER", "SMTP 服务器", True, "smtp.example.com"),
-    ("EMAIL_SMTP_PORT", "SMTP 端口", True, "465"),
+    ("EMAIL_SMTP_SERVER", "SMTP 服务器", False, "留空则按发件邮箱自动识别"),
+    ("EMAIL_SMTP_PORT", "SMTP 端口", False, "留空则按发件邮箱自动识别"),
     ("AI_ANALYSIS_ENABLED", "启用日报 AI 分析", False, "true / false"),
     ("AI_MODEL", "AI 模型", False, "openai/gpt-4o-mini"),
     ("AI_API_KEY", "AI API Key", False, ""),
+    ("AI_API_KEY_FILE", "AI API Key 文件", False, "native Linux 可填写服务器上的密钥文件路径"),
     ("AI_API_BASE", "AI API 地址", False, "OpenAI 兼容接口可填写"),
     ("AI_FALLBACK_MODELS", "备用模型", False, "用逗号分隔"),
     ("TZ", "时区", True, "Asia/Shanghai"),
@@ -32,6 +33,7 @@ FIELDS = [
     ("NOON_PUSH_TIME", "午间推送时间", False, "12:00"),
     ("EVENING_PUSH_TIME", "傍晚推送时间", False, "18:00"),
     ("DAILY_SUMMARY_TIME", "全天汇总时间", False, "22:00"),
+    ("WEEKLY_WEEKDAY", "周报星期", False, "0=周一，6=周日"),
     ("WEEKLY_HOUR", "周报小时", False, "0-23"),
     ("WEEKLY_MINUTE", "周报分钟", False, "0-59"),
 ]
@@ -99,16 +101,24 @@ section{{display:grid;gap:13px}} label{{display:grid;gap:6px;font-weight:600}} i
 button{{font:inherit;padding:11px 16px;background:#1769aa;color:white;border:0;border-radius:5px;cursor:pointer}}
 .ok{{padding:12px;background:#e3f6e8;color:#176b35;margin:14px 0}} .error{{padding:12px;background:#fde8e8;color:#a11;margin:14px 0}}
 </style><main><h1>TrendRadar Lite 配置</h1>
-<p>邮件配置为必填，AI 分析可选。四个日更推送时间按所选时区执行，密码和密钥不会回显。</p>
+<p>邮件配置为必填，SMTP 服务器和端口可留空自动识别。AI 分析可选，密码和密钥不会回显。</p>
 {notice}{error}<form method="post">{section_html}<button type="submit">保存配置并继续安装</button></form></main></html>"""
 
 
 def validate(values: dict[str, str]) -> list[str]:
     errors = [f"请填写：{label}" for key, label, required, _hint in FIELDS if required and not values.get(key)]
     if values.get("AI_ANALYSIS_ENABLED", "false").lower() == "true":
-        if not values.get("AI_MODEL") or not values.get("AI_API_KEY"):
-            errors.append("启用 AI 分析时必须填写 AI_MODEL 和 AI_API_KEY")
-    ranges = {"EMAIL_SMTP_PORT": (1, 65535), "CRAWLER_MINUTE": (0, 59), "WEEKLY_HOUR": (0, 23), "WEEKLY_MINUTE": (0, 59)}
+        if not values.get("AI_MODEL") or not (values.get("AI_API_KEY") or values.get("AI_API_KEY_FILE")):
+            errors.append("启用 AI 分析时必须填写 AI_MODEL，以及 AI_API_KEY 或 AI_API_KEY_FILE")
+    if bool(values.get("EMAIL_SMTP_SERVER")) != bool(values.get("EMAIL_SMTP_PORT")):
+        errors.append("EMAIL_SMTP_SERVER 和 EMAIL_SMTP_PORT 必须同时填写，或同时留空")
+    ranges = {
+        "EMAIL_SMTP_PORT": (1, 65535),
+        "CRAWLER_MINUTE": (0, 59),
+        "WEEKLY_WEEKDAY": (0, 6),
+        "WEEKLY_HOUR": (0, 23),
+        "WEEKLY_MINUTE": (0, 59),
+    }
     for key, (minimum, maximum) in ranges.items():
         if not values.get(key):
             continue
@@ -126,20 +136,11 @@ def validate(values: dict[str, str]) -> list[str]:
     return errors
 
 
-def write_systemd_timer(path: Path, values: dict[str, str]) -> None:
-    crawler_minute = int(values.get("CRAWLER_MINUTE") or "5")
-    push_times = [
-        values.get("MORNING_PUSH_TIME", "07:00"),
-        values.get("NOON_PUSH_TIME", "12:00"),
-        values.get("EVENING_PUSH_TIME", "18:00"),
-        values.get("DAILY_SUMMARY_TIME", "22:00"),
-    ]
-    calendars = [f"*-*-* *:{crawler_minute:02d}:00"]
-    calendars.extend(f"*-*-* {value}:00" for value in push_times)
+def _write_timer(path: Path, description: str, calendars: list[str]) -> None:
     calendars = list(dict.fromkeys(calendars))
     lines = [
         "[Unit]",
-        "Description=Run TrendRadar Lite for hourly collection and configured delivery times",
+        f"Description={description}",
         "",
         "[Timer]",
         *(f"OnCalendar={value}" for value in calendars),
@@ -151,6 +152,35 @@ def write_systemd_timer(path: Path, values: dict[str, str]) -> None:
     ]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def write_systemd_timer(path: Path, values: dict[str, str]) -> None:
+    crawler_minute = int(values.get("CRAWLER_MINUTE") or "5")
+    push_times = [
+        values.get("MORNING_PUSH_TIME", "07:00"),
+        values.get("NOON_PUSH_TIME", "12:00"),
+        values.get("EVENING_PUSH_TIME", "18:00"),
+        values.get("DAILY_SUMMARY_TIME", "22:00"),
+    ]
+    calendars = [f"*-*-* *:{crawler_minute:02d}:00"]
+    calendars.extend(f"*-*-* {value}:00" for value in push_times)
+    _write_timer(
+        path,
+        "Run TrendRadar Lite for hourly collection and configured delivery times",
+        calendars,
+    )
+
+
+def write_systemd_weekly_timer(path: Path, values: dict[str, str]) -> None:
+    weekdays = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+    weekday = weekdays[int(values.get("WEEKLY_WEEKDAY") or "6")]
+    hour = int(values.get("WEEKLY_HOUR") or "12")
+    minute = int(values.get("WEEKLY_MINUTE") or "30")
+    _write_timer(
+        path,
+        "Run TrendRadar Lite weekly report on Sunday",
+        [f"{weekday} *-*-* {hour:02d}:{minute:02d}:00 {values.get('TZ') or 'Asia/Shanghai'}"],
+    )
 
 
 def detect_ssh_target(user: str, host: str, ssh_port: int) -> tuple[str, str, int]:
@@ -225,9 +255,13 @@ def main() -> int:
     parser.add_argument("--ssh-host", default="")
     parser.add_argument("--ssh-port", type=int, default=0)
     parser.add_argument("--render-systemd-timer", type=Path)
+    parser.add_argument("--render-systemd-weekly-timer", type=Path)
     args = parser.parse_args()
     if args.render_systemd_timer:
         write_systemd_timer(args.render_systemd_timer, read_env(args.output))
+        return 0
+    if args.render_systemd_weekly_timer:
+        write_systemd_weekly_timer(args.render_systemd_weekly_timer, read_env(args.output))
         return 0
     serve(args.output, args.host, args.port, args.public_port, args.ssh_user, args.ssh_host, args.ssh_port)
     return 0

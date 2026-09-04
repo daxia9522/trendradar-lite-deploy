@@ -297,7 +297,11 @@ class StorageManager:
 
     def end_batch(self):
         """结束批量模式（统一上传脏数据库）"""
-        self.get_backend().end_batch()
+        return self.get_backend().end_batch()
+
+    def flush(self) -> bool:
+        """同步批量模式下积累的变更，不结束批量模式。"""
+        return self.get_backend().flush()
 
 
 

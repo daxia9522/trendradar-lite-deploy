@@ -34,7 +34,6 @@ class ConfigureTests(unittest.TestCase):
     def test_required_email_fields_are_validated(self):
         errors = configure.validate({})
         self.assertTrue(any("发件邮箱" in error for error in errors))
-        self.assertTrue(any("SMTP" in error for error in errors))
 
     def test_ai_credentials_are_required_only_when_enabled(self):
         values = {
@@ -49,6 +48,29 @@ class ConfigureTests(unittest.TestCase):
         self.assertTrue(any("AI_MODEL" in error for error in configure.validate(values)))
         values.update({"AI_MODEL": "openai/model", "AI_API_KEY": "key"})
         self.assertEqual(configure.validate(values), [])
+
+    def test_ai_key_file_can_replace_inline_key(self):
+        values = {
+            "EMAIL_FROM": "sender@example.com",
+            "EMAIL_PASSWORD": "secret",
+            "EMAIL_TO": "reader@example.com",
+            "TZ": "Asia/Shanghai",
+            "AI_ANALYSIS_ENABLED": "true",
+            "AI_MODEL": "openai/model",
+            "AI_API_KEY_FILE": "/run/secrets/trendradar-ai-key",
+        }
+        self.assertEqual(configure.validate(values), [])
+
+    def test_smtp_server_and_port_are_optional_but_pairwise(self):
+        values = {
+            "EMAIL_FROM": "sender@example.com",
+            "EMAIL_PASSWORD": "secret",
+            "EMAIL_TO": "reader@example.com",
+            "TZ": "Asia/Shanghai",
+        }
+        self.assertEqual(configure.validate(values), [])
+        values["EMAIL_SMTP_SERVER"] = "smtp.example.com"
+        self.assertTrue(any("必须同时填写" in error for error in configure.validate(values)))
 
     def test_numeric_ranges_are_validated(self):
         values = {
@@ -97,6 +119,14 @@ class ConfigureTests(unittest.TestCase):
         self.assertIn("OnCalendar=*-*-* *:05:00", content)
         self.assertIn("OnCalendar=*-*-* 18:30:00", content)
         self.assertIn("OnCalendar=*-*-* 22:40:00", content)
+
+    def test_weekly_systemd_timer_uses_configured_time_and_timezone(self):
+        values = {"WEEKLY_WEEKDAY": "0", "WEEKLY_HOUR": "9", "WEEKLY_MINUTE": "45", "TZ": "UTC"}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "trendradar-weekly.timer"
+            configure.write_systemd_weekly_timer(path, values)
+            content = path.read_text(encoding="utf-8")
+        self.assertIn("OnCalendar=Mon *-*-* 09:45:00 UTC", content)
 
 
 if __name__ == "__main__":

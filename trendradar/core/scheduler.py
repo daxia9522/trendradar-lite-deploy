@@ -95,6 +95,8 @@ class Scheduler:
         if timeline.get("periods") is None:
             timeline["periods"] = {}
 
+        # Native systemd and Docker can override delivery times through the
+        # deployment environment without modifying the shared timeline file.
         push_time_overrides = {
             "morning_brief": "MORNING_PUSH_TIME",
             "noon_brief": "NOON_PUSH_TIME",

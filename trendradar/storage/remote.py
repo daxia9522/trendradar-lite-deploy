@@ -255,14 +255,30 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
     def begin_batch(self):
         """开启批量模式：延迟上传，避免频繁上传同一文件"""
         self._batch_mode = True
-        self._batch_dirty.clear()
 
-    def end_batch(self):
-        """结束批量模式：统一上传所有脏数据库"""
+    def flush(self) -> bool:
+        """上传脏数据库，成功项移除，失败项保留以便重试。"""
+        if not self._batch_dirty:
+            return True
+
+        pending = set(self._batch_dirty)
+        successful = set()
+        previous_batch_mode = self._batch_mode
         self._batch_mode = False
-        for date, db_type in self._batch_dirty:
-            self._upload_sqlite(date, db_type)
-        self._batch_dirty.clear()
+        try:
+            for date, db_type in pending:
+                if self._upload_sqlite(date, db_type):
+                    successful.add((date, db_type))
+        finally:
+            self._batch_mode = previous_batch_mode
+            self._batch_dirty.difference_update(successful)
+
+        return not self._batch_dirty
+
+    def end_batch(self) -> bool:
+        """结束批量模式并统一上传脏数据库。"""
+        self._batch_mode = False
+        return self.flush()
 
     def _upload_sqlite(self, date: Optional[str] = None, db_type: str = "news") -> bool:
         """
@@ -431,7 +447,10 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
             now_str = self._get_configured_time().strftime("%Y-%m-%d %H:%M:%S")
             print(f"[远程存储] 时间段执行记录已保存: {period_key}/{action} at {now_str}")
 
-            # 上传到远程存储确保记录持久化
+            # 批量模式下由调用方显式 flush；普通模式立即同步。
+            if self._batch_mode:
+                print("[远程存储] 时间段执行记录已加入待同步队列")
+                return True
             if self._upload_sqlite(date_str):
                 print(f"[远程存储] 时间段执行记录已同步到远程存储")
                 return True

@@ -220,8 +220,11 @@ class AppContext:
         mode: str = "daily",
         global_filters: Optional[List[str]] = None,
         quiet: bool = False,
+        max_news_per_keyword: Optional[int] = None,
     ) -> Tuple[List[Dict], int]:
         """统计词频"""
+        if max_news_per_keyword is None:
+            max_news_per_keyword = self.config.get("MAX_NEWS_PER_KEYWORD", 0)
         return count_word_frequency(
             results=results,
             word_groups=word_groups,
@@ -233,7 +236,7 @@ class AppContext:
             mode=mode,
             global_filters=global_filters,
             weight_config=self.weight_config,
-            max_news_per_keyword=self.config.get("MAX_NEWS_PER_KEYWORD", 0),
+            max_news_per_keyword=max_news_per_keyword,
             sort_by_position_first=self.config.get("SORT_BY_POSITION_FIRST", False),
             is_first_crawl_func=self.is_first_crawl,
             convert_time_func=self.convert_time_display,

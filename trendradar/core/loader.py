@@ -50,6 +50,22 @@ def _get_env_str(key: str, default: str = "") -> str:
     return os.environ.get(key, "").strip() or default
 
 
+def _get_env_secret(key: str, file_key: str) -> str:
+    """读取直接环境变量或受限文件中的密钥，直接变量优先。"""
+    value = _get_env_str(key)
+    if value:
+        return value
+
+    secret_path = _get_env_str(file_key)
+    if not secret_path:
+        return ""
+
+    try:
+        return Path(secret_path).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
 def _get_env_model_list(key: str) -> Optional[List[str]]:
     """从环境变量读取模型列表（逗号/空白分隔）。未设置返回 None，便于回退 yaml/默认。"""
     raw = _get_env_str(key)
@@ -275,7 +291,8 @@ def _load_display_config(config_data: Dict) -> Dict:
 def _load_ai_config(config_data: Dict) -> Dict:
     """加载 AI 模型配置（LiteLLM provider/model 格式）。
 
-    环境变量仅限：AI_MODEL / AI_API_KEY / AI_API_BASE / AI_FALLBACK_MODELS / AI_TIMEOUT。
+    环境变量仅限：AI_MODEL / AI_API_KEY 或 AI_API_KEY_FILE / AI_API_BASE /
+    AI_FALLBACK_MODELS / AI_TIMEOUT。
     temperature / max_tokens 实测被当前中转站忽略，已不再传递；
     超时与重试次数未配置时由 AIClient 默认值接管（单一来源）。
     """
@@ -286,7 +303,7 @@ def _load_ai_config(config_data: Dict) -> Dict:
 
     config: Dict[str, Any] = {
         "MODEL": _get_env_str("AI_MODEL") or ai_config.get("model", ""),
-        "API_KEY": _get_env_str("AI_API_KEY") or ai_config.get("api_key", ""),
+        "API_KEY": _get_env_secret("AI_API_KEY", "AI_API_KEY_FILE") or ai_config.get("api_key", ""),
         "API_BASE": _get_env_str("AI_API_BASE") or ai_config.get("api_base", ""),
         "FALLBACK_MODELS": (
             fallback_env
@@ -329,13 +346,47 @@ def _load_ai_analysis_config(config_data: Dict) -> Dict:
     ai_config = config_data.get("ai_analysis", {})
 
     enabled_env = _get_env_bool("AI_ANALYSIS_ENABLED")
+    raw_cap_ratio = ai_config.get("source_cap_ratio")
 
     return {
         "ENABLED": enabled_env if enabled_env is not None else ai_config.get("enabled", False),
         "LANGUAGE": ai_config.get("language", "Chinese"),
         "PROMPT_FILE": ai_config.get("prompt_file", "ai_analysis_prompt.txt"),
         "MAX_EVENTS_FOR_ANALYSIS": ai_config.get("max_events_for_analysis", 120),
+        "SOURCE_CAP_RATIO": 0.30 if raw_cap_ratio is None else raw_cap_ratio,
         "INCLUDE_RANK_TIMELINE": ai_config.get("include_rank_timeline", False),
+        "INCLUDE_STANDALONE": ai_config.get("include_standalone", False),
+    }
+
+
+def _load_ai_filter_shadow_config(config_data: Dict) -> Dict:
+    """加载个人兴趣 AI 影子筛选配置；模型可独立于主分析。"""
+    shadow = config_data.get("ai_filter_shadow", {}) or {}
+    enabled_env = _get_env_bool("AI_FILTER_SHADOW_ENABLED")
+    fallback_env = _get_env_model_list("AI_FILTER_FALLBACK_MODELS")
+    timeout_env = _get_env_int_or_none("AI_FILTER_TIMEOUT")
+
+    return {
+        "ENABLED": (
+            enabled_env if enabled_env is not None else shadow.get("enabled", False)
+        ),
+        "MODEL": _get_env_str("AI_FILTER_MODEL") or shadow.get("model", ""),
+        "FALLBACK_MODELS": (
+            fallback_env
+            if fallback_env is not None
+            else shadow.get("fallback_models", [])
+        ),
+        "TIMEOUT": (
+            timeout_env
+            if timeout_env is not None
+            else int(shadow.get("timeout", 90) or 90)
+        ),
+        "BATCH_SIZE": int(shadow.get("batch_size", 100) or 100),
+        "MIN_CONFIDENCE": float(shadow.get("min_confidence", 0.75) or 0.75),
+        "PREVIEW_TOTAL_LIMIT": int(shadow.get("preview_total_limit", 30) or 30),
+        "PREVIEW_TAG_LIMIT": int(shadow.get("preview_tag_limit", 5) or 5),
+        "PREVIEW_SOURCE_LIMIT": int(shadow.get("preview_source_limit", 8) or 8),
+        "INTERESTS_FILE": shadow.get("interests_file", "ai_interests.txt"),
     }
 
 
@@ -461,6 +512,9 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
 
     # AI 分析配置
     config["AI_ANALYSIS"] = _load_ai_analysis_config(config_data)
+
+    # AI 影子筛选配置（仅记录，不改变推送）
+    config["AI_FILTER_SHADOW"] = _load_ai_filter_shadow_config(config_data)
 
     # 推送内容显示配置
     config["DISPLAY"] = _load_display_config(config_data)

@@ -473,9 +473,13 @@ class StorageBackend(ABC):
         """开启批量模式（远程后端延迟上传，本地后端无操作）"""
         pass
 
-    def end_batch(self) -> None:
-        """结束批量模式"""
-        pass
+    def flush(self) -> bool:
+        """将批量模式下积累的变更同步到后端。"""
+        return True
+
+    def end_batch(self) -> bool:
+        """结束批量模式并同步积累的变更。"""
+        return self.flush()
 
 
 

@@ -111,6 +111,12 @@ class AIClient:
         for index, model in enumerate(models):
             attempts = max(1, num_retries + 1)
             for attempt in range(attempts):
+                attempt_number = attempt + 1
+                timeout = params["timeout"]
+                print(
+                    f"[AI] 请求开始: model={model}, "
+                    f"attempt={attempt_number}/{attempts}, timeout={timeout}s"
+                )
                 try:
                     response = completion(model=model, **params)
                     self.last_model = model

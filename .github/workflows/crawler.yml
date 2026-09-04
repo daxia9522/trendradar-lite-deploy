@@ -11,10 +11,48 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
+  guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+    steps:
+      - name: Stale queue guard
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STALE_MINUTES: "30"
+        run: |
+          set -euo pipefail
+
+          if [ "${GITHUB_RUN_ATTEMPT:-1}" -gt 1 ]; then
+            echo "re-run attempt ${GITHUB_RUN_ATTEMPT}; proceeding"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          created=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" --jq .created_at 2>/dev/null || echo "")
+          if [ -z "$created" ]; then
+            echo "::warning::cannot read run created_at; proceeding (fail-open)"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          age=$(( $(date -u +%s) - $(date -u -d "$created" +%s) ))
+          echo "queue wait: ${age}s (threshold: ${STALE_MINUTES}min)"
+          if [ "$age" -gt "$(( STALE_MINUTES * 60 ))" ]; then
+            echo "::warning::stale queued run; skipping crawl/email"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
   crawl:
-    if: vars.ACTIONS_DEPLOYMENT_ENABLED == 'true' || github.event_name == 'workflow_dispatch'
+    needs: guard
+    if: (vars.ACTIONS_DEPLOYMENT_ENABLED == 'true' || github.event_name == 'workflow_dispatch') && needs.guard.outputs.skip != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -61,6 +99,12 @@ jobs:
           AI_MODEL: ${{ secrets.AI_MODEL }}
           # 可选：覆盖 config.yaml ai.fallback_models；未设则用 yaml
           AI_FALLBACK_MODELS: ${{ secrets.AI_FALLBACK_MODELS }}
+          AI_TIMEOUT: ${{ secrets.AI_TIMEOUT }}
+          # 可选：个人兴趣影子筛选，只记录结果，不改变正式推送
+          AI_FILTER_SHADOW_ENABLED: ${{ secrets.AI_FILTER_SHADOW_ENABLED }}
+          AI_FILTER_MODEL: ${{ secrets.AI_FILTER_MODEL }}
+          AI_FILTER_FALLBACK_MODELS: ${{ secrets.AI_FILTER_FALLBACK_MODELS }}
+          AI_FILTER_TIMEOUT: ${{ secrets.AI_FILTER_TIMEOUT }}
           # 远程存储 R2/S3
           S3_BUCKET_NAME: ${{ secrets.S3_BUCKET_NAME }}
           S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
