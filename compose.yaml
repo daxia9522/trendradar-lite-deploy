@@ -20,6 +20,8 @@ services:
       - "${SETUP_SSH_HOST:-}"
       - --ssh-port
       - "${SETUP_SSH_PORT:-0}"
+      - --deployment
+      - docker
     ports:
       - "127.0.0.1:${SETUP_PORT:-8765}:8765"
     volumes:

@@ -27,7 +27,6 @@ TrendRadar Lite 的精简部署发行版：聚合多平台热榜与 RSS，按关
 - 保守事件聚类、来源配额和 RSS 新条目标记
 - HTML 邮件日报和每周 AI 报告
 - 独立来源速览，不占用主事件分析额度
-- 可选 AI 影子兴趣筛选，只记录结果，不改变正式推送
 - 本地 SQLite/TXT/HTML 或 R2/S3 持久化
 - 统一 CLI、配置、环境变量和 `--doctor` 体检
 
@@ -39,7 +38,6 @@ TrendRadar Lite 的精简部署发行版：聚合多平台热榜与 RSS，按关
 - `config/timeline.yaml`
 - `config/frequency_words.txt`
 - `config/ai_analysis_prompt.txt`
-- `config/ai_interests.txt`
 - `python -m trendradar`
 - `python -m trendradar --doctor`
 - `python weekly_report/weekly_ai_report_email.py`
@@ -63,17 +61,11 @@ chmod 600 .env
 | `AI_API_BASE` | 可选 OpenAI-compatible API 地址，原样使用，不自动追加 `/v1` |
 | `AI_FALLBACK_MODELS` | 可选备用模型，逗号分隔 |
 | `AI_TIMEOUT` | AI 请求超时秒数，默认 `240` |
-| `AI_FILTER_SHADOW_ENABLED` | 是否启用个人兴趣影子筛选，默认关闭 |
-| `AI_FILTER_MODEL` | 影子筛选专用模型，留空则使用 `AI_MODEL` |
-| `AI_FILTER_FALLBACK_MODELS` | 影子筛选专用备用模型 |
-| `AI_FILTER_TIMEOUT` | 影子筛选单次请求超时，默认 `90` 秒 |
 | `EMAIL_FROM` / `EMAIL_PASSWORD` / `EMAIL_TO` | 必填的发件、密码或授权码、收件地址 |
 | `EMAIL_SMTP_SERVER` / `EMAIL_SMTP_PORT` | 可选；常见邮箱可自动识别，填写时必须同时填写 |
 | `S3_*` | GitHub Actions 使用的 R2/S3 凭据 |
 
 SMTP 自动识别支持 Gmail、QQ、163、126、189、Outlook、Sina、Sohu、阿里云、Yandex、iCloud 等常见域名。未识别的域名默认使用 `smtp.<发件域名>:587`。
-
-`config/ai_interests.txt` 用于影子筛选的个人兴趣标签。影子结果写入 `output/meta/ai_filter_shadow_latest.json`，不会改变正式日报、周报或关键词推送。
 
 ## 方式一：原生 Linux
 
@@ -318,7 +310,6 @@ output/
 ├── html/latest/
 ├── weekly-ai-reports/
 └── meta/
-    └── ai_filter_shadow_latest.json
 ```
 
 ## 致谢与许可

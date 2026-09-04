@@ -72,6 +72,18 @@ class ConfigureTests(unittest.TestCase):
         values["EMAIL_SMTP_SERVER"] = "smtp.example.com"
         self.assertTrue(any("必须同时填写" in error for error in configure.validate(values)))
 
+    def test_docker_configuration_does_not_offer_host_key_file(self):
+        values = {
+            "EMAIL_FROM": "sender@example.com",
+            "EMAIL_PASSWORD": "secret",
+            "EMAIL_TO": "reader@example.com",
+            "TZ": "Asia/Shanghai",
+            "AI_ANALYSIS_ENABLED": "true",
+            "AI_MODEL": "openai/model",
+        }
+        self.assertTrue(any("AI_API_KEY" in error for error in configure.validate(values, "docker")))
+        self.assertNotIn("AI_API_KEY_FILE", configure.render(values, deployment="docker"))
+
     def test_numeric_ranges_are_validated(self):
         values = {
             "EMAIL_FROM": "sender@example.com",

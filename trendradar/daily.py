@@ -1049,43 +1049,6 @@ class NewsAnalyzer:
         title_info = self._prepare_current_title_info(results, time_info)
         return results, id_to_name, title_info, new_titles
 
-    def _run_ai_filter_shadow(
-        self,
-        *,
-        results: Dict,
-        id_to_name: Dict,
-        title_info: Dict,
-        raw_rss_items: Optional[List[Dict]],
-        word_groups: List[Dict],
-        filter_words: List,
-        global_filters: List[str],
-    ) -> None:
-        """运行个人兴趣影子筛选；任何失败都不得影响现有流水线。"""
-        shadow_config = self.ctx.config.get("AI_FILTER_SHADOW", {})
-        if not shadow_config.get("ENABLED", False):
-            return
-        try:
-            from trendradar.ai.shadow_filter import ShadowInterestFilter
-
-            ShadowInterestFilter(self.ctx.config, self.ctx.get_time).run(
-                results=results,
-                id_to_name=id_to_name,
-                title_info=title_info,
-                raw_rss_items=raw_rss_items,
-                word_groups=word_groups,
-                filter_words=filter_words,
-                global_filters=global_filters,
-            )
-        except Exception as exc:
-            print(
-                "[AI影子筛选] 运行失败，不影响推送: "
-                f"{type(exc).__name__}: {exc}"
-            )
-            if self.ctx.config.get("DEBUG", False):
-                import traceback
-
-                traceback.print_exc()
-
     def _execute_mode_strategy(
         self, results: Dict, id_to_name: Dict, failed_ids: List,
         rss_items: Optional[List[Dict]] = None,
@@ -1112,15 +1075,6 @@ class NewsAnalyzer:
 
         results, id_to_name, title_info, new_titles = self._select_mode_data(
             results, id_to_name, new_titles, time_info
-        )
-        self._run_ai_filter_shadow(
-            results=results,
-            id_to_name=id_to_name,
-            title_info=title_info,
-            raw_rss_items=raw_rss_items,
-            word_groups=word_groups,
-            filter_words=filter_words,
-            global_filters=global_filters,
         )
         standalone_data = self._prepare_standalone_data(
             results, id_to_name, title_info, raw_rss_items

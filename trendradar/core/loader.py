@@ -359,37 +359,6 @@ def _load_ai_analysis_config(config_data: Dict) -> Dict:
     }
 
 
-def _load_ai_filter_shadow_config(config_data: Dict) -> Dict:
-    """加载个人兴趣 AI 影子筛选配置；模型可独立于主分析。"""
-    shadow = config_data.get("ai_filter_shadow", {}) or {}
-    enabled_env = _get_env_bool("AI_FILTER_SHADOW_ENABLED")
-    fallback_env = _get_env_model_list("AI_FILTER_FALLBACK_MODELS")
-    timeout_env = _get_env_int_or_none("AI_FILTER_TIMEOUT")
-
-    return {
-        "ENABLED": (
-            enabled_env if enabled_env is not None else shadow.get("enabled", False)
-        ),
-        "MODEL": _get_env_str("AI_FILTER_MODEL") or shadow.get("model", ""),
-        "FALLBACK_MODELS": (
-            fallback_env
-            if fallback_env is not None
-            else shadow.get("fallback_models", [])
-        ),
-        "TIMEOUT": (
-            timeout_env
-            if timeout_env is not None
-            else int(shadow.get("timeout", 90) or 90)
-        ),
-        "BATCH_SIZE": int(shadow.get("batch_size", 100) or 100),
-        "MIN_CONFIDENCE": float(shadow.get("min_confidence", 0.75) or 0.75),
-        "PREVIEW_TOTAL_LIMIT": int(shadow.get("preview_total_limit", 30) or 30),
-        "PREVIEW_TAG_LIMIT": int(shadow.get("preview_tag_limit", 5) or 5),
-        "PREVIEW_SOURCE_LIMIT": int(shadow.get("preview_source_limit", 8) or 8),
-        "INTERESTS_FILE": shadow.get("interests_file", "ai_interests.txt"),
-    }
-
-
 def _load_storage_config(config_data: Dict) -> Dict:
     """加载存储配置"""
     storage = config_data.get("storage", {})
@@ -512,9 +481,6 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
 
     # AI 分析配置
     config["AI_ANALYSIS"] = _load_ai_analysis_config(config_data)
-
-    # AI 影子筛选配置（仅记录，不改变推送）
-    config["AI_FILTER_SHADOW"] = _load_ai_filter_shadow_config(config_data)
 
     # 推送内容显示配置
     config["DISPLAY"] = _load_display_config(config_data)

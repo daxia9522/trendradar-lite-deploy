@@ -130,7 +130,6 @@ def check_all_versions(
         Path("config/config.yaml"),
         Path("config/timeline.yaml"),
         Path("config/frequency_words.txt"),
-        Path("config/ai_interests.txt"),
         Path("config/ai_analysis_prompt.txt"),
         Path("config/weekly_ai_prompt.txt"),
         Path("config/weekly_keyword_prompt.txt"),
@@ -286,7 +285,6 @@ def _run_doctor(config_path: Optional[str] = None) -> bool:
 
         # 5) AI 配置检查（按功能场景区分严重级别）
         ai_analysis_enabled = config.get("AI_ANALYSIS", {}).get("ENABLED", False)
-        shadow_enabled = config.get("AI_FILTER_SHADOW", {}).get("ENABLED", False)
         if ai_analysis_enabled:
             try:
                 from trendradar.ai.client import AIClient
@@ -297,39 +295,8 @@ def _run_doctor(config_path: Optional[str] = None) -> bool:
                     _record_doctor_result(results, "fail", "AI配置", message)
             except Exception as e:
                 _record_doctor_result(results, "fail", "AI配置", f"校验异常: {e}")
-        elif not shadow_enabled:
+        else:
             _record_doctor_result(results, "warn", "AI配置", "未启用 AI 分析，跳过校验")
-
-        if shadow_enabled:
-            try:
-                from trendradar.ai.client import AIClient
-
-                shadow = config.get("AI_FILTER_SHADOW", {})
-                shadow_ai = dict(config.get("AI", {}))
-                shadow_ai["MODEL"] = shadow.get("MODEL") or shadow_ai.get("MODEL")
-                shadow_ai["FALLBACK_MODELS"] = shadow.get("FALLBACK_MODELS", [])
-                shadow_ai["TIMEOUT"] = shadow.get("TIMEOUT", 90)
-                valid, message = AIClient(shadow_ai).validate_config()
-                interests_path = Path("config") / shadow.get(
-                    "INTERESTS_FILE", "ai_interests.txt"
-                )
-                if not interests_path.exists():
-                    _record_doctor_result(
-                        results,
-                        "fail",
-                        "AI影子筛选",
-                        f"兴趣文件不存在: {interests_path}",
-                    )
-                elif valid:
-                    _record_doctor_result(
-                        results,
-                        "pass",
-                        "AI影子筛选",
-                        f"模型: {shadow_ai.get('MODEL', '')}（不影响推送）",
-                    )
-                else:
-                    _record_doctor_result(results, "fail", "AI影子筛选", message)
-            except Exception as e: _record_doctor_result(results, "fail", "AI影子筛选", f"校验异常: {e}")
 
         # 6) 存储配置检查
         try:

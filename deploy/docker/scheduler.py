@@ -27,6 +27,7 @@ WEEKLY_WEEKDAY = int(os.environ.get("WEEKLY_WEEKDAY", "6"))  # Monday=0
 WEEKLY_HOUR = int(os.environ.get("WEEKLY_HOUR", "12"))
 WEEKLY_MINUTE = int(os.environ.get("WEEKLY_MINUTE", "30"))
 POLL_SECONDS = max(10, int(os.environ.get("SCHEDULER_POLL_SECONDS", "20")))
+MAX_ATTEMPTS_PER_WINDOW = max(1, int(os.environ.get("SCHEDULER_MAX_ATTEMPTS", "3")))
 STOP = False
 
 
@@ -47,12 +48,16 @@ def _save_state(state: dict[str, str]) -> None:
     STATE_PATH.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
 
 
-def _run(name: str, command: list[str], marker: str, state: dict[str, str]) -> None:
+def _run(name: str, command: list[str], marker: str, state: dict[str, str]) -> bool:
     print(f"[scheduler] starting {name}: {marker}", flush=True)
     result = subprocess.run(command, check=False)
+    print(f"[scheduler] {name} exited with {result.returncode}", flush=True)
+    if result.returncode != 0:
+        print(f"[scheduler] {name} failed; it remains eligible for retry", flush=True)
+        return False
     state[name] = marker
     _save_state(state)
-    print(f"[scheduler] {name} exited with {result.returncode}", flush=True)
+    return True
 
 
 def main() -> int:
@@ -64,6 +69,7 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
     state = _load_state()
+    attempts: dict[str, tuple[str, int]] = {}
     print(
         "[scheduler] ready: crawler hourly at minute "
         f"{CRAWLER_MINUTE:02d}; weekly at weekday={WEEKLY_WEEKDAY} "
@@ -78,7 +84,12 @@ def main() -> int:
 
         crawler_due = now.minute == CRAWLER_MINUTE or now.strftime("%H:%M") in PUSH_TIMES
         if crawler_due and state.get("crawler") != minute_marker:
-            _run("crawler", [sys.executable, "-m", "trendradar"], minute_marker, state)
+            marker, count = attempts.get("crawler", ("", 0))
+            if marker != minute_marker:
+                count = 0
+            if count < MAX_ATTEMPTS_PER_WINDOW:
+                attempts["crawler"] = (minute_marker, count + 1)
+                _run("crawler", [sys.executable, "-m", "trendradar"], minute_marker, state)
 
         weekly_due = (
             now.weekday() == WEEKLY_WEEKDAY
@@ -86,12 +97,17 @@ def main() -> int:
             and now.minute == WEEKLY_MINUTE
         )
         if weekly_due and state.get("weekly") != minute_marker:
-            _run(
-                "weekly",
-                [sys.executable, "weekly_report/weekly_ai_report_email.py"],
-                minute_marker,
-                state,
-            )
+            marker, count = attempts.get("weekly", ("", 0))
+            if marker != minute_marker:
+                count = 0
+            if count < MAX_ATTEMPTS_PER_WINDOW:
+                attempts["weekly"] = (minute_marker, count + 1)
+                _run(
+                    "weekly",
+                    [sys.executable, "weekly_report/weekly_ai_report_email.py"],
+                    minute_marker,
+                    state,
+                )
 
         time.sleep(POLL_SECONDS)
 

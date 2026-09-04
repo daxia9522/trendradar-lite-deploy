@@ -98,22 +98,6 @@ ai_analysis:
   source_cap_ratio: 0.30
   include_rank_timeline: true
   include_standalone: true
-
-
-# 个人兴趣 AI 影子筛选：只记录关键词漏报，不改变推送或主分析。
-ai_filter_shadow:
-  enabled: false
-  model: ""
-  fallback_models: []
-  timeout: 90
-  batch_size: 100
-  min_confidence: 0.75
-  preview_total_limit: 30
-  preview_tag_limit: 5
-  preview_source_limit: 8
-  interests_file: ai_interests.txt
-
-
 storage:
   backend: auto
   formats:
