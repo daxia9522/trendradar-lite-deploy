@@ -225,7 +225,7 @@ def _prompt_field(
         note = hint
     label_text = f"{label}{' *' if required else ''}"
     prompt = f"  {label_text}" + (f"（{note}）" if note else "") + ": "
-    entered = getpass.getpass(prompt) if is_secret else input(prompt).strip()
+    entered = (getpass.getpass(prompt) if is_secret else input(prompt)).strip()
     return entered if entered else current.get(key, "")
 
 
@@ -348,6 +348,8 @@ def main() -> int:
         default="auto",
         help="auto: 有终端走问答，否则起网页；terminal: 强制终端；web: 强制网页",
     )
+    parser.add_argument("--terminal", action="store_true", help="等价于 --mode terminal")
+    parser.add_argument("--web", action="store_true", help="等价于 --mode web")
     args = parser.parse_args()
     if args.render_systemd_timer:
         write_systemd_timer(args.render_systemd_timer, read_env(args.output))
@@ -356,15 +358,24 @@ def main() -> int:
         write_systemd_weekly_timer(args.render_systemd_weekly_timer, read_env(args.output))
         return 0
     mode = args.mode
+    if args.terminal:
+        mode = "terminal"
+    if args.web:
+        mode = "web"
     if mode == "auto":
         mode = "terminal" if sys.stdin.isatty() else "web"
     if mode == "terminal":
         try:
             configure_terminal(args.output, args.deployment)
         except EOFError:
-            print("未检测到可交互终端，改用网页配置。", flush=True)
-        else:
-            return 0
+            print(
+                "终端配置不可用：标准输入已结束或无法交互。"
+                "请改用网页配置（--mode web；Docker 安装器会自动发布配置端口）。",
+                file=sys.stderr,
+                flush=True,
+            )
+            return 2
+        return 0
     serve(
         args.output,
         args.host,

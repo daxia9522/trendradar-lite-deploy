@@ -41,7 +41,7 @@ if [[ $NEW_ENV == true || $FORCE_CONFIGURE == true ]]; then
   export SETUP_SSH_USER=${SETUP_SSH_USER:-${SUDO_USER:-$(id -un)}}
   export SETUP_SSH_HOST=${SETUP_SSH_HOST:-${connection[2]:-}}
   export SETUP_SSH_PORT=${SETUP_SSH_PORT:-${connection[3]:-22}}
-  echo "Starting the configuration wizard. Installation continues after you save it."
+  echo "Starting the configuration wizard. Installation continues after you finish it."
   if [[ -t 0 && -t 1 ]]; then
     docker compose --profile setup run --rm --build setup --mode terminal
   else

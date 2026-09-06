@@ -48,7 +48,7 @@ else
 fi
 
 if [[ $NEW_ENV == true || $FORCE_CONFIGURE == true ]]; then
-  echo "Starting the configuration wizard. Installation continues after you save it."
+  echo "Starting the configuration wizard. Installation continues after you finish it."
   "$PYTHON_BIN" "$APP_DIR/deploy/configure.py" --output "$ENV_FILE"
 fi
 

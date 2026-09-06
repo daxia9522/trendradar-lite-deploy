@@ -190,6 +190,34 @@ class ConfigureTests(unittest.TestCase):
             self.assertEqual(loaded["EMAIL_FROM"], "old@example.com")
             self.assertEqual(loaded["EMAIL_PASSWORD"], "old-secret")
 
+    def test_terminal_prompt_strips_secret_and_plain_input(self):
+        with mock.patch.object(configure, "input", lambda _prompt: "  plain@example.com  ", create=True), mock.patch.object(
+            configure.getpass, "getpass", lambda _prompt="": "  sekret  "
+        ):
+            plain = configure._prompt_field("EMAIL_FROM", "发件邮箱", True, "", {})
+            secret = configure._prompt_field("EMAIL_PASSWORD", "密码", True, "", {})
+        self.assertEqual(plain, "plain@example.com")
+        self.assertEqual(secret, "sekret")
+
+    def test_terminal_mode_eof_does_not_start_web_server(self):
+        argv = ["configure.py", "--output", "/tmp/trendradar-nonexistent-env", "--mode", "terminal"]
+        with mock.patch.object(configure, "configure_terminal", side_effect=EOFError), mock.patch.object(
+            configure, "serve"
+        ) as serve_mock, mock.patch.object(configure.sys, "argv", argv):
+            rc = configure.main()
+        self.assertEqual(rc, 2)
+        serve_mock.assert_not_called()
+
+    def test_web_flag_is_alias_for_mode_web(self):
+        argv = ["configure.py", "--output", "/tmp/trendradar-nonexistent-env", "--web"]
+        with mock.patch.object(configure, "configure_terminal") as term_mock, mock.patch.object(
+            configure, "serve"
+        ) as serve_mock, mock.patch.object(configure.sys, "argv", argv):
+            rc = configure.main()
+        self.assertEqual(rc, 0)
+        serve_mock.assert_called_once()
+        term_mock.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
