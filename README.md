@@ -1,4 +1,4 @@
-# TrendRadar Lite Deploy v6.6.0
+# TrendRadar Lite Deploy v6.7.0
 
 TrendRadar Lite 的精简部署发行版：聚合多平台热榜与 RSS，按关键词筛选新闻，生成 HTML 日报和 AI 周报，并通过邮件推送。
 

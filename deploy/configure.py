@@ -8,6 +8,7 @@ import getpass
 import html
 import os
 import re
+import sys
 import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -200,6 +201,61 @@ def write_systemd_weekly_timer(path: Path, values: dict[str, str]) -> None:
     )
 
 
+def _section_of(key: str) -> str:
+    if key.startswith("EMAIL_"):
+        return "邮件推送"
+    if key.startswith("AI_"):
+        return "AI 分析"
+    return "执行时间"
+
+
+def _prompt_field(
+    key: str, label: str, required: bool, hint: str, current: dict[str, str]
+) -> str:
+    """Prompt one field on a terminal; empty input keeps the current value."""
+    is_secret = key in SECRET_FIELDS
+    has_current = bool(current.get(key))
+    if is_secret and has_current:
+        note = "已保存，回车保持不变"
+    elif is_secret:
+        note = hint
+    elif has_current:
+        note = f"当前 {current[key]}，回车保持不变"
+    else:
+        note = hint
+    label_text = f"{label}{' *' if required else ''}"
+    prompt = f"  {label_text}" + (f"（{note}）" if note else "") + ": "
+    entered = getpass.getpass(prompt) if is_secret else input(prompt).strip()
+    return entered if entered else current.get(key, "")
+
+
+def configure_terminal(output: Path, deployment: str = "linux") -> None:
+    """Interactive terminal setup wizard; a TTY-friendly alternative to the web page."""
+    current = read_env(output)
+    fields = _fields_for(deployment)
+    print("TrendRadar Lite 终端配置向导", flush=True)
+    print("邮件为必填（标 *），SMTP 可留空自动识别；AI 可选。直接回车沿用已保存的值。", flush=True)
+    while True:
+        submitted = dict(current)
+        last_section = ""
+        for key, label, required, hint in fields:
+            section = _section_of(key)
+            if section != last_section:
+                print(f"\n[{section}]", flush=True)
+                last_section = section
+            submitted[key] = _prompt_field(key, label, required, hint, current)
+        errors = validate(submitted, deployment=deployment)
+        if not errors:
+            write_env(output, submitted, deployment=deployment)
+            print("\n配置已保存，安装将继续。", flush=True)
+            return
+        print("\n配置有误，请修正后重新填写：", flush=True)
+        for item in errors:
+            print(f"  - {item}", flush=True)
+        print("（已填写的值会保留，回车即可沿用）", flush=True)
+        current = submitted
+
+
 def detect_ssh_target(user: str, host: str, ssh_port: int) -> tuple[str, str, int]:
     connection = os.environ.get("SSH_CONNECTION", "").split()
     if not host and len(connection) == 4:
@@ -286,6 +342,12 @@ def main() -> int:
     parser.add_argument("--render-systemd-timer", type=Path)
     parser.add_argument("--render-systemd-weekly-timer", type=Path)
     parser.add_argument("--deployment", choices=("linux", "docker"), default="linux")
+    parser.add_argument(
+        "--mode",
+        choices=("auto", "terminal", "web"),
+        default="auto",
+        help="auto: 有终端走问答，否则起网页；terminal: 强制终端；web: 强制网页",
+    )
     args = parser.parse_args()
     if args.render_systemd_timer:
         write_systemd_timer(args.render_systemd_timer, read_env(args.output))
@@ -293,6 +355,16 @@ def main() -> int:
     if args.render_systemd_weekly_timer:
         write_systemd_weekly_timer(args.render_systemd_weekly_timer, read_env(args.output))
         return 0
+    mode = args.mode
+    if mode == "auto":
+        mode = "terminal" if sys.stdin.isatty() else "web"
+    if mode == "terminal":
+        try:
+            configure_terminal(args.output, args.deployment)
+        except EOFError:
+            print("未检测到可交互终端，改用网页配置。", flush=True)
+        else:
+            return 0
     serve(
         args.output,
         args.host,

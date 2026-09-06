@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -139,6 +140,55 @@ class ConfigureTests(unittest.TestCase):
             configure.write_systemd_weekly_timer(path, values)
             content = path.read_text(encoding="utf-8")
         self.assertIn("OnCalendar=Mon *-*-* 09:45:00 UTC", content)
+
+    def test_terminal_wizard_writes_env_from_prompts(self):
+        answers = {
+            "发件邮箱 *": "sender@example.com",
+            "邮箱密码或授权码 *": "secret value",
+            "收件邮箱 *": "reader@example.com",
+            "时区 *": "Asia/Shanghai",
+        }
+
+        def fake_input(prompt: str) -> str:
+            for label, value in answers.items():
+                if label in prompt:
+                    return value
+            return ""
+
+        def fake_getpass(prompt: str = "") -> str:
+            return fake_input(prompt)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "env"
+            with mock.patch.object(configure, "input", fake_input, create=True), mock.patch.object(
+                configure.getpass, "getpass", fake_getpass
+            ):
+                configure.configure_terminal(path, deployment="docker")
+            loaded = configure.read_env(path)
+            self.assertEqual(loaded["EMAIL_FROM"], "sender@example.com")
+            self.assertEqual(loaded["EMAIL_PASSWORD"], "secret value")
+            self.assertEqual(loaded["STORAGE_BACKEND"], "local")
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+
+    def test_terminal_wizard_empty_input_keeps_existing_value(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "env"
+            configure.write_env(
+                path,
+                {
+                    "EMAIL_FROM": "old@example.com",
+                    "EMAIL_PASSWORD": "old-secret",
+                    "EMAIL_TO": "reader@example.com",
+                    "TZ": "Asia/Shanghai",
+                },
+            )
+            with mock.patch.object(configure, "input", lambda _prompt: "", create=True), mock.patch.object(
+                configure.getpass, "getpass", lambda _prompt="": ""
+            ):
+                configure.configure_terminal(path)
+            loaded = configure.read_env(path)
+            self.assertEqual(loaded["EMAIL_FROM"], "old@example.com")
+            self.assertEqual(loaded["EMAIL_PASSWORD"], "old-secret")
 
 
 if __name__ == "__main__":
