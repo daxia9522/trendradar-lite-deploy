@@ -4,13 +4,14 @@
 import smtplib
 import ssl
 import re
+import time
 from datetime import datetime
 from email.header import Header
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr, formatdate, make_msgid
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 SMTP_CONFIGS = {
     "gmail.com": {"server": "smtp.gmail.com", "port": 587, "encryption": "TLS"},
@@ -32,6 +33,64 @@ SMTP_CONFIGS = {
 
 _EMAIL_RE = re.compile(r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$")
 
+# 首次失败后的重试间隔（秒）。授权码与网络正常时投递只需数秒，
+# 这里只覆盖 SMTP 侧偶发的瞬时拒绝，因此间隔保持短促。
+SEND_RETRY_DELAYS = (3, 15)
+
+
+def _is_retryable_smtp_error(exc: Exception) -> bool:
+    # 保留供应商兼容策略：认证错误仍重试（包括 535），不泛化到其他 5xx。
+    if isinstance(exc, smtplib.SMTPAuthenticationError):
+        return True
+    if isinstance(exc, smtplib.SMTPRecipientsRefused):
+        # 抛异常表示本次未投递；仅全部为临时拒收时才重试整个信封。
+        return bool(exc.recipients) and all(
+            400 <= code < 500 for code, _ in exc.recipients.values()
+        )
+    if isinstance(exc, smtplib.SMTPResponseException):
+        return 400 <= exc.smtp_code < 500
+    return isinstance(exc, (smtplib.SMTPServerDisconnected, OSError))
+
+
+def _deliver_once(
+    *,
+    smtp_server: str,
+    smtp_port: int,
+    use_tls: bool,
+    tls_context: ssl.SSLContext,
+    from_email: str,
+    password: str,
+    recipients: List[str],
+    msg: MIMEMultipart,
+) -> Dict[str, Tuple[int, bytes]]:
+    """建立连接、登录并投递；返回拒收字典，异常交由调用方判定。
+
+    每次尝试都新建连接并确保关闭，避免复用半开连接。
+    """
+    server = None
+    try:
+        if use_tls:
+            server = smtplib.SMTP(smtp_server, smtp_port, timeout=30)
+            server.ehlo()
+            server.starttls(context=tls_context)
+            server.ehlo()
+        else:
+            server = smtplib.SMTP_SSL(
+                smtp_server,
+                smtp_port,
+                timeout=30,
+                context=tls_context,
+            )
+            server.ehlo()
+        server.login(from_email, password)
+        return server.send_message(msg, from_addr=from_email, to_addrs=recipients)
+    finally:
+        if server is not None:
+            try:
+                server.quit()
+            except Exception:
+                pass
+
 
 def send_to_email(
     from_email: str,
@@ -45,8 +104,12 @@ def send_to_email(
     get_time_func: Callable = None,
     subject_override: Optional[str] = None,
     sender_name_override: Optional[str] = None,
+    on_partial_delivery: Optional[Callable[[], None]] = None,
 ) -> bool:
-    """发送 HTML 报告邮件。"""
+    """发送 HTML 报告；仅所有收件人均被 SMTP 接受时返回 True。
+
+    部分拒收返回 False 并停止重试；回调用于上层记录已发生投递，阻止整批补发。
+    """
     try:
         if not _EMAIL_RE.fullmatch(from_email.strip()):
             print("错误：发件人地址无效")
@@ -113,25 +176,41 @@ def send_to_email(
         # 显式校验 SMTP 证书（Python 默认 starttls/SMTP_SSL context 不校验）
         tls_context = ssl.create_default_context()
 
-        if use_tls:
-            server = smtplib.SMTP(smtp_server, smtp_port, timeout=30)
-            server.ehlo()
-            server.starttls(context=tls_context)
-            server.ehlo()
-        else:
-            server = smtplib.SMTP_SSL(
-                smtp_server,
-                smtp_port,
-                timeout=30,
-                context=tls_context,
-            )
-            server.ehlo()
-
-        server.login(from_email, password)
-        server.send_message(msg, from_addr=from_email, to_addrs=recipients)
-        server.quit()
-        print(f"邮件发送成功 [{report_type}]")
-        return True
+        attempts = len(SEND_RETRY_DELAYS) + 1
+        for attempt in range(1, attempts + 1):
+            try:
+                refused = _deliver_once(
+                    smtp_server=smtp_server,
+                    smtp_port=smtp_port,
+                    use_tls=use_tls,
+                    tls_context=tls_context,
+                    from_email=from_email,
+                    password=password,
+                    recipients=recipients,
+                    msg=msg,
+                )
+            except (smtplib.SMTPException, OSError) as exc:
+                if not _is_retryable_smtp_error(exc) or attempt == attempts:
+                    raise
+                delay = SEND_RETRY_DELAYS[attempt - 1]
+                # 只记录异常类型：SMTP 异常文本可能包含邮箱地址。
+                print(
+                    f"邮件发送第 {attempt}/{attempts} 次失败"
+                    f"（{type(exc).__name__}），{delay} 秒后重试"
+                )
+                time.sleep(delay)
+            else:
+                if refused:
+                    # 正常返回非空字典表示已部分投递，不能再按整批失败重试。
+                    print(
+                        f"邮件部分投递：{len(refused)} 个收件人被拒绝；"
+                        "其余已被 SMTP 接受，不自动重试"
+                    )
+                    if on_partial_delivery is not None:
+                        on_partial_delivery()
+                    return False
+                print(f"邮件发送成功 [{report_type}]")
+                return True
 
     except smtplib.SMTPAuthenticationError:
         print("邮件发送失败：认证错误，请检查邮箱和密码/授权码")

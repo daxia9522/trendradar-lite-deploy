@@ -28,6 +28,8 @@ WEEKLY_HOUR = int(os.environ.get("WEEKLY_HOUR", "12"))
 WEEKLY_MINUTE = int(os.environ.get("WEEKLY_MINUTE", "30"))
 POLL_SECONDS = max(10, int(os.environ.get("SCHEDULER_POLL_SECONDS", "20")))
 MAX_ATTEMPTS_PER_WINDOW = max(1, int(os.environ.get("SCHEDULER_MAX_ATTEMPTS", "3")))
+# 周报的部分投递退出码；窗口已处理，但不是全成功。
+PARTIAL_EMAIL_EXIT_CODE = 6
 STOP = False
 
 
@@ -52,6 +54,11 @@ def _run(name: str, command: list[str], marker: str, state: dict[str, str]) -> b
     print(f"[scheduler] starting {name}: {marker}", flush=True)
     result = subprocess.run(command, check=False)
     print(f"[scheduler] {name} exited with {result.returncode}", flush=True)
+    if name == "weekly" and result.returncode == PARTIAL_EMAIL_EXIT_CODE:
+        print("[scheduler] weekly partially delivered; no automatic whole-task retry", flush=True)
+        state[name] = marker
+        _save_state(state)
+        return False
     if result.returncode != 0:
         print(f"[scheduler] {name} failed; it remains eligible for retry", flush=True)
         return False

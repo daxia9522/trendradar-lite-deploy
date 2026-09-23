@@ -18,6 +18,7 @@ class NotificationDispatcher:
     ):
         self.config = config
         self.get_time_func = get_time_func
+        self.email_partially_delivered = False
 
     def _email_ready(self) -> bool:
         return bool(
@@ -45,6 +46,10 @@ class NotificationDispatcher:
             f"{label} · {now.strftime('%m月%d日 %H:%M')}"
         )
         port = self.config.get("EMAIL_SMTP_PORT") or None
+
+        def mark_partial_delivery() -> None:
+            self.email_partially_delivered = True
+
         return send_to_email(
             from_email=self.config["EMAIL_FROM"],
             password=self.config["EMAIL_PASSWORD"],
@@ -56,6 +61,7 @@ class NotificationDispatcher:
             get_time_func=self.get_time_func,
             subject_override=subject,
             sender_name_override=sender_label,
+            on_partial_delivery=mark_partial_delivery,
         )
 
     def dispatch_all(
@@ -66,6 +72,7 @@ class NotificationDispatcher:
         period_name: Optional[str] = None,
     ) -> Dict[str, bool]:
         """发送已生成的邮件 HTML。"""
+        self.email_partially_delivered = False
         results: Dict[str, bool] = {}
         if self._email_ready():
             results["email"] = self._send_email(

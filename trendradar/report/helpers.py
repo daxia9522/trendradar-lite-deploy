@@ -42,7 +42,10 @@ def safe_report_url(value: object) -> Optional[str]:
     if not isinstance(value, str):
         return None
     url = value.strip()
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return None
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return None
     return url

@@ -609,8 +609,8 @@ class NewsAnalyzer:
                 print("未配置任何通知渠道，跳过通知发送")
                 return False
 
-            # 记录推送成功
-            if any(results.values()):
+            # 部分接受也占用一次推送窗口，防止下轮整批补发；仍返回未全成功。
+            if any(results.values()) or dispatcher.email_partially_delivered:
                 if schedule.once_push and schedule.period_key:
                     scheduler = self.ctx.create_scheduler()
                     date_str = self.ctx.format_date()

@@ -33,6 +33,8 @@ from trendradar.utils.time import DEFAULT_TIMEZONE
 OUTPUT_DIR = PROJECT_ROOT / "output" / "weekly-ai-reports"
 WEEKLY_AI_PROMPT_FILE = PROJECT_ROOT / "config" / "weekly_ai_prompt.txt"
 WEEKLY_KEYWORD_PROMPT_FILE = PROJECT_ROOT / "config" / "weekly_keyword_prompt.txt"
+# 与 deploy/docker/scheduler.py 对齐：部分投递不允许自动整批重跑。
+PARTIAL_EMAIL_EXIT_CODE = 6
 
 
 def build_report_context() -> AppContext:
@@ -1871,6 +1873,12 @@ def main() -> int:
         return 3
 
     final_subject = args.subject or f"AI周报（{dr}）"
+    partial_delivery = False
+
+    def mark_partial_delivery() -> None:
+        nonlocal partial_delivery
+        partial_delivery = True
+
     ok = send_to_email(
         from_email=from_email,
         password=password,
@@ -1881,7 +1889,10 @@ def main() -> int:
         custom_smtp_port=int(smtp_port) if smtp_port else None,
         subject_override=final_subject,
         sender_name_override="AI周报",
+        on_partial_delivery=mark_partial_delivery,
     )
+    if partial_delivery:
+        return PARTIAL_EMAIL_EXIT_CODE
     return 0 if ok else 4
 
 

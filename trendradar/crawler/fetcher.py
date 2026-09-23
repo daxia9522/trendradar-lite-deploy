@@ -150,7 +150,7 @@ class DataFetcher:
                         url,
                         proxies=proxies,
                         headers=self.DEFAULT_HEADERS,
-                        timeout=10,
+                        timeout=(2, 5),
                     )
                     response.raise_for_status()
 
@@ -166,29 +166,29 @@ class DataFetcher:
                         print(f"获取 {id_value} 成功（{status_info}）")
                     else:
                         print(
-                            f"获取 {id_value} 成功（{status_info}，经 {source_label}: {api_base}）"
+                            f"获取 {id_value} 成功（{status_info}，经 {source_label}）"
                         )
                     return data_text, id_value, alias
 
                 except Exception as e:
+                    # API/代理 URL 和异常正文可能含凭据；仅记录来源标签及异常类型。
                     retries += 1
                     if retries <= retries_limit:
                         base_wait = random.uniform(min_retry_wait, max_retry_wait)
                         additional_wait = (retries - 1) * random.uniform(1, 2)
                         wait_time = base_wait + additional_wait
                         print(
-                            f"请求 {id_value} 失败[{source_label}]: {e}. "
+                            f"请求 {id_value} 失败[{source_label}]: {type(e).__name__}. "
                             f"{wait_time:.2f}秒后重试..."
                         )
                         time.sleep(wait_time)
                     elif base_index + 1 < total_bases:
-                        next_base = self.api_urls[base_index + 1]
                         print(
-                            f"请求 {id_value} 主路径耗尽[{source_label}]: {e}；"
-                            f"切换 fallback -> {next_base}"
+                            f"请求 {id_value} 主路径耗尽[{source_label}]: {type(e).__name__}；"
+                            f"切换 fallback#{base_index + 1}"
                         )
                     else:
-                        print(f"请求 {id_value} 失败: {e}")
+                        print(f"请求 {id_value} 失败[{source_label}]: {type(e).__name__}")
 
         return None, id_value, alias
 

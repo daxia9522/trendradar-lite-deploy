@@ -21,6 +21,7 @@ class PrivacyLoggingTests(unittest.TestCase):
             report = Path(temp_dir) / "report.html"
             report.write_text("<html>report</html>", encoding="utf-8")
             smtp = Mock()
+            smtp.send_message.return_value = {}
 
             with patch("trendradar.notification.senders.smtplib.SMTP_SSL", return_value=smtp):
                 sent = send_to_email(
@@ -50,6 +51,7 @@ class PrivacyLoggingTests(unittest.TestCase):
             report = Path(temp_dir) / "report.html"
             report.write_text("<html>report</html>", encoding="utf-8")
             smtp = Mock()
+            smtp.send_message.return_value = {}
             output = io.StringIO()
 
             with patch("trendradar.notification.senders.smtplib.SMTP_SSL", return_value=smtp):
@@ -86,16 +88,18 @@ class PrivacyLoggingTests(unittest.TestCase):
             output = io.StringIO()
 
             with patch("trendradar.notification.senders.smtplib.SMTP_SSL", return_value=smtp):
-                with redirect_stdout(output):
-                    sent = send_to_email(
-                        "sender@example.invalid",
-                        "test-password",
-                        "recipient@example.invalid",
-                        "daily",
-                        str(report),
-                        custom_smtp_server="smtp.example.invalid",
-                        custom_smtp_port=465,
-                    )
+                # 认证错误属于可重试类别；这里只关心日志隐私，替换真实等待。
+                with patch("trendradar.notification.senders.time.sleep"):
+                    with redirect_stdout(output):
+                        sent = send_to_email(
+                            "sender@example.invalid",
+                            "test-password",
+                            "recipient@example.invalid",
+                            "daily",
+                            str(report),
+                            custom_smtp_server="smtp.example.invalid",
+                            custom_smtp_port=465,
+                        )
 
         self.assertFalse(sent)
         self.assertIn("认证错误", output.getvalue())
