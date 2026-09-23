@@ -150,7 +150,7 @@ Actions 固定 `STORAGE_BACKEND=remote`，每日数据库写入 R2/S3，周报�
 
 ## 方式三：Docker Compose
 
-前置：Docker Engine + Compose v2。全新系统用 Docker 官方脚本安装（勿用 Ubuntu 自带的 `docker.io` 包，官方文档将其列为需先移除的冲突包）：
+前置：Docker Engine + Compose v2。全新系统用 Docker 官方脚本安装：
 
 ```bash
 curl -fsSL https://get.docker.com | sh
