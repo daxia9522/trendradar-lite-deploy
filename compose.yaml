@@ -3,7 +3,8 @@ services:
     profiles: ["setup"]
     build:
       context: .
-    image: trendradar-lite-deploy:local
+    image: ${TREND_RADAR_IMAGE:-ghcr.io/daxia9522/trendradar-lite-deploy:latest}
+    pull_policy: missing
     user: "0:0"
     entrypoint:
       - python
@@ -30,7 +31,8 @@ services:
   trendradar:
     build:
       context: .
-    image: trendradar-lite-deploy:local
+    image: ${TREND_RADAR_IMAGE:-ghcr.io/daxia9522/trendradar-lite-deploy:latest}
+    pull_policy: missing
     restart: unless-stopped
     env_file:
       - .env

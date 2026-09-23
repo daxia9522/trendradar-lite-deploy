@@ -43,18 +43,19 @@ if [[ $NEW_ENV == true || $FORCE_CONFIGURE == true ]]; then
   export SETUP_SSH_PORT=${SETUP_SSH_PORT:-${connection[3]:-22}}
   echo "Starting the configuration wizard. Installation continues after you finish it."
   if [[ -t 0 && -t 1 ]]; then
-    docker compose --profile setup run --rm --build setup --mode terminal
+    docker compose --profile setup run --rm setup --mode terminal || docker compose --profile setup run --rm --build setup --mode terminal
   else
-    docker compose --profile setup run --rm --build --service-ports setup --mode web
+    docker compose --profile setup run --rm --service-ports setup --mode web || docker compose --profile setup run --rm --build --service-ports setup --mode web
   fi
 fi
 
 if [[ $START == true ]]; then
-  docker compose up -d --build trendradar
+  docker compose pull --quiet trendradar || docker compose build trendradar
+  docker compose up -d trendradar
   docker compose ps trendradar
   echo "Docker deployment completed. Logs: docker compose logs -f trendradar"
 else
-  echo "Configuration completed. Start later with: docker compose up -d --build trendradar"
+  echo "Configuration completed. Start later with: docker compose up -d trendradar"
 fi
 
 echo "Reconfigure: ./deploy/docker/install.sh --configure"

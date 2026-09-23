@@ -198,7 +198,7 @@ cd trendradar-lite-deploy
 ./deploy/docker/install.sh
 ```
 
-安装器会检查 Docker Compose、创建权限为 `600` 的私密 `.env`，通过一次性 setup 容器打开配置页；保存配置后会自动构建镜像、启动服务并显示容器状态。安装完成后检查：
+安装器会检查 Docker Compose、创建权限为 `600` 的私密 `.env`，通过一次性 setup 容器打开配置页；保存配置后会自动拉取 GHCR 预构建镜像（拉取失败时回退本地构建）、启动服务并显示容器状态。安装完成后检查：
 
 ```bash
 docker compose ps trendradar

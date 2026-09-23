@@ -28,6 +28,7 @@ rm -f -- "$APP_DIR/.env"
 echo "Docker services, data volume, and private .env removed."
 
 if [[ $MODE == purge-all ]]; then
+  docker image rm ghcr.io/daxia9522/trendradar-lite-deploy:latest 2>/dev/null || true
   docker image rm trendradar-lite-deploy:local 2>/dev/null || true
   echo "Local TrendRadar Docker image removed when it was not used by another container."
 fi
