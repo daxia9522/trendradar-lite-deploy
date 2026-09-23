@@ -2,8 +2,6 @@ name: Get Hot News
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "5 * * * *"
 
 concurrency:
   group: crawler-${{ github.ref_name }}
@@ -52,7 +50,7 @@ jobs:
 
   crawl:
     needs: guard
-    if: (vars.ACTIONS_DEPLOYMENT_ENABLED == 'true' || github.event_name == 'workflow_dispatch') && needs.guard.outputs.skip != 'true'
+    if: needs.guard.outputs.skip != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 

@@ -2,9 +2,6 @@ name: Weekly AI Report
 
 on:
   workflow_dispatch:
-  schedule:
-    # GitHub cron is UTC: Sunday 04:30 UTC = 12:30 Asia/Shanghai.
-    - cron: "30 4 * * 0"
 
 concurrency:
   group: weekly-report-${{ github.ref_name }}
@@ -53,7 +50,7 @@ jobs:
 
   weekly-report:
     needs: guard
-    if: (vars.ACTIONS_DEPLOYMENT_ENABLED == 'true' || github.event_name == 'workflow_dispatch') && needs.guard.outputs.skip != 'true'
+    if: needs.guard.outputs.skip != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
