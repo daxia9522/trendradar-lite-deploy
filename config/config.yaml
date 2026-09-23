@@ -84,7 +84,7 @@ ai:
   # AI_API_KEY=密钥（切勿写入本文件）
   model: ""
   api_base: ""
-  timeout: 240
+  timeout: 120
   fallback_models: []
 
 
