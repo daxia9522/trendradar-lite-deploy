@@ -142,22 +142,105 @@ loginctl enable-linger "$USER"          # 退出 SSH 后 timer 仍要运行时�
 
 ## 方式二：GitHub Actions
 
-无需服务器，数据持久化依赖 R2/S3。触发方式：**仅 `workflow_dispatch`**（可手动或由外部定时调用）。GitHub 内置 cron 有排队延迟风险，建议用云函数定时器（如腾讯云/阿里云函数计算）或任意 crontab 按时调用 API 触发，保证准点：
-
-```bash
-curl -X POST \
-  -H "Authorization: Bearer <PAT>" \
-  -H "Accept: application/vnd.github+json" \
-  https://api.github.com/repos/<owner>/trendradar-lite-deploy/actions/workflows/crawler.yml/dispatches \
-  -d '{"ref":"main"}'
-```
+无需服务器，数据持久化依赖 R2/S3。触发方式：**仅 `workflow_dispatch`**（可手动或由外部定时调用）。可用云函数定时器或已有主机的 crontab 按计划调用 GitHub API；外部定时能减少对 GitHub 内置定时调度的依赖，但 Actions 仍可能排队。
 
 步骤：
 
-1. Fork 或直接使用本仓库；
+1. Fork 或使用自己有写权限的目标仓库；
 2. 在 `Settings → Secrets and variables → Actions` 配置下表 Secrets（AI 变量按[共同配置](#共同配置)一节）；
-3. 手动运行 `Get Hot News`、`Weekly AI Report` 各一次完成首验；
-4. 外部定时器按需要的时刻 dispatch。
+3. 手动运行 `Get Hot News`、`Weekly AI Report` 各一次完成首验（会真实调用 AI 和发送邮件）；
+4. 外部定时器按需要的推送时刻 dispatch。
+
+### 华为云函数调用模板
+
+创建 Python 事件函数，把下面的代码保存为 `index.py`，执行入口设为 **`index.handler`**。在函数中配置一个环境变量 **`GITHUB_TOKEN`**，值为你的 GitHub PAT；细粒度 PAT 选择目标仓库并授予 **Actions: Read and write**。
+
+需要确认的值：
+
+- **`<用户名>`**：替换为你的 GitHub 用户名或组织名。
+- **`<仓库名>`**：替换为目标仓库名，例如 `trendradar-lite-deploy`。
+- **`workflow` / `ref`**：默认 `crawler.yml` / `main`，通常不用改。
+
+**PAT 只限定访问权限，不会自动选择仓库。代码中的 `owner/repo` 必须与 PAT 授权的仓库对应。** 以下沿用原有函数逻辑；使用前将 `<用户名>`、`<仓库名>` 连同尖括号替换为实际值。
+
+<details>
+<summary>展开复制完整 Python 代码</summary>
+
+```python
+# -*- coding: utf-8 -*-
+"""GitHub workflow_dispatch。入口: index.handler
+环境变量必填: GITHUB_TOKEN
+默认: <用户名>/<仓库名> / crawler.yml / main
+TIMER 附加或测试事件可覆盖, 例:
+ {"workflow":"weekly-report.yml"}
+"""
+import json
+import os
+import urllib.error
+import urllib.request
+
+
+def _dict(v):
+    if isinstance(v, dict):
+        return v
+    if isinstance(v, str) and v.strip():
+        try:
+            o = json.loads(v)
+            return o if isinstance(o, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def handler(event, context):
+    token = os.environ["GITHUB_TOKEN"]
+    ev = _dict(event)
+    cfg = _dict(ev.get("user_event")) or ev
+
+    owner = cfg.get("owner") or "<用户名>"
+    repo = cfg.get("repo") or "<仓库名>"
+    workflow = cfg.get("workflow") or cfg.get("workflow_id") or "crawler.yml"
+    ref = cfg.get("ref") or "main"
+
+    url = (
+        f"https://api.github.com/repos/{owner}/{repo}"
+        f"/actions/workflows/{workflow}/dispatches"
+    )
+    req = urllib.request.Request(
+        url,
+        data=json.dumps({"ref": ref}).encode("utf-8"),
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "Content-Type": "application/json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "huawei-fg-trendradar",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return {"ok": resp.status == 204, "status": resp.status, "workflow": workflow}
+    except urllib.error.HTTPError as e:
+        return {
+            "ok": False,
+            "status": e.code,
+            "workflow": workflow,
+            "error": e.read().decode("utf-8", errors="replace"),
+        }
+    except Exception as e:
+        return {"ok": False, "status": 0, "workflow": workflow, "error": str(e)}
+```
+
+</details>
+
+在华为云 TIMER 的“附加信息”或函数测试事件中填写：
+
+- 日报：`{}`（使用代码中的默认配置）。
+- 周报：`{"workflow":"weekly-report.yml"}`。
+- 不改代码也可通过事件指定目标，填写前替换占位符：`{"owner":"<用户名>","repo":"<仓库名>","workflow":"crawler.yml","ref":"main"}`。
+
+返回 `ok: true, status: 204` 表示 GitHub 已接受触发请求，实际执行结果到仓库 **Actions** 查看。当前外部 dispatch 也会绕过分析/推送时间窗和 once 去重，因此按需要的推送时刻触发，不要照搬原生 Linux 的每小时采集频率。
 
 ### R2/S3 Secrets（Actions 必填）
 
