@@ -26,7 +26,8 @@ services:
     ports:
       - "127.0.0.1:${SETUP_PORT:-8765}:8765"
     volumes:
-      - ./.env:/setup/.env
+      # Mount the directory so the wizard can atomically replace .env and keep a private backup.
+      - .:/setup
 
   trendradar:
     build:

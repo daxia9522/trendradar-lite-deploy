@@ -12,6 +12,8 @@ index.html
 # local secrets only
 .env
 docker/.env
+.env.backups/
+..env.backups/
 *.bak-*
 *.log
 .DS_Store

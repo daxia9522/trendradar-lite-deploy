@@ -9,111 +9,62 @@ UNIT_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
 PYTHON_BIN=${PYTHON_BIN:-python3}
 ENABLE_TIMERS=true
 FORCE_CONFIGURE=false
+MODE_ARGS=()
 
 for arg in "$@"; do
   case "$arg" in
     --no-enable) ENABLE_TIMERS=false ;;
     --configure) FORCE_CONFIGURE=true ;;
-    *)
-      echo "Usage: $0 [--no-enable] [--configure]" >&2
-      exit 2
-      ;;
+    --web) MODE_ARGS=(--web) ;;
+    *) echo "Usage: $0 [--no-enable] [--configure] [--web]" >&2; exit 2 ;;
   esac
 done
 
-command -v "$PYTHON_BIN" >/dev/null || {
-  echo "Python 3 is required." >&2
-  exit 1
-}
-command -v systemctl >/dev/null || {
-  echo "systemd is required for the native Linux deployment." >&2
-  exit 1
-}
-
+command -v "$PYTHON_BIN" >/dev/null || { echo "Python 3 is required." >&2; exit 1; }
 "$PYTHON_BIN" -c 'import sys; raise SystemExit(sys.version_info < (3, 10))' || {
-  echo "Python 3.10 or newer is required." >&2
-  exit 1
+  echo "Python 3.10 or newer is required." >&2; exit 1;
 }
 
-mkdir -p "$CONFIG_DIR" "$UNIT_DIR" "$APP_DIR/output"
+# Configuration-only mode must not install dependencies or change timer enablement.
+if [[ $FORCE_CONFIGURE == true ]]; then
+  exec "$PYTHON_BIN" "$APP_DIR/deploy/configure.py" --output "$ENV_FILE" --unit-dir "$UNIT_DIR" "${MODE_ARGS[@]}"
+fi
+command -v systemctl >/dev/null || { echo "systemd is required." >&2; exit 1; }
+"$PYTHON_BIN" "$APP_DIR/deploy/native_install.py" check-launcher --output "$ENV_FILE" --unit-dir "$UNIT_DIR"
 
-NEW_ENV=false
+NEW_INSTALL=false
+if [[ ! -e $UNIT_DIR/trendradar-lite.timer && ! -e $UNIT_DIR/trendradar-weekly.timer ]]; then
+  NEW_INSTALL=true
+fi
 if [[ ! -f $ENV_FILE ]]; then
-  install -m 600 "$APP_DIR/.env.example" "$ENV_FILE"
-  NEW_ENV=true
-  echo "Created $ENV_FILE."
-else
-  chmod 600 "$ENV_FILE"
-  echo "Preserved existing environment file: $ENV_FILE"
+  # No template, directory, launcher, unit or venv is written until confirmed save.
+  "$PYTHON_BIN" "$APP_DIR/deploy/configure.py" --output "$ENV_FILE" --unit-dir "$UNIT_DIR" --install "${MODE_ARGS[@]}"
 fi
 
-if [[ $NEW_ENV == true || $FORCE_CONFIGURE == true ]]; then
-  echo "Starting the configuration wizard. Installation continues after you finish it."
-  "$PYTHON_BIN" "$APP_DIR/deploy/configure.py" --output "$ENV_FILE"
-fi
-
+mkdir -p "$APP_DIR/output"
 if [[ ! -x $APP_DIR/.venv/bin/python ]]; then
   if ! "$PYTHON_BIN" -m venv "$APP_DIR/.venv"; then
-    rm -rf -- "$APP_DIR/.venv"
-    echo "Failed to create a virtual environment." >&2
-    echo "Install the Python venv package first (Ubuntu/Debian: apt install python3-venv)." >&2
+    echo "Failed to create a virtual environment. Install python3-venv first." >&2
     exit 1
   fi
 fi
 "$APP_DIR/.venv/bin/python" -m pip install --upgrade pip
 "$APP_DIR/.venv/bin/python" -m pip install -r "$APP_DIR/requirements.txt"
 
-escape_sed() {
-  printf '%s' "$1" | sed 's/[&|\\]/\\&/g'
-}
-
-app_escaped=$(escape_sed "$APP_DIR")
-env_escaped=$(escape_sed "$ENV_FILE")
-python_escaped=$(escape_sed "$APP_DIR/.venv/bin/python")
-
-for name in trendradar-lite trendradar-weekly; do
-  sed \
-    -e "s|@APP_DIR@|$app_escaped|g" \
-    -e "s|@ENV_FILE@|$env_escaped|g" \
-    -e "s|@PYTHON@|$python_escaped|g" \
-    "$APP_DIR/deploy/systemd/$name.service.in" \
-    > "$UNIT_DIR/$name.service"
-  chmod 644 "$UNIT_DIR/$name.service"
-  install -m 644 "$APP_DIR/deploy/systemd/$name.timer" "$UNIT_DIR/$name.timer"
-done
-
-"$PYTHON_BIN" "$APP_DIR/deploy/configure.py" \
-  --output "$ENV_FILE" \
-  --render-systemd-timer "$UNIT_DIR/trendradar-lite.timer"
-
-"$PYTHON_BIN" "$APP_DIR/deploy/configure.py" \
-  --output "$ENV_FILE" \
-  --render-systemd-weekly-timer "$UNIT_DIR/trendradar-weekly.timer"
-
-systemctl --user daemon-reload
-if [[ $ENABLE_TIMERS == true ]]; then
+"$PYTHON_BIN" "$APP_DIR/deploy/native_install.py" install-units --output "$ENV_FILE" --unit-dir "$UNIT_DIR"
+"$PYTHON_BIN" "$APP_DIR/deploy/native_install.py" install-launcher --output "$ENV_FILE" --unit-dir "$UNIT_DIR"
+if [[ $NEW_INSTALL == true && $ENABLE_TIMERS == true ]]; then
+  # Only a first installation explicitly enables timers. Maintenance preserves state.
   systemctl --user enable --now trendradar-lite.timer trendradar-weekly.timer
 fi
 
-(
-  cd "$APP_DIR"
-  set -a
-  # The setup wizard creates this private shell-compatible environment file.
-  source "$ENV_FILE"
-  set +a
-  "$APP_DIR/.venv/bin/python" -m trendradar --doctor
-)
+case ":$PATH:" in
+  *":$HOME/.local/bin:"*) ;;
+  *) echo "Warning: $HOME/.local/bin is not on PATH. Shell startup files were not modified."
+     echo "Use $HOME/.local/bin/trendradar, or add that directory to PATH yourself." ;;
+esac
 
-if command -v loginctl >/dev/null; then
-  user_name=$(id -un)
-  linger=$(loginctl show-user "$user_name" -p Linger --value 2>/dev/null || true)
-  if [[ $linger != "yes" ]]; then
-    echo "Warning: user lingering is disabled. Timers stop when the user has no session."
-    echo "An administrator can enable it with: loginctl enable-linger $user_name"
-  fi
-fi
-
-echo "Native Linux installation completed."
+echo "Native Linux installation completed. No news, mail or AI test was run."
 echo "Environment: $ENV_FILE"
-echo "Reconfigure: $APP_DIR/deploy/linux/install.sh --configure"
-echo "Status: $APP_DIR/deploy/linux/status.sh"
+echo "Reconfigure: $HOME/.local/bin/trendradar"
+echo "Status (explicit local diagnostics): $APP_DIR/deploy/linux/status.sh"

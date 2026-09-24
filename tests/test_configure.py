@@ -182,10 +182,12 @@ class ConfigureTests(unittest.TestCase):
                     "TZ": "Asia/Shanghai",
                 },
             )
-            with mock.patch.object(configure, "input", lambda _prompt: "", create=True), mock.patch.object(
+            from native_config import NativeApplication
+            app = NativeApplication(path, unit_dir=Path(temp_dir) / "units")
+            with mock.patch.object(configure, "input", lambda _prompt: "q", create=True), mock.patch.object(
                 configure.getpass, "getpass", lambda _prompt="": ""
             ):
-                configure.configure_terminal(path)
+                configure.configure_terminal(path, application=app)
             loaded = configure.read_env(path)
             self.assertEqual(loaded["EMAIL_FROM"], "old@example.com")
             self.assertEqual(loaded["EMAIL_PASSWORD"], "old-secret")
@@ -209,7 +211,7 @@ class ConfigureTests(unittest.TestCase):
         serve_mock.assert_not_called()
 
     def test_web_flag_is_alias_for_mode_web(self):
-        argv = ["configure.py", "--output", "/tmp/trendradar-nonexistent-env", "--web"]
+        argv = ["configure.py", "--output", "/tmp/trendradar-nonexistent-env", "--web", "--deployment", "docker"]
         with mock.patch.object(configure, "configure_terminal") as term_mock, mock.patch.object(
             configure, "serve"
         ) as serve_mock, mock.patch.object(configure.sys, "argv", argv):

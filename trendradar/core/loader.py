@@ -82,7 +82,7 @@ def _load_app_config(config_data: Dict) -> Dict:
     return {
         "VERSION_CHECK_URL": advanced.get("version_check_url", ""),
         "CONFIGS_VERSION_CHECK_URL": advanced.get("configs_version_check_url", ""),
-        "TIMEZONE": _get_env_str("TIMEZONE") or app_config.get("timezone", DEFAULT_TIMEZONE),
+        "TIMEZONE": _get_env_str("TIMEZONE") or _get_env_str("TZ") or app_config.get("timezone", DEFAULT_TIMEZONE),
         "DEBUG": _get_env_bool("DEBUG") if _get_env_bool("DEBUG") is not None else advanced.get("debug", False),
     }
 
