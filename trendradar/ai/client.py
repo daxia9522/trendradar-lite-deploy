@@ -124,6 +124,10 @@ class AIClient:
                     return _response_content(response)
                 except Exception as exc:
                     last_error = exc
+                    # 仅记录异常类名与 HTTP 状态码；不输出异常正文（可能含 URL/密钥）
+                    status = getattr(exc, "status_code", None)
+                    detail = type(exc).__name__ + (f"({status})" if status else "")
+                    print(f"[AI] attempt 失败: {detail}")
                     if attempt + 1 < attempts:
                         time.sleep(min(2**attempt, 8))
             if index + 1 < len(models):
