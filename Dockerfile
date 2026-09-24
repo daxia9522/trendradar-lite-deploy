@@ -16,7 +16,7 @@ COPY trendradar ./trendradar
 COPY weekly_report ./weekly_report
 COPY config ./config
 COPY deploy/docker ./deploy/docker
-COPY deploy/configure.py ./deploy/configure.py
+COPY deploy/*.py ./deploy/
 COPY LICENSE README.md ./
 
 RUN mkdir -p /app/output \
