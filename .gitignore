@@ -11,6 +11,7 @@ index.html
 
 # local secrets only
 .env
+/runtime/
 docker/.env
 .env.backups/
 ..env.backups/
