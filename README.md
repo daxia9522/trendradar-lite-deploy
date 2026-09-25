@@ -367,8 +367,6 @@ docker compose exec trendradar python deploy/docker/entrypoint.py force-run   # 
 ./deploy/docker/uninstall.sh --purge-all   # 另删本地镜像
 ```
 
-外置运行配置的设计与验收边界见 [`docs/docker-runtime-config-design.md`](docs/docker-runtime-config-design.md)。
-
 ---
 
 ## 手动运行
@@ -424,8 +422,6 @@ docker compose config --quiet                                   # compose 配置
 ```
 
 测试全部使用 mock 与临时目录：不抓取真实新闻、不调用真实 AI、不发送真实邮件；原生菜单与安装器测试使用临时 HOME/XDG 和模拟 systemctl，不操作开发者的真实定时器。测试代码不打入镜像、不由安装器部署。
-
-原生终端菜单的设计与验收边界见 [`docs/native-terminal-menu-design.md`](docs/native-terminal-menu-design.md)。
 
 ## 许可与致谢
 
