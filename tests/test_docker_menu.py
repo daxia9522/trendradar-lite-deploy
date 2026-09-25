@@ -38,6 +38,37 @@ class DockerMenuTests(unittest.TestCase):
             result = setup.configure_terminal(app)
         return result, transcript.getvalue()
 
+    def test_credential_url_is_redacted_on_web_page_and_preview(self):
+        cred_url = "https://user:***@router.example/v1"
+        app = self.application(dict(VALID, AI_API_BASE=cred_url))
+        form = dict(VALID, AI_API_BASE=cred_url, EMAIL_PASSWORD="", AI_API_KEY="",
+                    WEEKLY_TIME="12:30", _action="preview")
+        saved, responses = self.web(app, [("GET", {}), ("POST", form),
+                                          ("POST", dict(form, _action="save"))])
+        self.assertTrue(saved)
+        for status, page in responses:
+            self.assertEqual(status, 200)
+            self.assertNotIn(cred_url, page)
+            self.assertNotIn("pw123", page)
+        self.assertEqual(read_env(self.path)["AI_API_BASE"], cred_url)
+
+    def test_credential_url_blank_submit_retains_draft_and_sentinel_clears(self):
+        cred_url = "https://user:***@router.example/v1"
+        app = self.application(dict(VALID, AI_API_BASE=cred_url))
+        # A blank submit of the redacted input keeps the server-side draft.
+        retained, responses = self.web(app, [("GET", {}),
+                                             ("POST", dict(VALID, AI_API_BASE="", EMAIL_PASSWORD="",
+                                                           AI_API_KEY="", WEEKLY_TIME="12:30"))])
+        self.assertTrue(retained)
+        self.assertNotIn("pw123", responses[0][1])
+        self.assertEqual(read_env(self.path)["AI_API_BASE"], cred_url)
+        # The shared clear sentinel empties the value without echoing it.
+        app2 = self.application(dict(VALID, AI_API_BASE=cred_url))
+        cleared, _ = self.web(app2, [("POST", dict(VALID, AI_API_BASE=setup.shared.CLEAR_SENTINEL,
+                                                    EMAIL_PASSWORD="", AI_API_KEY="", WEEKLY_TIME="12:30"))])
+        self.assertTrue(cleared)
+        self.assertEqual(read_env(self.path)["AI_API_BASE"], "")
+
     def test_single_field_edit_preview_save_retains_other_fields_and_literal_dollars(self):
         app = self.application()
         result, text = self.menu(app, ["2", "2", "openai/new", "0", "5", "s", "y"])

@@ -42,7 +42,15 @@ set_identity() {
 
 require_local_setup_image() {
   local image compatibility
-  image=$(docker compose --profile setup config --images setup) || fail "Cannot resolve the setup image."
+  # Compose >= v2.24 accepts the setup service as a positional selector for
+  # `config --images`. Older v2 releases reject or silently ignore it and
+  # print one image per service, so fall back to the whole-project listing
+  # deduplicated; every setup-profile service references one image variable.
+  if image=$(docker compose --profile setup config --images setup 2>/dev/null) && [[ -n $image && $image != *$'\n'* ]]; then
+    :
+  else
+    image=$(docker compose --profile setup config --images | sort -u) || fail "Cannot resolve the setup image."
+  fi
   [[ -n $image && $image != *$'\n'* ]] || fail "Expected exactly one setup image."
   compatibility=$(docker image inspect --format '{{ index .Config.Labels "org.trendradar.runtime-config" }}' "$image" 2>/dev/null) || fail "Setup image is not available locally. Configuration never pulls/builds images; run install.sh --build or update.sh explicitly."
   [[ $compatibility == 1 ]] || fail "Local image does not support runtime configuration (org.trendradar.runtime-config=1). Build/install a compatible image explicitly; configuration will not update it."

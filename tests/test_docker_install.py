@@ -31,7 +31,19 @@ if args[:2] == ["image", "inspect"]:
     print(os.environ.get("FAKE_IMAGE_COMPATIBILITY", "1"))
     sys.exit(int(os.environ.get("FAKE_IMAGE_MISSING", "0")))
 if "config" in args and "--images" in args:
+    selector = "setup" in args[args.index("--images") + 1:]
+    if selector and os.environ.get("FAKE_COMPOSE_REJECTS_SELECTOR"):
+        # Pre-v2.24 Compose rejects the positional service selector.
+        sys.exit(1)
+    if os.environ.get("FAKE_COMPOSE_MULTI_IMAGE"):
+        print("test/trendradar:local")
+        print("other/app:1")
+        sys.exit(0)
     print("test/trendradar:local")
+    if not selector:
+        # Whole-project listing repeats the image once per service.
+        print("test/trendradar:local")
+        print("test/trendradar:local")
     sys.exit(0)
 if "run" in args:
     if "--pull" not in args or args[args.index("--pull") + 1] != "never" or "--no-deps" not in args:
@@ -187,6 +199,30 @@ class DockerInstallTests(unittest.TestCase):
         result = self.run_script("--configure", "--terminal", FAKE_IMAGE_COMPATIBILITY="<no value>")
         self.assertEqual(result.returncode, 2)
         self.assertIn("does not support runtime configuration", result.stderr)
+        self.assertFalse(any("run" in call for call in self.calls()))
+        self.assert_no_upgrade()
+
+    def test_setup_image_resolves_without_relying_on_compose_selector(self):
+        write_env(self.path, VALID)
+        # Older Compose v2 rejects the positional service selector; the
+        # whole-project fallback must still find the single unique image.
+        result = self.run_script("--configure", "--terminal", input="q\ny\n",
+                                 FAKE_COMPOSE_REJECTS_SELECTOR="1")
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        images_calls = [call for call in self.calls() if "config" in call and "--images" in call]
+        self.assertTrue(images_calls)
+        # The selector-less fallback ran and its deduplicated listing resolved.
+        self.assertTrue(any(call[call.index("--images") + 1:] == [] for call in images_calls))
+        # Resolution succeeded: setup itself was launched (then cancelled via stdin).
+        self.assertEqual(sum("run" in call for call in self.calls()), 1)
+        self.assert_no_upgrade()
+
+    def test_ambiguous_whole_project_images_are_refused_without_setup(self):
+        write_env(self.path, VALID)
+        result = self.run_script("--configure", "--terminal",
+                                 FAKE_COMPOSE_REJECTS_SELECTOR="1", FAKE_COMPOSE_MULTI_IMAGE="1")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("exactly one", result.stderr)
         self.assertFalse(any("run" in call for call in self.calls()))
         self.assert_no_upgrade()
 

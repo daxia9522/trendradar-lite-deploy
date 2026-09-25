@@ -369,6 +369,16 @@ def serve(application: DockerApplication, args) -> bool:
                     continue
                 if not field_policy(key).sensitive and key in form:
                     submitted[key] = form[key][0].strip()
+            # Credential-bearing URLs render redacted: blank submits keep the
+            # server-side draft, the explicit sentinel clears it.
+            for key in shared.CREDENTIAL_URL_FIELDS:
+                if key not in form:
+                    continue
+                entered = form[key][0].strip()
+                if entered == shared.CLEAR_SENTINEL:
+                    submitted[key] = ""
+                elif not entered and shared.carries_credentials(current.get(key, "")):
+                    submitted[key] = current[key]
             secret_keys = {key for key in set(current) | {key for key, *_ in shared._fields_for("docker")}
                            if application_key(key) and field_policy(key).sensitive}
             for key in secret_keys:

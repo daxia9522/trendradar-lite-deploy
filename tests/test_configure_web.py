@@ -91,6 +91,34 @@ class WebRegressionTests(unittest.TestCase):
             self.assertEqual([status for status, _ in responses], [400, 200])
             self.assertFalse(read_env(path, "docker").get("AI_ANALYSIS_ENABLED"))
 
+    def test_credential_url_never_renders_and_blank_submit_retains_draft(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".env"
+            credential_url = "https://user:***@router.example/v1"
+            values = {"EMAIL_FROM": "sender@example.com", "EMAIL_TO": "reader@example.com",
+                      "EMAIL_PASSWORD": "secret", "TZ": "UTC", "AI_API_BASE": credential_url}
+            write_env(path, values, "docker")
+            responses = self.run_server(path, [("GET", {}),
+                                               ("POST", dict(values, AI_API_BASE=""))])
+            self.assertEqual([status for status, _ in responses], [200, 200])
+            for _status, page in responses:
+                self.assertNotIn("user:***", page)
+                self.assertNotIn("abc123", page)
+            # Blank submit of the redacted field keeps the stored credential.
+            self.assertEqual(read_env(path, "docker")["AI_API_BASE"], credential_url)
+
+    def test_credential_url_clear_sentinel_empties_value(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".env"
+            credential_url = "https://user:***@router.example/v1"
+            values = {"EMAIL_FROM": "sender@example.com", "EMAIL_TO": "reader@example.com",
+                      "EMAIL_PASSWORD": "secret", "TZ": "UTC", "AI_API_BASE": credential_url}
+            write_env(path, values, "docker")
+            responses = self.run_server(path, [("POST", dict(values, AI_API_BASE=":clear"))])
+            self.assertEqual(responses[0][0], 200)
+            self.assertNotIn("user:***", responses[0][1])
+            self.assertEqual(read_env(path, "docker")["AI_API_BASE"], "")
+
 
 if __name__ == "__main__":
     unittest.main()

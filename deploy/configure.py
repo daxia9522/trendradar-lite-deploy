@@ -66,6 +66,10 @@ def render(
         value = "" if key in SECRET_FIELDS else values.get(key, "")
         placeholder = "已保存，留空保持不变" if key in SECRET_FIELDS and values.get(key) else hint
         input_type = "password" if key in SECRET_FIELDS else "time" if key.endswith("_PUSH_TIME") or key == "DAILY_SUMMARY_TIME" else "text"
+        if url_field_never_renders(key, value):
+            # The raw value stays server-side only; blank submits keep the draft.
+            value = ""
+            placeholder = "已设置，含凭据，不回显；留空保持不变，输入 :clear 清空"
         field = (
             f'<label><span>{html.escape(label)}{" *" if required else ""}</span>'
             f'<input name="{key}" type="{input_type}" '
@@ -303,6 +307,30 @@ def display_value(key: str, value: str) -> str:
     return value or "<未设置>"
 
 
+CREDENTIAL_URL_FIELDS = ("AI_API_BASE", "PLATFORMS_API_URL", "PLATFORMS_API_FALLBACK_URLS")
+CLEAR_SENTINEL = ":clear"
+
+
+def carries_credentials(value: str) -> bool:
+    """True when a URL value embeds secrets in userinfo or query parameters."""
+    for part in (value or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            split = urllib.parse.urlsplit(part)
+        except ValueError:
+            return True
+        if split.query or "@" in split.netloc:
+            return True
+    return False
+
+
+def url_field_never_renders(key: str, value: str) -> bool:
+    """Public URL inputs may carry bearer credentials; never echo those back."""
+    return key in CREDENTIAL_URL_FIELDS and carries_credentials(value)
+
+
 def changes_between(before: dict[str, str], after: dict[str, str]) -> dict[str, str]:
     return {key: after.get(key, "") for key in set(before) | set(after)
             if before.get(key, "") != after.get(key, "")}
@@ -528,6 +556,15 @@ def serve(
                 key: form.get(key, [""])[0] if key in SECRET_FIELDS else form.get(key, [""])[0].strip()
                 for key, *_rest in _fields_for(deployment)
             })
+            for key in CREDENTIAL_URL_FIELDS:
+                if key not in form:
+                    continue
+                entered = form[key][0].strip()
+                if entered == CLEAR_SENTINEL:
+                    submitted[key] = ""
+                elif not entered and carries_credentials(current.get(key, "")):
+                    # Redacted input submitted unchanged: keep the server-side draft.
+                    submitted[key] = current[key]
             for key in SECRET_FIELDS:
                 if key in submitted and not submitted[key] and current.get(key):
                     submitted[key] = current[key]

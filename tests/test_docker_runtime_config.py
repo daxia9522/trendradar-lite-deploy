@@ -142,6 +142,21 @@ class RuntimeConfigTests(unittest.TestCase):
             application.save(dict(application.values, EMAIL_TO="longer-reader@example.invalid"))
         self.assertEqual(self.path.read_bytes(), before)
 
+    def test_writable_traversed_directory_is_rejected(self):
+        nested = self.root / "runtime"
+        nested.mkdir(mode=0o700)  # mkdir's default 0o777&~umask can be group-writable.
+        env = nested / "env"
+        atomic_write(env, b"TZ=Asia/Shanghai\n")
+        self.assertEqual(runtime.read_runtime_env(env)["TZ"], "Asia/Shanghai")
+        nested.chmod(0o777)  # No sticky bit: others can swap in a fresh 0600 file.
+        self.assert_error("permissions", lambda: runtime.read_runtime_env(env))
+        nested.chmod(0o1777)  # Sticky system paths such as /tmp stay acceptable.
+        self.assertEqual(runtime.read_runtime_env(env)["TZ"], "Asia/Shanghai")
+        nested.chmod(0o2770)  # Group-writable shares the same swap risk; setgid is irrelevant.
+        self.assert_error("permissions", lambda: runtime.read_runtime_env(env))
+        nested.chmod(0o750)   # Group-readable but not group-writable stays acceptable.
+        self.assertEqual(runtime.read_runtime_env(env)["TZ"], "Asia/Shanghai")
+
     def test_atomic_replacement_sees_next_file_and_current_read_has_one_inode(self):
         self.put("AI_API_KEY=first\n")
         first_ino = self.path.stat().st_ino

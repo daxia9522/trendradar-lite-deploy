@@ -57,7 +57,7 @@ ERRORS = {
     "unreadable": "runtime configuration file cannot be read",
     "symlink": "runtime configuration path must not contain symbolic links",
     "not_regular": "runtime configuration must be a regular file",
-    "permissions": "runtime configuration permissions must be 0600 or stricter",
+    "permissions": "runtime configuration file or a traversed directory is writable by others",
     "too_large": "runtime configuration file is too large",
     "empty": "runtime configuration has no assignments",
     "format": "runtime configuration is not valid UTF-8 literal assignments",
@@ -105,9 +105,22 @@ def _read_private_file(path: Path, *, max_bytes: int | None = None, require_priv
     O_NONBLOCK also prevents a malicious FIFO from hanging before fstat.
     The scheduler reuses this for non-secret state with its own byte limit;
     require_private=False permits historical 0644 state, not config files.
+    With require_private=True every traversed directory must also be sealed:
+    group/world-writable directories are rejected unless they carry the sticky
+    bit (system paths such as /tmp), because a writable runtime/ directory lets
+    another local user swap in a fresh 0600 file below the 0700 file check.
     """
     limit = MAX_ENV_BYTES if max_bytes is None else max_bytes
     descriptors: list[int] = []
+
+    def sealed(descriptor: int) -> bool:
+        # os.stat(".", dir_fd=) resolves the pinned inode like fstat, without
+        # an extra os.fstat call: the inode cannot be swapped under an open
+        # O_DIRECTORY descriptor, so the mode read here reflects the traversed
+        # directory itself.
+        info = os.stat(".", dir_fd=descriptor, follow_symlinks=False)
+        return not (stat.S_IMODE(info.st_mode) & 0o022) or bool(info.st_mode & stat.S_ISVTX)
+
     try:
         absolute = Path(os.path.abspath(path))
         directory = os.open(absolute.anchor, os.O_RDONLY | os.O_DIRECTORY)
@@ -118,6 +131,8 @@ def _read_private_file(path: Path, *, max_bytes: int | None = None, require_priv
                 raise RuntimeConfigError("symlink")
             directory = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
             descriptors.append(directory)
+            if require_private and not sealed(directory):
+                raise RuntimeConfigError("permissions")
         descriptor = os.open(absolute.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
         descriptors.append(descriptor)
         info = os.fstat(descriptor)
