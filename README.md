@@ -2,7 +2,7 @@
 
 > 版本 v26.9 ｜ [Release](https://github.com/daxia9522/trendradar-lite-deploy/releases/tag/v26.9) ｜ 镜像 `ghcr.io/daxia9522/trendradar-lite-deploy`
 
-聚合 11 平台热榜与 RSS → 关键词筛选 → AI 事件分析 → HTML 日报/周报邮件推送。同一份核心代码支持三种部署方式。
+聚合 11 平台热榜与 RSS → 关键词筛选 → AI 事件分析 → HTML 日报/周报邮件推送。
 
 基于 [`sansan0/TrendRadar`](https://github.com/sansan0/TrendRadar) 的**非官方**精简部署发行版。
 
@@ -14,7 +14,19 @@
 | [GitHub Actions](#方式二github-actions) | 不想养服务器；云端按时执行 | R2/S3 存储桶（数据持久化）+ 外部定时触发 |
 | [Docker Compose](#方式三docker-compose) | 已有 Docker/NAS 环境；直接拉取预构建镜像 | Docker Engine + Compose v2 |
 
-原生 Linux 首次安装使用**纯终端分组菜单**，无需浏览器、监听端口或 SSH 端口转发；安装后输入 `trendradar` 可随时重新配置。原生 Linux 与 Docker 都使用数字分组菜单（Docker 安装后输入 `trendradar-docker`）；GitHub Actions 使用仓库 Secrets。克隆仓库后可用统一入口选择部署方式：
+原生 Linux 安装使用**纯终端分组菜单**，安装后输入以下命令可随时重新配置：
+
+```bash
+trendradar
+```
+
+Docker 使用同一套数字分组菜单，安装后输入以下命令重新配置：
+
+```bash
+trendradar-docker
+```
+
+克隆仓库后可用统一入口选择部署方式：
 
 ```bash
 ./install.sh
@@ -115,13 +127,7 @@ q. 放弃修改并退出
 | 邮件、AI、数据接口等 | 下次 oneshot 任务启动读取新 env，不重启当前任务 |
 | 采集、推送、周报时间或时区 | 同步环境覆盖与相关 timer，保持原来的启用/禁用状态 |
 
-打开菜单、查看变更或保存配置**不会手动启动新闻任务或执行 AI/发信测试**；原有定时任务仍会正常运行。菜单保留未展示的 env 参数；写入前在环境文件旁的 `.env.backups/` 创建私有备份（例如 `~/.config/trendradar-lite/.env.backups/`，目录 `700`、文件 `600`），并检测外部编辑，避免覆盖其他修改。
-
-**时间调整有额外安全检查**：`daemon-reload` 本身也可能按上次触发时间补跑。菜单会只读检查两个活动 timer 的状态、旧/新日历与下一次触发点；存在已错过的触发点、进入 120 秒安全窗口，或无法可靠核验时，拒绝应用而不强行重载。可在原定时器下一次正常触发完成后、远离原/新计划时刻重试。旧 `hourly` 或未显式写时区的 timer，在活动状态下也会拒绝修改；需要由操作者先停止相关 timer，再明确规范化，工具不会擅自停止它或清除时间戳。未启用的定时器不会因此启动。此检查不是对 systemd 管理器的锁，不能阻止外部改时钟、挂起或其他管理员并发操作。
-
-旧安装缺少时间变量或存在自定义 timer 时，菜单会检查现有计划并显示警告。时间子菜单的 `n` 将可识别的推定值加入草稿；保存前需确认把原来的推送窗口收敛到指定分钟，并统一 timer 时区。复杂 calendar、自定义 timeline、drop-in、符号链接或不完整安装不会被自动覆盖；只修改 AI/邮件时也不会顺便把时间重置为模板默认值。
-
-仍可使用 `nano ~/.config/trendradar-lite/env` 修改普通环境参数，下次任务读取；**手动改时间变量还需要同步 systemd 定时器，建议使用菜单修改时间**。菜单不是新闻执行入口；手动运行任务仍使用下文的 Python CLI。
+仍可使用 `nano ~/.config/trendradar-lite/env` 修改普通环境参数。
 
 ### 常用维护
 
@@ -132,6 +138,9 @@ trendradar                              # 打开配置菜单（任意目录）
 ./deploy/linux/uninstall.sh             # 卸载本安装的入口与 units，保留数据与 env
 ./deploy/linux/uninstall.sh --purge-data
 loginctl enable-linger "$USER"          # 退出 SSH 后 timer 仍要运行时需要
+
+cd ~/trendradar-lite-deploy
+.venv/bin/python -m trendradar --force-run   # ⚠️ 真实链路：AI+邮件（绕过推送窗口与 once 去重）
 ```
 
 原生 Linux 默认不自动回退到网页。无交互终端时会退出并提示；使用 SSH 请分配终端。网页配置仅通过 `trendradar --web` 或 `./deploy/linux/install.sh --configure --web` 显式开启，默认绑定 `127.0.0.1`；远程访问仍需 SSH 端口转发。
