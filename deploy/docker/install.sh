@@ -1,61 +1,60 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 APP_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
-FORCE_CONFIGURE=false
+source "$SCRIPT_DIR/common.sh"
+CONFIGURE=false
 START=true
-
+IMAGE_ACTION=auto
+MODE=auto
 for arg in "$@"; do
   case "$arg" in
-    --configure) FORCE_CONFIGURE=true ;;
+    --configure) CONFIGURE=true ;;
     --no-start) START=false ;;
-    *)
-      echo "Usage: $0 [--configure] [--no-start]" >&2
-      exit 2
-      ;;
+    --build) IMAGE_ACTION=build ;;
+    --pull) IMAGE_ACTION=pull ;;
+    --terminal) MODE=terminal ;;
+    --web) MODE=web ;;
+    *) fail "Usage: $0 [--configure] [--no-start] [--build|--pull] [--terminal|--web]" ;;
   esac
 done
-
-command -v docker >/dev/null || {
-  echo "Docker is required." >&2
-  exit 1
-}
-docker compose version >/dev/null 2>&1 || {
-  echo "Docker Compose v2 is required." >&2
-  exit 1
-}
-
-mkdir -p "$APP_DIR/output"
-NEW_ENV=false
-if [[ ! -f $APP_DIR/.env ]]; then
-  install -m 600 "$APP_DIR/.env.example" "$APP_DIR/.env"
-  NEW_ENV=true
-else
-  chmod 600 "$APP_DIR/.env"
+if [[ $CONFIGURE == true && $IMAGE_ACTION != auto ]]; then
+  fail "--configure cannot pull/build/update images. Use update.sh explicitly."
 fi
-
 cd "$APP_DIR"
-if [[ $NEW_ENV == true || $FORCE_CONFIGURE == true ]]; then
-  connection=(${SSH_CONNECTION:-})
-  export SETUP_SSH_USER=${SETUP_SSH_USER:-${SUDO_USER:-$(id -un)}}
-  export SETUP_SSH_HOST=${SETUP_SSH_HOST:-${connection[2]:-}}
-  export SETUP_SSH_PORT=${SETUP_SSH_PORT:-${connection[3]:-22}}
-  echo "Starting the configuration wizard. Installation continues after you finish it."
-  if [[ -t 0 && -t 1 ]]; then
-    docker compose --profile setup run --rm setup --mode terminal || docker compose --profile setup run --rm --build setup --mode terminal
-  else
-    docker compose --profile setup run --rm --service-ports setup --mode web || docker compose --profile setup run --rm --build --service-ports setup --mode web
-  fi
+check_docker
+set_identity
+
+if [[ $CONFIGURE == true ]]; then
+  require_local_setup_image
+  # A failure/cancellation is final. Never retry setup with --build.
+  run_configure "$MODE"
+  echo "Configuration saved. No image update or service start/recreation was performed."
+  exit 0
 fi
 
+check_launcher
+if [[ $IMAGE_ACTION == auto && ! -f $APP_DIR/runtime/env ]]; then
+  # Prefer the published image on first install, but require its runtime-config
+  # compatibility label before executing setup. --build selects this checkout.
+  IMAGE_ACTION=pull
+fi
+case $IMAGE_ACTION in
+  build) docker compose build trendradar ;;
+  pull) docker compose pull trendradar ;;
+esac
+require_local_setup_image
+ensure_configuration "$MODE"
+install_launcher
 if [[ $START == true ]]; then
-  docker compose pull --quiet trendradar || docker compose build trendradar
-  docker compose up -d trendradar
+  run_manage init-volume
+  docker compose up -d --no-build --pull never trendradar
   docker compose ps trendradar
   echo "Docker deployment completed. Logs: docker compose logs -f trendradar"
 else
-  echo "Configuration completed. Start later with: docker compose up -d trendradar"
+  echo "Configuration saved; no persistent service was started. Run install.sh to start later."
 fi
-
-echo "Reconfigure: ./deploy/docker/install.sh --configure"
+echo "Reconfigure: ~/.local/bin/trendradar-docker"
+echo "Update program/image separately: ./deploy/docker/update.sh [--pull|--build]"

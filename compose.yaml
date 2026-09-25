@@ -1,16 +1,15 @@
 services:
   setup:
     profiles: ["setup"]
-    build:
-      context: .
     image: ${TREND_RADAR_IMAGE:-ghcr.io/daxia9522/trendradar-lite-deploy:latest}
     pull_policy: missing
     user: "0:0"
     entrypoint:
       - python
       - deploy/configure.py
+      - --runtime-config
       - --output
-      - /setup/.env
+      - /setup/runtime/env
       - --host
       - 0.0.0.0
       - --public-port
@@ -26,8 +25,19 @@ services:
     ports:
       - "127.0.0.1:${SETUP_PORT:-8765}:8765"
     volumes:
-      # Mount the directory so the wizard can atomically replace .env and keep a private backup.
+      # Mount the directory so setup can atomically replace runtime/env and retain private backups.
       - .:/setup
+
+  volume-init:
+    profiles: ["setup"]
+    image: ${TREND_RADAR_IMAGE:-ghcr.io/daxia9522/trendradar-lite-deploy:latest}
+    pull_policy: missing
+    user: "0:0"
+    network_mode: none
+    entrypoint: ["python", "deploy/docker/manage.py", "init-volume"]
+    volumes:
+      # Only explicit installation/update can initialize data-volume ownership.
+      - trendradar-output:/app/output
 
   trendradar:
     build:
@@ -35,14 +45,16 @@ services:
     image: ${TREND_RADAR_IMAGE:-ghcr.io/daxia9522/trendradar-lite-deploy:latest}
     pull_policy: missing
     restart: unless-stopped
-    env_file:
-      - .env
+    user: "${TRENDRADAR_UID:-1000}:${TRENDRADAR_GID:-1000}"
     environment:
       DOCKER_CONTAINER: "true"
       STORAGE_BACKEND: "local"
-      TZ: "${TZ:-Asia/Shanghai}"
+      TRENDRADAR_RUNTIME_ENV: /app/runtime/env
+      HOME: /tmp
     volumes:
       - ./config:/app/config:ro
+      # Mount the directory, not the file: atomic saves replace the env inode.
+      - ./runtime:/app/runtime:ro
       - trendradar-output:/app/output
 
 volumes:

@@ -590,6 +590,7 @@ def main() -> int:
     parser.add_argument("--render-systemd-timer", type=Path)
     parser.add_argument("--render-systemd-weekly-timer", type=Path)
     parser.add_argument("--deployment", choices=("linux", "docker"), default="linux")
+    parser.add_argument("--runtime-config", action="store_true", help="Docker runtime/env 分组配置（字面量格式）")
     parser.add_argument(
         "--mode",
         choices=("auto", "terminal", "web"),
@@ -599,6 +600,11 @@ def main() -> int:
     parser.add_argument("--terminal", action="store_true", help="等价于 --mode terminal")
     parser.add_argument("--web", action="store_true", help="等价于 --mode web")
     args = parser.parse_args()
+    if args.runtime_config:
+        if args.deployment != "docker":
+            parser.error("--runtime-config 仅用于 --deployment docker")
+        from docker.docker_configure import main as docker_runtime_main
+        return docker_runtime_main(args)
     if args.render_systemd_timer:
         write_systemd_timer(args.render_systemd_timer, read_env(args.output))
         return 0

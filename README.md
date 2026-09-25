@@ -14,7 +14,7 @@
 | [GitHub Actions](#方式二github-actions) | 不想养服务器；云端按时执行 | R2/S3 存储桶（数据持久化）+ 外部定时触发 |
 | [Docker Compose](#方式三docker-compose) | 已有 Docker/NAS 环境；直接拉取预构建镜像 | Docker Engine + Compose v2 |
 
-原生 Linux 首次安装使用**纯终端分组菜单**，无需浏览器、监听端口或 SSH 端口转发；安装后输入 `trendradar` 可随时重新配置。Docker 保留原有终端/网页向导，GitHub Actions 使用仓库 Secrets。克隆仓库后可用统一入口选择部署方式：
+原生 Linux 首次安装使用**纯终端分组菜单**，无需浏览器、监听端口或 SSH 端口转发；安装后输入 `trendradar` 可随时重新配置。原生 Linux 与 Docker 都使用数字分组菜单（Docker 安装后输入 `trendradar-docker`）；GitHub Actions 使用仓库 Secrets。克隆仓库后可用统一入口选择部署方式：
 
 ```bash
 ./install.sh
@@ -31,11 +31,7 @@
 | `config/frequency_words.txt` | 筛选关键词 |
 | `config/ai_analysis_prompt.txt` | AI 分析提示词 |
 
-敏感信息通过环境变量注入，勿提交 Git。**原生 Linux 由菜单维护 `~/.config/trendradar-lite/env`，不是仓库根目录的 `.env`**；Docker 使用项目根目录的 `.env`，可以从模板创建：
-
-```bash
-cp .env.example .env && chmod 600 .env
-```
+敏感信息通过环境变量注入，勿提交 Git。**原生 Linux 由菜单维护 `~/.config/trendradar-lite/env`；Docker 由菜单维护项目目录下的 `runtime/env`（目录整体只读挂载，文件不进入镜像与 Git）**；两者都不是仓库根目录的 `.env`。首次安装直接运行相应安装器，**不需要先复制 `.env.example`**：模板只作为菜单草稿默认值。Docker 根 `.env` 用于镜像、UID/GID、配置页端口等部署参数；已有旧 `.env` 中的应用参数在确认保存后迁移，旧内容与私有备份保留供核对。
 
 ### AI
 
@@ -282,6 +278,15 @@ Actions 固定 `STORAGE_BACKEND=remote`，每日数据库写入 R2/S3，周报�
 
 ## 方式三：Docker Compose
 
+**Docker 使用与原生同款的数字分组菜单，配置保存在宿主机 `runtime/env`；保存配置不会拉取/构建镜像，也不会重启或重建服务容器。**
+
+| 方式 | 配置操作 | 配置文件 |
+|---|---|---|
+| 原生 Linux | 输入 `trendradar`，分组菜单 | `~/.config/trendradar-lite/env` |
+| Docker | 输入 `trendradar-docker`（或 `./deploy/docker/install.sh --configure`），同一套分组菜单；非交互环境可用网页表单 | 项目目录 `runtime/env`（只读挂载进容器） |
+
+分组菜单支持邮件、AI、采集与推送时间、高级配置的字段级修改、待保存预览、秘密输入不回显与取消退出。与原生版的区别：Docker 菜单不调用 systemd（容器内置调度器），保存后由调度器在下一次任务读取新配置；**修改正在执行的时间参数不会立即补跑当前分钟**。
+
 前置：Docker Engine + Compose v2。全新系统用 Docker 官方脚本安装：
 
 ```bash
@@ -294,14 +299,37 @@ sudo usermod -aG docker "$USER"   # 非 root 用户执行后重新登录
 ```bash
 git clone https://github.com/daxia9522/trendradar-lite-deploy.git
 cd trendradar-lite-deploy
-./deploy/docker/install.sh        # 建 .env → 配置向导 → 拉取预构建镜像 → 启动
+./deploy/docker/install.sh        # 拉取兼容镜像 → 分组菜单配置 → 启动容器
 docker compose ps trendradar      # 状态应为 healthy
 docker compose logs --tail=50 trendradar
 ```
 
-默认拉取 GHCR 预构建镜像（约 111 MB，双架构），拉取失败自动回退本地构建；生产可在 `.env` 钉死版本：`TREND_RADAR_IMAGE=ghcr.io/daxia9522/trendradar-lite-deploy:v26.9`。镜像更新需显式 `docker compose pull && docker compose up -d`。
+安装器首次默认拉取 GHCR 预构建镜像，并校验其支持外置运行配置（镜像标签 `org.trendradar.runtime-config=1`）；旧镜像会被明确拒绝而不是默默重试。测试或未发布版本可显式 `./deploy/docker/install.sh --build`。取消配置不会启动服务；已有 `runtime/env` 不会被重写，旧部署的根目录 `.env` 应用参数会作为待保存草稿导入，确认保存时才迁移并保留私有备份。
 
-容器内置轻量调度器，**所有时刻均为北京时间（容器默认 Asia/Shanghai，可在 `.env` 用 `TZ` 改）**：
+### 修改配置（无需重建镜像或容器）
+
+任意目录执行（安装器创建的用户级入口，PATH 未含 `~/.local/bin` 时用完整路径）：
+
+```bash
+trendradar-docker
+```
+
+或在项目目录 `./deploy/docker/install.sh --configure`。两条路径都只使用本地已有镜像运行一次短暂配置容器，**不拉取/构建/更新镜像，不启动或重建常驻服务，不调用任何任务**。也可以直接 `nano runtime/env` 编辑普通参数；下一次任务自动读取新值，删除的变量回退默认而不会沿用容器创建时的旧值。
+
+镜像与程序升级是独立动作：
+
+```bash
+./deploy/docker/update.sh            # 拉取新镜像后重建服务容器（已有 runtime/env 不变）
+./deploy/docker/update.sh --build    # 用当前源码构建后升级
+```
+
+旧部署尚无 `runtime/env` 时，安装和升级都会先打开菜单：旧 `.env` 只是草稿，补齐必填项并确认后才迁移。需要强制终端/网页模式时可追加 `--terminal` / `--web`；升级成功也会安装 `trendradar-docker` 入口。取消不保存应用配置、部署身份或迁移备份，也不启动服务，但不会撤销此前明确执行的镜像拉取/构建。
+
+网页校验或保存失败时，新输入的密码只保留在服务器端草稿；再次提交留空会保留该草稿，不会偷偷恢复旧密码。页面会区分“已保存”“待保存”“待清空”，密码内容不回显。选择取消或结束本次配置进程会丢弃草稿；仅关闭浏览器标签不会结束配置进程。
+
+### 调度与数据
+
+容器内置轻量调度器，按 `runtime/env` 的 `TZ` 调度，默认 `Asia/Shanghai`（北京时间）；每轮读取最新时间设置，改动不补跑当前分钟，夏令时重叠窗口不重复发送。下表为 `.env.example` 的默认配置（首次安装作为菜单草稿默认值）：
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
@@ -312,15 +340,25 @@ docker compose logs --tail=50 trendradar
 | `DAILY_SUMMARY_TIME` | `22:00` | 全天汇总 |
 | `WEEKLY_WEEKDAY` / `WEEKLY_HOUR` / `WEEKLY_MINUTE` | `6` / `12` / `30` | 周报（周日 12:30，Python 约定周日=6） |
 
-`output/` 存于 Docker volume；`config/` 宿主只读挂载。仅 `setup` 配置容器可写挂载项目目录，用于原子替换 `.env` 和保存 `.env.backups/` 私有备份；已有 `.env` 的宿主 UID/GID 会保留。常驻 `trendradar` 服务的挂载方式不变。
+`output/` 存于 Docker volume；`config/` 宿主只读挂载。服务容器以宿主机用户 UID/GID 运行（安装时记录在根 `.env` 的 `TRENDRADAR_UID/GID`），`runtime/` 目录 `700`、`env` 文件 `600`，密钥不进镜像也不通过容器创建时的环境快照注入。`setup` 配置容器只写挂载项目目录，用于原子替换 `runtime/env` 和保存私有备份，**不挂载业务数据卷**。单独的 `volume-init` 临时容器只在明确安装/升级时初始化数据卷归属，且没有网络和项目目录挂载。常驻服务只读挂载 `runtime/` 目录（而非单文件），保证菜单原子保存后容器可见新内容。
+
+手动诊断与临时任务统一走镜像入口（自动读最新配置）：
+
+```bash
+docker compose exec trendradar python deploy/docker/entrypoint.py doctor
+docker compose exec trendradar python deploy/docker/entrypoint.py show-schedule
+docker compose exec trendradar python deploy/docker/entrypoint.py force-run   # ⚠️ 真实链路：AI+邮件
+```
 
 卸载三选一（后两种**不可恢复**）：
 
 ```bash
-./deploy/docker/uninstall.sh               # 停容器/网络，留数据、env、镜像
-./deploy/docker/uninstall.sh --purge-data  # 另删数据卷与 .env
+./deploy/docker/uninstall.sh               # 停容器/网络，留数据、runtime/env、镜像
+./deploy/docker/uninstall.sh --purge-data  # 另删数据卷、runtime/env 与 .env
 ./deploy/docker/uninstall.sh --purge-all   # 另删本地镜像
 ```
+
+外置运行配置的设计与验收边界见 [`docs/docker-runtime-config-design.md`](docs/docker-runtime-config-design.md)。
 
 ---
 
@@ -341,11 +379,11 @@ cd ~/trendradar-lite-deploy
 .venv/bin/python weekly_report/weekly_ai_report_email.py
 ```
 
-**Docker Compose**（常驻容器内调度，手动执行走 exec）：
+**Docker Compose**（常驻容器内调度，手动执行走 exec；entrypoint 自动读取最新 `runtime/env`）：
 
 ```bash
-docker compose exec trendradar python -m trendradar --doctor
-docker compose exec trendradar python -m trendradar --force-run
+docker compose exec trendradar python deploy/docker/entrypoint.py doctor
+docker compose exec trendradar python deploy/docker/entrypoint.py force-run
 ```
 
 **GitHub Actions**：网页 `Actions → Get Hot News / Weekly AI Report → Run workflow`，等价于 dispatch。

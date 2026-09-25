@@ -1,5 +1,7 @@
 FROM python:3.12-slim
 
+LABEL org.trendradar.runtime-config="1"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     DOCKER_CONTAINER=true \
@@ -17,6 +19,7 @@ COPY weekly_report ./weekly_report
 COPY config ./config
 COPY deploy/docker ./deploy/docker
 COPY deploy/*.py ./deploy/
+COPY .env.example ./
 COPY LICENSE README.md ./
 
 RUN mkdir -p /app/output \
@@ -25,6 +28,7 @@ RUN mkdir -p /app/output \
 USER trendradar
 
 HEALTHCHECK --interval=5m --timeout=30s --start-period=30s --retries=3 \
-  CMD python -m trendradar --doctor >/dev/null || exit 1
+  CMD python deploy/docker/entrypoint.py doctor >/dev/null || exit 1
 
-ENTRYPOINT ["python", "deploy/docker/scheduler.py"]
+ENTRYPOINT ["python", "deploy/docker/entrypoint.py"]
+CMD ["schedule"]
