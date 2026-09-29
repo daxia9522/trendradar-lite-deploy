@@ -53,9 +53,9 @@ class DockerPackagingTests(unittest.TestCase):
         self.assertNotIn("ports", initializer)
 
     def test_all_services_share_fixed_version_and_multiarch_index(self):
-        # Registry evidence (2026-09-28) identified this as the index, not either
+        # Registry evidence (2026-09-29) identified this as the index, not either
         # platform child manifest. This offline contract does not requery GHCR.
-        expected = "${TREND_RADAR_IMAGE:-ghcr.io/daxia9522/trendradar-lite-deploy:v26.9@sha256:b07e2424a0d5451d50c3f8e205636edb2ce63ec0061dc97c9ac5636bba038760}"
+        expected = "${TREND_RADAR_IMAGE:-ghcr.io/daxia9522/trendradar-lite-deploy:v26.10@sha256:b8ef73d28828c5d6e4cad8970b4ac2fc1c881617114430525903422307ec8e83}"
         for name, service in self.compose["services"].items():
             with self.subTest(service=name):
                 self.assertEqual(service["image"], expected)

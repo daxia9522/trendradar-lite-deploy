@@ -318,7 +318,7 @@ docker compose ps trendradar      # 状态应为 healthy
 docker compose logs --tail=50 trendradar
 ```
 
-安装器首次默认拉取 GHCR 预构建镜像并校验兼容标签；默认固定 v26.9 多架构 digest，不跟随 `latest`。本地验证或测试版用 `install.sh --build`：digest 会自动改用本地构建标签 `trendradar-lite-deploy:local` 并在保存后记住；取消或构建失败不改变已保存选择。切换预构建版本：先在根 `.env` 把 `TREND_RADAR_IMAGE` 改为已验证的新 digest 再运行 update。取消配置不会启动服务；旧 `.env` 只在菜单确认后迁移。
+安装器首次默认拉取 GHCR 预构建镜像并校验兼容标签；默认固定 v26.10 多架构 digest，不跟随 `latest`。本地验证或测试版用 `install.sh --build`：digest 会自动改用本地构建标签 `trendradar-lite-deploy:local` 并在保存后记住；取消或构建失败不改变已保存选择。切换预构建版本：先在根 `.env` 把 `TREND_RADAR_IMAGE` 改为已验证的新 digest 再运行 update。取消配置不会启动服务；旧 `.env` 只在菜单确认后迁移。
 
 ### 修改配置（无需重建镜像或容器）
 
@@ -388,7 +388,7 @@ docker compose exec trendradar python deploy/docker/entrypoint.py force-run   # 
 | `R2_BACKUP_TIME` | `23:40` | 按 `TZ`/`TIMEZONE` 每日执行 |
 | `R2_BACKUP_LOOKBACK_DAYS` | `2` | 当天+昨天；首次补齐历史可调大 |
 
-开启需 `STORAGE_BACKEND=local` 和已有的四个 `S3_*` 必填项。两端共用 `deploy/r2_backup.py`：原生用独立备份 timer（菜单开关即启停，人工暂停不会被重装恢复），Docker 用容器内调度器。验证新 Docker 功能需 `--build`，旧固定镜像不含此功能。
+开启需 `STORAGE_BACKEND=local` 和已有的四个 `S3_*` 必填项。两端共用 `deploy/r2_backup.py`：原生用独立备份 timer（菜单开关即启停，人工暂停不会被重装恢复），Docker 用容器内调度器。v26.10 预构建镜像已包含此功能；使用旧固定镜像时须先切换到已核验的 v26.10 digest，再执行 update；只有选择源码构建时才需显式 `--build`。
 
 备份对象与 Actions 远程存储同一布局（`news/`、`rss/` 按日文件），因此同一桶持续同步后切 Actions 不用搬数据库。**同日期整库覆盖，切换前必须：停旧端 → 最后一次同步 → 再启新端。**
 

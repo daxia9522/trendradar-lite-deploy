@@ -1,8 +1,8 @@
 services:
   setup:
     profiles: ["setup"]
-    # v26.9 OCI index (linux/amd64 + linux/arm64), verified against GHCR.
-    image: ${TREND_RADAR_IMAGE:-ghcr.io/daxia9522/trendradar-lite-deploy:v26.9@sha256:b07e2424a0d5451d50c3f8e205636edb2ce63ec0061dc97c9ac5636bba038760}
+    # v26.10 OCI index (linux/amd64 + linux/arm64), verified against GHCR.
+    image: ${TREND_RADAR_IMAGE:-ghcr.io/daxia9522/trendradar-lite-deploy:v26.10@sha256:b8ef73d28828c5d6e4cad8970b4ac2fc1c881617114430525903422307ec8e83}
     pull_policy: missing
     user: "0:0"
     security_opt: ["no-new-privileges:true"]
@@ -35,7 +35,7 @@ services:
 
   volume-init:
     profiles: ["setup"]
-    image: ${TREND_RADAR_IMAGE:-ghcr.io/daxia9522/trendradar-lite-deploy:v26.9@sha256:b07e2424a0d5451d50c3f8e205636edb2ce63ec0061dc97c9ac5636bba038760}
+    image: ${TREND_RADAR_IMAGE:-ghcr.io/daxia9522/trendradar-lite-deploy:v26.10@sha256:b8ef73d28828c5d6e4cad8970b4ac2fc1c881617114430525903422307ec8e83}
     pull_policy: missing
     user: "0:0"
     security_opt: ["no-new-privileges:true"]
@@ -51,7 +51,7 @@ services:
   trendradar:
     build:
       context: .
-    image: ${TREND_RADAR_IMAGE:-ghcr.io/daxia9522/trendradar-lite-deploy:v26.9@sha256:b07e2424a0d5451d50c3f8e205636edb2ce63ec0061dc97c9ac5636bba038760}
+    image: ${TREND_RADAR_IMAGE:-ghcr.io/daxia9522/trendradar-lite-deploy:v26.10@sha256:b8ef73d28828c5d6e4cad8970b4ac2fc1c881617114430525903422307ec8e83}
     pull_policy: missing
     restart: unless-stopped
     user: "${TRENDRADAR_UID:-1000}:${TRENDRADAR_GID:-1000}"
