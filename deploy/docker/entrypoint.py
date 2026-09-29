@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One Docker runtime boundary for scheduled, manual and diagnostic commands.
 
-Examples: entrypoint.py [schedule|config-check|doctor|current|force-run|weekly|
+Examples: entrypoint.py [schedule|config-check|doctor|current|force-run|weekly|backup|
 show-schedule|test-notification]. The existing `python -m trendradar` and
 `python weekly_report/weekly_ai_report_email.py` forms are recognized, not
 executed as arbitrary shell/program commands. Extra options are checked against
@@ -24,7 +24,8 @@ from deploy.docker.runtime_config import RuntimeConfigError, load_runtime_config
 DAILY_OPTIONS = ("--force-run", "--show-schedule", "--doctor", "--test-notification")
 WEEKLY_OPTIONS = ("--start", "--end", "--to", "--subject", "--model")
 WEEKLY_SCRIPT = "weekly_report/weekly_ai_report_email.py"
-USAGE = "Usage: entrypoint.py [schedule|config-check|doctor|current|force-run|weekly|show-schedule|test-notification] [options]"
+BACKUP_SCRIPT = "deploy/r2_backup.py"
+USAGE = "Usage: entrypoint.py [schedule|config-check|doctor|current|force-run|weekly|backup|show-schedule|test-notification] [options]"
 
 
 class CommandError(ValueError):
@@ -70,6 +71,10 @@ def command_for(arguments: list[str]) -> list[str] | str:
     command, options = args[0], args[1:]
     aliases = {"doctor": "--doctor", "force-run": "--force-run",
                "show-schedule": "--show-schedule", "test-notification": "--test-notification"}
+    if command == "backup":
+        if options not in ([], ["--dry-run"]):
+            raise CommandError()
+        return [sys.executable, BACKUP_SCRIPT, "--configured", *options]
     if command == "weekly":
         _validate_args(options, weekly=True)
         return [sys.executable, WEEKLY_SCRIPT, *options]
@@ -92,6 +97,8 @@ def main(argv: list[str] | None = None, base_env: Mapping[str, str] | None = Non
         snapshot = load_runtime_config(base)
         if command == "config-check":
             print("[docker] runtime configuration valid (" + ("external file" if snapshot.external else "legacy env-only") + ")")
+            print(f"[docker] backup {'enabled' if snapshot.settings.backup_enabled else 'disabled'}; "
+                  f"daily {snapshot.settings.backup_time} ({snapshot.settings.timezone.key})")
             return 0
         if command == "schedule":
             from deploy.docker.scheduler import main as schedule_main

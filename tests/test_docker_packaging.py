@@ -2,12 +2,15 @@
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
 import unittest
 
 import yaml
+
+from deploy.docker.runtime_config import BASE_ENV_KEYS
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,6 +52,29 @@ class DockerPackagingTests(unittest.TestCase):
         self.assertNotIn("build", initializer)
         self.assertNotIn("ports", initializer)
 
+    def test_all_services_share_fixed_version_and_multiarch_index(self):
+        # Registry evidence (2026-09-28) identified this as the index, not either
+        # platform child manifest. This offline contract does not requery GHCR.
+        expected = "${TREND_RADAR_IMAGE:-ghcr.io/daxia9522/trendradar-lite-deploy:v26.9@sha256:b07e2424a0d5451d50c3f8e205636edb2ce63ec0061dc97c9ac5636bba038760}"
+        for name, service in self.compose["services"].items():
+            with self.subTest(service=name):
+                self.assertEqual(service["image"], expected)
+                self.assertNotIn(":latest", service["image"])
+        self.assertIn("#TREND_RADAR_IMAGE=trendradar-lite-deploy:local", (ROOT / ".env.example").read_text())
+
+    def test_capabilities_match_privileged_setup_filesystem_operations(self):
+        for name, service in self.compose["services"].items():
+            with self.subTest(service=name):
+                self.assertEqual(service["security_opt"], ["no-new-privileges:true"])
+                self.assertEqual(service["cap_drop"], ["ALL"])
+                self.assertFalse(service.get("privileged", False))
+        self.assertNotIn("cap_add", self.service)
+        self.assertEqual(set(self.setup["cap_add"]), {"CHOWN", "DAC_OVERRIDE", "FOWNER"})
+        initializer = self.compose["services"]["volume-init"]
+        self.assertEqual(set(initializer["cap_add"]), {"CHOWN", "DAC_READ_SEARCH"})
+        # Do not claim whole-root read-only support before runtime validation.
+        self.assertFalse(self.service.get("read_only", False))
+
     def test_image_uses_one_entrypoint_for_scheduler_and_doctor(self):
         dockerfile = (ROOT / "Dockerfile").read_text()
         self.assertIn('LABEL org.trendradar.runtime-config="1"', dockerfile)
@@ -57,6 +83,28 @@ class DockerPackagingTests(unittest.TestCase):
         self.assertIn("CMD python deploy/docker/entrypoint.py doctor", dockerfile)
         self.assertIn("USER trendradar", dockerfile)
         self.assertIn("COPY .env.example ./", dockerfile)
+
+    def test_optional_backup_shared_code_is_packaged_without_secrets_or_local_tools(self):
+        dockerfile = (ROOT / "Dockerfile").read_text()
+        self.assertIn("COPY deploy/*.py ./deploy/", dockerfile)
+        self.assertTrue((ROOT / "deploy/backup_settings.py").is_file())
+        self.assertTrue((ROOT / "deploy/r2_backup.py").is_file())
+        for line in re.sub(r"\\\n", " ", dockerfile).splitlines():
+            if line.startswith("ENV "):
+                self.assertNotIn("S3_", line)
+                self.assertNotIn("R2_BACKUP_", line)
+            if line.startswith("COPY "):
+                self.assertNotIn("local-tools", line)
+                self.assertNotIn("runtime", line)
+        for service in self.compose["services"].values():
+            self.assertFalse(any(key.startswith(("S3_", "R2_BACKUP_")) for key in service.get("environment", {})))
+
+    def test_image_uses_bundled_litellm_cost_map_through_runtime_environment(self):
+        instructions = re.sub(r"\\\n", " ", (ROOT / "Dockerfile").read_text()).splitlines()
+        env = next(line for line in instructions if line.startswith("ENV "))
+        self.assertIn("LITELLM_LOCAL_MODEL_COST_MAP=True", env.split())
+        # External runtime mode rebuilds the environment; the image value must survive it.
+        self.assertIn("LITELLM_LOCAL_MODEL_COST_MAP", BASE_ENV_KEYS)
 
     def test_private_runtime_files_are_excluded_from_build_and_git(self):
         ignored = set((ROOT / ".dockerignore").read_text().splitlines())
@@ -81,21 +129,47 @@ class DockerPackagingTests(unittest.TestCase):
             (root / ".env").write_text(
                 "TRENDRADAR_UID=12345\nTRENDRADAR_GID=12346\n"
                 "EMAIL_PASSWORD=synthetic-legacy-secret\nAI_MODEL=openai/stale-model\n"
+                "S3_ACCESS_KEY_ID=synthetic-legacy-access\nS3_SECRET_ACCESS_KEY=synthetic-legacy-s3-secret\n"
+                "R2_BACKUP_ENABLED=true\n"
             )
             env = {"HOME": directory, "PATH": os.environ.get("PATH", os.defpath)}
             result = subprocess.run(
-                ["docker", "compose", "--project-name", "runtime-packaging-test", "config", "--format", "json"],
+                ["docker", "compose", "--profile", "setup", "--project-name", "runtime-packaging-test", "config", "--format", "json"],
                 cwd=root, env=env, capture_output=True, text=True, timeout=20,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            rendered = json.loads(result.stdout)["services"]["trendradar"]
+            services = json.loads(result.stdout)["services"]
+            rendered = services["trendradar"]
             self.assertEqual(rendered["user"], "12345:12346")
+            self.assertEqual(rendered["security_opt"], ["no-new-privileges:true"])
+            self.assertEqual(rendered["cap_drop"], ["ALL"])
+            self.assertEqual(rendered["image"], self.service["image"].removeprefix("${TREND_RADAR_IMAGE:-").removesuffix("}"))
             self.assertNotIn("EMAIL_PASSWORD", rendered["environment"])
             self.assertNotIn("AI_MODEL", rendered["environment"])
             self.assertNotIn("synthetic-legacy-secret", result.stdout)
+            self.assertNotIn("synthetic-legacy-access", result.stdout)
+            self.assertNotIn("synthetic-legacy-s3-secret", result.stdout)
+            self.assertNotIn("R2_BACKUP_ENABLED", rendered["environment"])
             mounts = {item["target"]: item for item in rendered["volumes"]}
             self.assertTrue(mounts["/app/runtime"]["read_only"])
             self.assertEqual(mounts["/app/runtime"]["type"], "bind")
+            for name in ("setup", "volume-init"):
+                self.assertEqual(services[name]["image"], rendered["image"])
+                self.assertEqual(services[name]["security_opt"], ["no-new-privileges:true"])
+                self.assertEqual(services[name]["cap_drop"], ["ALL"])
+                self.assertEqual(set(services[name]["cap_add"]), set(self.compose["services"][name]["cap_add"]))
+            # Local source builds need an explicitly writable tag, not an OCI
+            # digest. Rendering proves all helper services share that override;
+            # it never builds, pulls, creates volumes or starts containers.
+            with (root / ".env").open("a") as stream:
+                stream.write("TREND_RADAR_IMAGE=trendradar-lite-deploy:local\n")
+            local = subprocess.run(
+                ["docker", "compose", "--profile", "setup", "config", "--format", "json"],
+                cwd=root, env=env, capture_output=True, text=True, timeout=20,
+            )
+            self.assertEqual(local.returncode, 0, local.stderr)
+            self.assertTrue(all(service["image"] == "trendradar-lite-deploy:local"
+                                for service in json.loads(local.stdout)["services"].values()))
 
 
 if __name__ == "__main__":

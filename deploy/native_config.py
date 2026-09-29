@@ -60,13 +60,18 @@ class ApplyError(ConfigError):
 
 class UnitTransaction:
     """Preserve timer enablement and running state, refusing effective overrides."""
-    def __init__(self, changes: dict[Path, bytes], runner=None):
+    def __init__(self, changes: dict[Path, bytes], runner=None, *, guard_paths=()):
         self.runner = runner or subprocess.run
         proposed = {Path(p): data for p, data in changes.items()}
-        self.before = {path: snapshot(path) for path in proposed}
+        guards = tuple(dict.fromkeys(Path(path) for path in guard_paths))
+        observed = tuple(dict.fromkeys((*proposed, *guards)))
+        self.before = {path: snapshot(path) for path in observed}
         self.changes = {path: data for path, data in proposed.items()
                         if self.before[path] is None or self.before[path][-1] != data}
-        self.timers = {path: data for path, data in proposed.items() if path.name.endswith(".timer")}
+        # Missing disk files are still manager-visible units. Guard them without
+        # writing placeholder files; an active unit with no old bytes fails closed.
+        self.timers = {path: proposed.get(path, self.before[path][-1] if self.before[path] else None)
+                       for path in observed if path.name.endswith(".timer")}
         self.states = {}
         self.written = []
         self.reloaded = False
@@ -298,7 +303,7 @@ class NativeApplication:
         self.schedule = NativeSchedule(self.app_dir, self.unit_dir, self.document.values)
 
     def save(self, values: dict[str, str], normalize: bool = False) -> str:
-        values = dict(values)
+        values = dict(self.document.values, **values)
         if normalize:
             for key, suggestion in self.schedule.suggested.items():
                 if key not in values or (not values[key] and not self.document.values.get(key)):
@@ -313,15 +318,49 @@ class NativeApplication:
                 changes = self.schedule.prepare(values, normalize=normalize)
             except ScheduleError as error:
                 raise ConfigError(str(error)) from None
-        transaction = UnitTransaction(changes, self.runner) if changes and not self.install else None
+        from native_backup import BackupPlan, guarded_changes, guarded_timer_paths, settings
+        # Install-mode is a draft save only: no systemctl or unit registration.
+        settings(values)
+        backup = None if self.install else BackupPlan(
+            self.app_dir, self.document.path, self.unit_dir, self.document.values, values, runner=self.runner)
+        if backup:
+            changes.update(backup.changes)
+        if changes and not self.install:
+            changes = guarded_changes(changes, self.unit_dir)
+        transaction = (UnitTransaction(changes, self.runner, guard_paths=guarded_timer_paths(self.unit_dir))
+                       if changes and not self.install else None)
+        if backup:
+            backup.check()
         self.document.check_unchanged()
         written = self.document.render(values)
         saved = False
+        units_committed = False
         try:
             saved = self.document.save(values)
             if transaction:
                 transaction.commit()
+                units_committed = True
+            if backup:
+                backup.activate()
         except BaseException as error:
+            recovery = []
+            # One file transaction, not independently committed report/backup
+            # transactions. If activation fails after reload, restore its state
+            # and then ALL unit files, always retaining the original safety gate.
+            if backup and backup.touched:
+                try:
+                    backup.rollback()
+                except (ConfigError, OSError):
+                    recovery.append("备份 timer 启用/运行状态回滚未确认")
+            if units_committed:
+                try:
+                    transaction.rollback()
+                except (ConfigError, OSError) as rollback_error:
+                    recovery.append(str(rollback_error) if isinstance(rollback_error, ConfigError)
+                                    else "unit 文件回滚未确认")
+            if recovery:
+                detail = str(error) if isinstance(error, ConfigError) else "应用操作失败"
+                error = ApplyError(detail + "；" + "；".join(recovery))
             restored = False
             try:
                 current = snapshot(self.document.path)
@@ -350,8 +389,10 @@ class NativeApplication:
             detail = str(error) if isinstance(error, ConfigError) else "请检查 timer 状态与私有备份"
             raise ApplyError(f"应用失败；{state}；{detail}") from None
         if transaction and transaction.changes:
-            return ("配置已保存；timer 已通过补跑风险校验并重载，原启用/运行状态已保留。"
-                    "未手动启动服务、执行测试或重启 timer；原定时任务仍可正常运行。")
+            return ("配置已保存；timer 已通过补跑风险校验并重载，日报/周报原启用/运行状态已保留。"
+                    "未手动启动服务或执行测试；原定时任务仍可正常运行。" + (backup.message if backup else ""))
         if self.install and changes:
             return "配置已保存；timer 尚未安装，将由安装器继续处理。"
-        return "配置已保存；普通配置于下一次 oneshot 生效，未重载或重启 timer。"
+        if self.install and settings(values).enabled:
+            return "配置已保存；备份 timer 尚未安装/启用，将由安装器继续处理。"
+        return "配置已保存；普通配置于下一次 oneshot 生效，未重载或重启日报/周报 timer。" + (backup.message if backup else "")

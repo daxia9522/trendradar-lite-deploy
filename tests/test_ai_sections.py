@@ -10,7 +10,30 @@ from trendradar.ai.formatter import render_ai_analysis_html_rich
 
 LEAD_SENTENCE = "**AI 资本投入趋于审慎，资金与产业关注点正在重新分布。**"
 
+# 生产契约：核心热点/研判与边界/信号与观察 required prose + 独立源速览 optional prose。
 VALID_CURRENT_RESPONSE = """## 核心热点
+**AI 资本投入趋于审慎，资金与产业关注点正在重新分布。**
+
+1. **算力投入与回报预期重估**：多家厂商上调资本开支，但自由现金流转负。
+2. **贸易与供应链压力**：关税措施升级传导至上游材料。
+
+## 研判与边界
+**资本与政策的互动进入验证期。**
+
+1. **资金面异动**：资本调仓与产业投资出现节奏错位。
+2. **政策弱信号**：监管表态较此前明显克制。
+
+## 信号与观察
+1. **交叉验证**：不同来源对同一产业变化提供了互补信息。
+2. **趋势判断**：中短期内产业投入节奏可能进一步分化。
+
+## 独立源速览
+### 微博
+独立来源出现主分析未覆盖的新议题。
+"""
+
+# lead_points 校验器回归用样本：与生产契约解耦，固定旧的五段 lead_points 结构。
+LEAD_POINTS_RESPONSE = """## 核心热点
 **AI 资本投入趋于审慎，资金与产业关注点正在重新分布。**
 
 1. **算力投入与回报预期重估**：多家厂商上调资本开支，但自由现金流转负。
@@ -46,15 +69,24 @@ class AISectionContractTests(unittest.TestCase):
         self.assertTrue(result.success, result.error)
         expected = [
             "核心热点",
-            "舆论风向",
-            "异动与弱信号",
-            "综合研判",
-            "行动建议",
+            "研判与边界",
+            "信号与观察",
+            "独立源速览",
         ]
         self.assertEqual([section.title for section in result.sections], expected)
         html = render_ai_analysis_html_rich(result)
         positions = [html.index(title) for title in expected]
         self.assertEqual(positions, sorted(positions))
+
+    def test_optional_section_may_be_omitted(self):
+        # 独立源速览为 optional：样本缺该段仍应通过，只有 required 段强制。
+        without_standalone = VALID_CURRENT_RESPONSE.split("## 独立源速览")[0].rstrip()
+        result = self.analyzer._parse_response(without_standalone)
+        self.assertTrue(result.success, result.error)
+        self.assertEqual(
+            [section.title for section in result.sections],
+            ["核心热点", "研判与边界", "信号与观察"],
+        )
 
     def test_required_sections_cannot_be_omitted(self):
         result = self.analyzer._parse_response("## 核心热点\n一句总领。")
@@ -76,7 +108,7 @@ class AISectionContractTests(unittest.TestCase):
         """内部事件编号不得泄漏到用户可见输出。
 
         回归场景：输入侧曾用 "### 事件 N：标题" 组织事件簇，模型把 N
-        当成引用锚点写回「异动信号」正文（prose 板块，不走 _validate_events）。
+        当成可引用的锚点写回研判与边界正文（prose 板块，不走 _validate_events）。
         """
         leaked = VALID_CURRENT_RESPONSE.replace(
             "1. **资金面异动**：资本调仓与产业投资出现节奏错位。",
@@ -99,7 +131,7 @@ class AISectionContractTests(unittest.TestCase):
     def test_event_subtitle_followed_by_numbered_list_is_not_rejected(self):
         """三级标题“支撑事件”后的编号列表不是内部事件编号。"""
         response = VALID_CURRENT_RESPONSE.replace(
-            "**AI 资本投入趋于审慎，资金与产业关注点正在重新分布。**\n\n",
+            LEAD_SENTENCE + "\n\n",
             "### 议程总览\n"
             "AI 资本投入趋于审慎，资金与产业关注点正在重新分布。\n\n"
             "### 支撑事件\n",
@@ -109,8 +141,8 @@ class AISectionContractTests(unittest.TestCase):
         self.assertTrue(result.success, result.error)
 
     def test_heading_variants_reorder_and_preserve_subtitles(self):
-        response = """### 综合研判：
-不同来源形成交叉验证。
+        response = """### 信号与观察：
+出现待观察的弱信号。
 
 # 核心热点
 **全局呈现政策与产业双线联动。**
@@ -118,20 +150,18 @@ class AISectionContractTests(unittest.TestCase):
 - **第一条主线。** 具体分析。
 政策面的细节。
 
-## 舆论风向
-存在传播温差。
+## 研判与边界
+存在需要区分已知与未知的争议。
 
-## 异动与弱信号：
-出现异常轨迹。
-
-### 行动建议
-继续观察后续变化。
+### 独立源速览
+### 微博
+独立来源出现新议题。
 """
         result = self.analyzer._parse_response(response)
         self.assertTrue(result.success, result.error)
         self.assertEqual(
             [section.title for section in result.sections],
-            ["核心热点", "舆论风向", "异动与弱信号", "综合研判", "行动建议"],
+            ["核心热点", "研判与边界", "信号与观察", "独立源速览"],
         )
         self.assertIn("### 1. 政策面变动", result.sections[0].content)
         html = render_ai_analysis_html_rich(result)
@@ -244,7 +274,8 @@ class AISectionContractTests(unittest.TestCase):
 
 
 class CoreSituationFormatTests(unittest.TestCase):
-    """lead_points 校验器回归：核心热点生产契约已改 prose，这里固定旧契约覆盖校验逻辑。"""
+    """lead_points 校验器回归：生产契约已改 prose，这里固定旧 lead_points 契约，
+    单独覆盖「加粗总括 + 分条拆解」的宽松校验逻辑，与生产 prompt 解耦。"""
 
     LEAD_POINTS_CONTRACT = """# AI_SECTION: 核心热点|required|lead_points
 # AI_SECTION: 舆论风向|required|prose
@@ -275,7 +306,7 @@ class CoreSituationFormatTests(unittest.TestCase):
         self.assertTrue(result.success, result.error)
 
     def _with_lead(self, lead):
-        return VALID_CURRENT_RESPONSE.replace(LEAD_SENTENCE, lead)
+        return LEAD_POINTS_RESPONSE.replace(LEAD_SENTENCE, lead)
 
     def test_bold_lead_is_accepted(self):
         """提示词要求首句以加粗短句给出全局总括，校验器必须放行。
@@ -324,7 +355,7 @@ class CoreSituationFormatTests(unittest.TestCase):
         """核心态势不得把主线内容挤成单一大段。
 
         实测背景：旧契约下核心态势是 prose，模型把三大主线全塞进一段，
-        可读性差。改为 events 后缺少三级标题应直接校验失败并触发重试。
+        可读性差。改为 lead_points 后缺少分条应直接校验失败并触发重试。
         """
         crammed = """## 核心热点
 **今日动态交织于三大主线。**
@@ -349,7 +380,7 @@ class CoreSituationFormatTests(unittest.TestCase):
 
     def test_single_mainline_is_accepted(self):
         """单条主线也合法：核心态势不强制凑足 2 条。"""
-        single = VALID_CURRENT_RESPONSE.replace(
+        single = LEAD_POINTS_RESPONSE.replace(
             "1. **算力投入与回报预期重估**：多家厂商上调资本开支，但自由现金流转负。\n"
             "2. **贸易与供应链压力**：关税措施升级传导至上游材料。",
             "1. **算力投入与回报预期重估**：多家厂商上调资本开支，但自由现金流转负。",
@@ -359,7 +390,7 @@ class CoreSituationFormatTests(unittest.TestCase):
 
     def test_lead_and_numbered_points_render_correctly(self):
         """总括句独立成段，编号分条渲染为有序列表并保留加粗小标题。"""
-        result = self.analyzer._parse_response(VALID_CURRENT_RESPONSE)
+        result = self.analyzer._parse_response(LEAD_POINTS_RESPONSE)
         self.assertTrue(result.success, result.error)
         html = render_ai_analysis_html_rich(result)
         self.assertIn(
@@ -371,7 +402,7 @@ class CoreSituationFormatTests(unittest.TestCase):
 
     def test_heading_style_mainlines_also_accepted(self):
         """三级标题写法与编号写法都应放行，不为排版差异触发重试。"""
-        heading_style = VALID_CURRENT_RESPONSE.replace(
+        heading_style = LEAD_POINTS_RESPONSE.replace(
             "1. **算力投入与回报预期重估**：多家厂商上调资本开支，但自由现金流转负。\n"
             "2. **贸易与供应链压力**：关税措施升级传导至上游材料。",
             "### 算力投入与回报预期重估\n多家厂商上调资本开支。\n\n"
@@ -403,7 +434,7 @@ class CoreSituationFormatTests(unittest.TestCase):
         ):
             with self.subTest(style=label):
                 result = self.analyzer._parse_response(
-                    VALID_CURRENT_RESPONSE.replace(numbered, style)
+                    LEAD_POINTS_RESPONSE.replace(numbered, style)
                 )
                 self.assertTrue(result.success, result.error)
 
@@ -421,14 +452,17 @@ class CoreSituationFormatTests(unittest.TestCase):
                 self.assertFalse(result.success)
 
     def test_prompt_file_and_code_contract_stay_in_sync(self):
-        """锁住提示词文件与代码契约一致，防止只改一边。"""
+        """锁住生产提示词文件与代码契约一致，防止只改一边。"""
         prompt_path = (
             Path(__file__).resolve().parent.parent / "config" / "ai_analysis_prompt.txt"
         )
         text = prompt_path.read_text(encoding="utf-8")
         specs = AIAnalyzer._parse_section_specs(text)
-        by_title = {spec.title: spec for spec in specs}
-        self.assertEqual(by_title["核心热点"].format_type, "prose")
+        titles = [spec.title for spec in specs]
+        self.assertEqual(titles, ["核心热点", "研判与边界", "信号与观察", "独立源速览"])
+        # 生产四段均为 prose：结构由提示词正文约束，代码不再锁定分条样式。
+        self.assertTrue(all(spec.format_type == "prose" for spec in specs))
+        self.assertEqual([spec.required for spec in specs], [True, True, True, False])
         # 提示词正文必须仍要求 MECE 归总，避免改成 prose 后丢失分析方法
         self.assertIn("MECE", text)
         for spec in specs:

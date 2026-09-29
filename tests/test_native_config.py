@@ -45,7 +45,7 @@ class FakeSystemctl:
                 return subprocess.CompletedProcess(command, 1, "", "secret diagnostic")
             return subprocess.CompletedProcess(command, 0, "", "")
         name = command[3]
-        active, enabled = self.states[name]
+        active, enabled = self.states.get(name, ("inactive", "not-found"))
         output = (f"ActiveState={active}\nUnitFileState={enabled}\nFragmentPath={self.fragment or self.units / name}\nDropInPaths={self.dropins}\n"
                   "SubState=waiting\nLastTriggerUSec=Thu 2026-01-01 00:05:00 UTC\nNeedDaemonReload=no\n")
         return subprocess.CompletedProcess(command, 0, output, "")

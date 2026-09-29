@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Validate GitHub workflow files: YAML parse + bash -n on embedded run scripts,
 plus offline simulation of the stale-guard logic."""
+import re
 import subprocess
 import sys
 import tempfile
@@ -57,6 +58,56 @@ for wf in wf_files:
     except Exception as e:  # noqa: BLE001
         check(f"yaml parse {wf.name}", False, str(e))
 
+# Supply-chain contracts are offline: SHA/tag resolution is reviewed separately
+# against the official API; syntax alone is not proof of trusted code/signatures.
+for wf in wf_files:
+    text = wf.read_text()
+    check(f"{wf.name} top-level permissions are read-only",
+          all(value == "read" for value in parsed[wf.name].get("permissions", {}).values()))
+    for line in text.splitlines():
+        if re.search(r"\buses:", line):
+            check(f"{wf.name} action has full SHA and original tag: {line.strip()}",
+                  re.fullmatch(r"\s*(?:-\s+)?uses: [\w.-]+/[\w./-]+@[0-9a-f]{40} # v\S+\s*", line) is not None)
+    for job_name, job in parsed[wf.name]["jobs"].items():
+        if wf.name != "release-image.yml":
+            check(f"{wf.name}:{job_name} does not grant publishing/signing permissions",
+                  all(value == "read" for value in job.get("permissions", {}).values()))
+        for step in job.get("steps", []):
+            uses = step.get("uses", "")
+            if uses.startswith("actions/checkout@"):
+                check(f"{wf.name}:{job_name} checkout does not persist credentials",
+                      step.get("with", {}).get("persist-credentials") is False)
+            if uses.startswith("actions/setup-python@"):
+                options = step.get("with", {})
+                check(f"{wf.name}:{job_name} Python cache follows lock file",
+                      options.get("cache") == "pip" and options.get("cache-dependency-path") == "requirements.lock")
+            for line in step.get("run", "").splitlines():
+                if re.search(r"\bpip(?:\d+)?\b.*\binstall\b", line):
+                    check(f"{wf.name}:{job_name} pip install requires hashes",
+                          line.strip() == "python -m pip install --require-hashes -r requirements.lock")
+
+release = parsed["release-image.yml"]
+release_job = release["jobs"]["image"]
+release_steps = release_job["steps"]
+build = next(step for step in release_steps if step.get("uses", "").startswith("docker/build-push-action@"))
+attest = next(step for step in release_steps if step.get("uses", "").startswith("actions/attest-build-provenance@"))
+check("release image job grants only required publishing/signing scopes", release_job.get("permissions") == {
+    "contents": "read", "packages": "write", "id-token": "write", "attestations": "write",
+})
+check("release attests only after successful multi-platform push",
+      release_steps.index(attest) > release_steps.index(build)
+      and build.get("id") == "build" and build["with"].get("push") is True
+      and set(build["with"]["platforms"].split(",")) == {"linux/amd64", "linux/arm64"}
+      and "if" not in attest and not attest.get("continue-on-error", False))
+check("release attests actual build digest, not mutable tag", attest.get("with") == {
+    "subject-name": "${{ steps.version.outputs.image_name }}",
+    "subject-digest": "${{ steps.build.outputs.digest }}",
+    "push-to-registry": True,
+})
+metadata = next(step for step in release_steps if step.get("id") == "meta")
+check("release metadata and attestation share normalized untagged name",
+      metadata["with"]["images"] == attest["with"]["subject-name"])
+
 # structural checks
 for name in ("crawler.yml", "weekly-report.yml"):
     data = parsed.get(name, {})
@@ -83,6 +134,25 @@ for wf in wf_files:
                 p = f.name
             r = subprocess.run(["bash", "-n", p], capture_output=True, text=True)
             check(f"bash -n {wf.name}:{jname}:step{i}", r.returncode == 0, r.stderr.strip())
+
+# ci.yml must parse every script: `bash -n a b` parses only a (b becomes $1).
+CI_SHELL_CHECK = next(step["run"] for step in parsed["ci.yml"]["jobs"]["python"]["steps"]
+                      if step.get("name") == "Check shell scripts")
+REPO = WF_DIR.parent.parent
+with tempfile.TemporaryDirectory() as tmp:
+    tree = Path(tmp)
+    scripts = [Path("install.sh")] + [path.relative_to(REPO) for name in ("linux", "docker")
+                                      for path in sorted((REPO / "deploy" / name).glob("*.sh"))]
+    for script in scripts:
+        (tree / script).parent.mkdir(parents=True, exist_ok=True)
+        (tree / script).write_text((REPO / script).read_text())
+    (tree / "ci-step.sh").write_text(CI_SHELL_CHECK)
+    # Actions runs a `run:` step without an explicit shell as `bash -e {0}`.
+    r = subprocess.run(["bash", "-e", "ci-step.sh"], cwd=tree, capture_output=True, text=True)
+    check("ci.yml shell check passes on repository scripts", r.returncode == 0, r.stderr.strip())
+    (tree / scripts[-1]).write_text((tree / scripts[-1]).read_text() + "\nif then\n")
+    r = subprocess.run(["bash", "-e", "ci-step.sh"], cwd=tree, capture_output=True, text=True)
+    check(f"ci.yml shell check catches a syntax error in {scripts[-1]}", r.returncode != 0)
 
 # --- offline simulation of guard logic ---
 GUARD_BODY = parsed["crawler.yml"]["jobs"]["guard"]["steps"][0]["run"]

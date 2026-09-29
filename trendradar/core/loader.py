@@ -5,8 +5,10 @@
 负责从 YAML 配置文件和环境变量加载配置。
 """
 
+import errno
 import os
 import re
+import stat
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
@@ -60,10 +62,67 @@ def _get_env_secret(key: str, file_key: str) -> str:
     if not secret_path:
         return ""
 
+    return _read_secret_file(secret_path)
+
+
+# 密钥文件大小上限：与 deploy/docker/runtime_config.py 的 1 MiB 限制一致。
+MAX_SECRET_FILE_BYTES = 1024 * 1024
+
+
+def _read_secret_file(secret_path: str) -> str:
+    """Read one private inode; reject symlinks at every path component.
+
+    A configured but unsafe/unreadable file fails closed with value-free errors.
+    Open directories relative to pinned descriptors so a rename cannot redirect
+    the read. Sticky shared directories (e.g. /tmp) are permitted, as in the
+    Docker runtime reader; the final file must be owner-only and regular.
+    """
+    descriptors: list[int] = []
     try:
-        return Path(secret_path).read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
+        path = Path(secret_path)
+        # Do not resolve() or normalize '..': that could hide a symlink.
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        directory = os.open(path.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        descriptors.append(directory)
+        for component in path.parts[1:-1]:
+            info = os.stat(component, dir_fd=directory, follow_symlinks=False)
+            if stat.S_ISLNK(info.st_mode):
+                raise ValueError("密钥文件路径不能包含符号链接")
+            directory = os.open(
+                component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=directory,
+            )
+            descriptors.append(directory)
+            info = os.fstat(directory)
+            if stat.S_IMODE(info.st_mode) & 0o022 and not info.st_mode & stat.S_ISVTX:
+                raise ValueError("密钥文件路径中的目录不能被组或其他用户写入")
+
+        descriptor = os.open(
+            path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=directory,
+        )
+        descriptors.append(descriptor)
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("密钥文件必须是普通文件")
+        if stat.S_IMODE(info.st_mode) & ~0o600:
+            raise ValueError("密钥文件权限必须为 0600 或 0400")
+        if info.st_size > MAX_SECRET_FILE_BYTES:
+            raise ValueError("密钥文件超过大小上限")
+        with os.fdopen(os.dup(descriptor), "rb") as stream:
+            content = stream.read(MAX_SECRET_FILE_BYTES + 1)
+        if len(content) > MAX_SECRET_FILE_BYTES:
+            raise ValueError("密钥文件超过大小上限")
+        return content.decode("utf-8").strip()
+    except UnicodeError:
+        raise ValueError("密钥文件必须为 UTF-8 文本") from None
+    except OSError as error:
+        message = "密钥文件路径不能包含符号链接" if error.errno == errno.ELOOP else "密钥文件无法安全读取"
+        raise ValueError(message) from None
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
 
 
 def _get_env_model_list(key: str) -> Optional[List[str]]:

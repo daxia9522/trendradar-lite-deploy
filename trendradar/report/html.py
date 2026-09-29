@@ -846,10 +846,10 @@ def render_email_html_content(
       width: auto;
       max-width: 100%;
       box-sizing: border-box;
-      font-size: 20px;
+      font-size: 18px;
       line-height: 1.2;
       margin: 0;
-      color: #312e81;
+      color: #AF52DE;
       font-weight: 700;
       padding: 0;
       background: transparent;
@@ -1080,9 +1080,9 @@ def render_email_html_content(
     }}
     /* AI hierarchy: section title > block title > subtitle > body */
     .ai-block-title {{
-      font-size: 15px;
+      font-size: 16px;
       font-weight: 700;
-      color: #3730a3;
+      color: #3186FF;
       margin: 0 0 8px 0;
     }}
     .ai-block-content {{
@@ -1095,7 +1095,7 @@ def render_email_html_content(
     .ai-markdown p:last-child {{ margin-bottom: 0; }}
     .ai-subtitle {{
       margin: 12px 0 6px;
-      color: #4338ca;
+      color: #8B8AFF;
       font-size: 14px;
       font-weight: 700;
     }}
@@ -1171,13 +1171,13 @@ def render_email_html_content(
           inset 0 0 24px rgba(255, 144, 4, 0.10) !important;
       }}
       .ai-section-title {{
-        color: #c7d2fe !important;
+        color: #AF52DE !important;
       }}
       .ai-block-title {{
-        color: #c7d2fe !important;
+        color: #5D9CFF !important;
       }}
       .ai-subtitle {{
-        color: #a5b4fc !important;
+        color: #8B8AFF !important;
       }}
       .ai-block-content,
       .ai-markdown li,

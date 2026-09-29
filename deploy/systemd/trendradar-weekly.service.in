@@ -6,6 +6,8 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=@APP_DIR@
+# Use LiteLLM's bundled model cost map instead of downloading it on import.
+Environment=LITELLM_LOCAL_MODEL_COST_MAP=True
 EnvironmentFile=-@ENV_FILE@
 ExecStart=@PYTHON@ weekly_report/weekly_ai_report_email.py
 

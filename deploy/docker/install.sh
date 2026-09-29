@@ -26,6 +26,7 @@ fi
 cd "$APP_DIR"
 check_docker
 set_identity
+unset TRENDRADAR_BUILD_IMAGE
 
 if [[ $CONFIGURE == true ]]; then
   require_local_setup_image
@@ -42,7 +43,7 @@ if [[ $IMAGE_ACTION == auto && ! -f $APP_DIR/runtime/env ]]; then
   IMAGE_ACTION=pull
 fi
 case $IMAGE_ACTION in
-  build) docker compose build trendradar ;;
+  build) build_selected_image ;;
   pull) docker compose pull trendradar ;;
 esac
 require_local_setup_image

@@ -40,8 +40,8 @@ set_identity() {
   export TRENDRADAR_UID=$uid TRENDRADAR_GID=$gid
 }
 
-require_local_setup_image() {
-  local image compatibility
+resolve_setup_image() {
+  local image
   # Compose >= v2.24 accepts the setup service as a positional selector for
   # `config --images`. Older v2 releases reject or silently ignore it and
   # print one image per service, so fall back to the whole-project listing
@@ -52,6 +52,25 @@ require_local_setup_image() {
     image=$(docker compose --profile setup config --images | sort -u) || fail "Cannot resolve the setup image."
   fi
   [[ -n $image && $image != *$'\n'* ]] || fail "Expected exactly one setup image."
+  printf '%s\n' "$image"
+}
+
+build_selected_image() {
+  local image
+  image=$(resolve_setup_image) || return
+  # A digest identifies registry content; Docker cannot build into that reference.
+  # Only an explicit --build switches it to a writable local tag. Persist the
+  # selection after configuration succeeds, never when a draft is cancelled.
+  if [[ $image == *@* ]]; then
+    image=trendradar-lite-deploy:local
+  fi
+  export TREND_RADAR_IMAGE=$image TRENDRADAR_BUILD_IMAGE=$image
+  docker compose build trendradar
+}
+
+require_local_setup_image() {
+  local image compatibility
+  image=$(resolve_setup_image) || return
   compatibility=$(docker image inspect --format '{{ index .Config.Labels "org.trendradar.runtime-config" }}' "$image" 2>/dev/null) || fail "Setup image is not available locally. Configuration never pulls/builds images; run install.sh --build or update.sh explicitly."
   [[ $compatibility == 1 ]] || fail "Local image does not support runtime configuration (org.trendradar.runtime-config=1). Build/install a compatible image explicitly; configuration will not update it."
 }
@@ -68,7 +87,7 @@ run_manage() {
     return
   fi
   docker compose --profile setup run --rm --pull never --no-deps -T \
-    -e TRENDRADAR_UID -e TRENDRADAR_GID --entrypoint python setup \
+    -e TRENDRADAR_UID -e TRENDRADAR_GID -e TRENDRADAR_BUILD_IMAGE --entrypoint python setup \
     deploy/docker/manage.py "$@" --root /setup
 }
 

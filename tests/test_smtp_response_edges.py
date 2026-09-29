@@ -118,8 +118,8 @@ class SmtpResponseEdgeTests(unittest.TestCase):
                 self.assertTrue(context.check_hostname)
                 self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
 
-    def test_authentication_errors_keep_existing_provider_retry_policy(self):
-        # 535 is intentionally retried by the retained provider compatibility policy.
+    def test_authentication_errors_do_not_retry_or_send(self):
+        # Stop even for a 4xx authentication response: don't risk account lockout.
         for code in (454, 535):
             with self.subTest(code=code):
                 servers = [smtp_server() for _ in range(3)]
@@ -127,12 +127,15 @@ class SmtpResponseEdgeTests(unittest.TestCase):
                     server.login.side_effect = smtplib.SMTPAuthenticationError(code, PRIVATE_DETAIL)
                 result, output, factory, sleep = self.send(servers)
                 self.assertFalse(result)
-                self.assertEqual(factory.call_count, 3)
-                self.assertEqual([call.args[0] for call in sleep.call_args_list], [3, 15])
+                self.assertEqual(factory.call_count, 1)
+                sleep.assert_not_called()
                 self.assertIn("认证错误", output)
-                for server in servers:
+                servers[0].send_message.assert_not_called()
+                servers[0].quit.assert_called_once_with()
+                for server in servers[1:]:
+                    server.login.assert_not_called()
                     server.send_message.assert_not_called()
-                    server.quit.assert_called_once_with()
+                    server.quit.assert_not_called()
 
     def test_all_temporary_recipient_refusals_can_retry(self):
         first, second = smtp_server(), smtp_server()

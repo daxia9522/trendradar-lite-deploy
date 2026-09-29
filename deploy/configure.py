@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import hmac
 import html
 import os
 import re
+import secrets
 import sys
 import threading
 import urllib.parse
@@ -18,9 +20,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 # Also works when loaded by importlib and when invoked from another directory.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from envfile import ConfigError, EnvDocument, read_env, write_env
+from backup_settings import BackupConfigError, DEFAULT_BACKUP_TIME, DEFAULT_LOOKBACK_DAYS, load_backup_settings
 
 
-SECRET_FIELDS = {"EMAIL_PASSWORD", "AI_API_KEY"}
+SECRET_FIELDS = {"EMAIL_PASSWORD", "AI_API_KEY", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"}
+BACKUP_DEFAULTS = {"R2_BACKUP_ENABLED": "false", "R2_BACKUP_TIME": DEFAULT_BACKUP_TIME,
+                   "R2_BACKUP_LOOKBACK_DAYS": str(DEFAULT_LOOKBACK_DAYS)}
 FIELDS = [
     ("EMAIL_FROM", "发件邮箱", True, "news@example.com"),
     ("EMAIL_PASSWORD", "邮箱密码或授权码", True, ""),
@@ -45,6 +50,15 @@ FIELDS = [
     ("WEEKLY_WEEKDAY", "周报星期", False, "0=周一，6=周日"),
     ("WEEKLY_HOUR", "周报小时", False, "0-23"),
     ("WEEKLY_MINUTE", "周报分钟", False, "0-59"),
+    ("R2_BACKUP_ENABLED", "启用晚间 R2/S3 备份", False, "true / false；默认关闭，开启后会写远程存储"),
+    ("R2_BACKUP_TIME", "每日备份时间", False, "HH:MM，默认 23:40，使用当前时区"),
+    ("R2_BACKUP_LOOKBACK_DAYS", "备份最近几天", False, "默认 2 天（当天和昨天），范围 1-3660"),
+    ("STORAGE_BACKEND", "主数据库模式", False, "备份须使用 local；remote 模式直接写 R2，不启用此备份"),
+    ("S3_BUCKET_NAME", "R2/S3 存储桶", False, "开启备份时必填，与 Actions 使用同一桶"),
+    ("S3_ENDPOINT_URL", "R2/S3 服务地址", False, "开启备份时必填；HTTP(S) 地址，不嵌入密钥"),
+    ("S3_ACCESS_KEY_ID", "R2/S3 Access Key ID", False, "开启备份时必填；不回显"),
+    ("S3_SECRET_ACCESS_KEY", "R2/S3 Secret Access Key", False, "开启备份时必填；不回显"),
+    ("S3_REGION", "R2/S3 区域", False, "可选，R2 通常为 auto"),
 ]
 
 
@@ -61,11 +75,11 @@ def render(
     saved: bool = False,
     deployment: str = "linux",
 ) -> str:
-    sections = {"邮件推送": [], "AI 分析": [], "执行时间": [], "高级配置": []}
+    sections = {"邮件推送": [], "AI 分析": [], "执行时间": [], "高级配置": [], "R2/S3 备份": []}
     for key, label, required, hint in _fields_for(deployment):
-        value = "" if key in SECRET_FIELDS else values.get(key, "")
+        value = "" if key in SECRET_FIELDS else values.get(key, BACKUP_DEFAULTS.get(key, ""))
         placeholder = "已保存，留空保持不变" if key in SECRET_FIELDS and values.get(key) else hint
-        input_type = "password" if key in SECRET_FIELDS else "time" if key.endswith("_PUSH_TIME") or key == "DAILY_SUMMARY_TIME" else "text"
+        input_type = "password" if key in SECRET_FIELDS else "time" if key.endswith("_PUSH_TIME") or key in ("DAILY_SUMMARY_TIME", "R2_BACKUP_TIME") else "text"
         if url_field_never_renders(key, value):
             # The raw value stays server-side only; blank submits keep the draft.
             value = ""
@@ -120,6 +134,10 @@ def validate(values: dict[str, str], deployment: str = "linux") -> list[str]:
         errors.append("四个推送时间不能重复")
     if values.get("TIMEZONE") and values.get("TZ") and values["TIMEZONE"] != values["TZ"]:
         errors.append("TIMEZONE 与 TZ 冲突；请在时间菜单确认统一时区后保存")
+    try:
+        load_backup_settings(values)
+    except BackupConfigError as error:
+        errors.append(str(error))
     return errors
 
 
@@ -139,6 +157,7 @@ def validate_field(key: str, value: str) -> list[str]:
         "WEEKLY_HOUR": (0, 23),
         "WEEKLY_MINUTE": (0, 59),
         "AI_TIMEOUT": (1, 2147483647),
+        "R2_BACKUP_LOOKBACK_DAYS": (1, 3660),
     }
     if key in ranges:
         minimum, maximum = ranges[key]
@@ -148,11 +167,15 @@ def validate_field(key: str, value: str) -> list[str]:
             return [f"{key} 必须是整数"]
         if not minimum <= number <= maximum:
             return [f"{key} 必须在 {minimum}-{maximum} 之间"]
-    if key in TIME_FIELDS and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value):
+    if key in (*TIME_FIELDS, "R2_BACKUP_TIME") and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value):
         return [f"{key} 必须使用 HH:MM 格式"]
     if key == "AI_ANALYSIS_ENABLED" and value.lower() not in ("true", "false"):
         return ["AI_ANALYSIS_ENABLED 必须是 true 或 false"]
-    if key in ("AI_API_BASE", "PLATFORMS_API_URL", "PLATFORMS_API_FALLBACK_URLS"):
+    if key == "R2_BACKUP_ENABLED" and value.lower() not in ("true", "false", "1", "0"):
+        return ["R2_BACKUP_ENABLED 必须是 true 或 false"]
+    if key == "STORAGE_BACKEND" and value not in ("local", "remote", "auto"):
+        return ["STORAGE_BACKEND 必须是 local、remote 或 auto"]
+    if key in ("AI_API_BASE", "PLATFORMS_API_URL", "PLATFORMS_API_FALLBACK_URLS", "S3_ENDPOINT_URL"):
         urls = value.split(",") if key.endswith("FALLBACK_URLS") else [value]
         for url in urls:
             try:
@@ -220,6 +243,8 @@ def write_systemd_weekly_timer(path: Path, values: dict[str, str]) -> None:
 
 
 def _section_of(key: str) -> str:
+    if key.startswith(("R2_BACKUP_", "S3_")) or key == "STORAGE_BACKEND":
+        return "R2/S3 备份"
     if key in ("AI_TIMEOUT", "PLATFORMS_API_URL", "PLATFORMS_API_FALLBACK_URLS"):
         return "高级配置"
     if key.startswith("EMAIL_"):
@@ -246,7 +271,10 @@ def _prompt_field(
     label_text = f"{label}{' *' if required else ''}"
     prompt = f"  {label_text}" + (f"（{note}）" if note else "") + ": "
     entered = (getpass.getpass(prompt) if is_secret else input(prompt)).strip()
-    return entered if entered else current.get(key, "")
+    # The legacy sequential wizard previously got EnvDocument's local default.
+    # An empty newly exposed field must not replace that default with "".
+    fallback = current.get(key, "") or ("local" if key == "STORAGE_BACKEND" else "")
+    return entered if entered else fallback
 
 
 def configure_docker_terminal(output: Path, deployment: str = "docker") -> None:
@@ -282,6 +310,9 @@ MENU_SECTIONS = {
     "2": ("AI 模型与接口", ["AI_ANALYSIS_ENABLED", "AI_MODEL", "AI_API_KEY", "AI_API_KEY_FILE", "AI_API_BASE", "AI_FALLBACK_MODELS"]),
     "3": ("采集与推送时间", ["CRAWLER_MINUTE", *TIME_FIELDS, "WEEKLY_WEEKDAY", "WEEKLY_TIME", "TZ"]),
     "4": ("高级配置", ["AI_TIMEOUT", "PLATFORMS_API_URL", "PLATFORMS_API_FALLBACK_URLS"]),
+    "6": ("R2/S3 晚间备份（可选）", ["R2_BACKUP_ENABLED", "R2_BACKUP_TIME", "R2_BACKUP_LOOKBACK_DAYS",
+                                  "STORAGE_BACKEND", "S3_BUCKET_NAME", "S3_ENDPOINT_URL",
+                                  "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY", "S3_REGION"]),
 }
 FIELD_MAP = {field[0]: field for field in FIELDS}
 FIELD_MAP["WEEKLY_TIME"] = ("WEEKLY_TIME", "周报时间", False, "HH:MM")
@@ -290,8 +321,8 @@ FIELD_MAP["WEEKLY_TIME"] = ("WEEKLY_TIME", "周报时间", False, "HH:MM")
 def display_value(key: str, value: str) -> str:
     if key in SECRET_FIELDS:
         return "<已设置，隐藏>" if value else "<未设置>"
-    if key == "AI_ANALYSIS_ENABLED" and value.lower() in ("true", "false"):
-        return "已启用" if value.lower() == "true" else "已停用"
+    if key in ("AI_ANALYSIS_ENABLED", "R2_BACKUP_ENABLED") and value.lower() in ("true", "false", "1", "0"):
+        return "已启用" if value.lower() in ("true", "1") else "已停用"
     if key == "WEEKLY_WEEKDAY" and value in tuple(str(day) for day in range(7)):
         return f"周{'一二三四五六日'[int(value)]}（{value}）"
     if "URL" in key or key == "AI_API_BASE":
@@ -307,7 +338,7 @@ def display_value(key: str, value: str) -> str:
     return value or "<未设置>"
 
 
-CREDENTIAL_URL_FIELDS = ("AI_API_BASE", "PLATFORMS_API_URL", "PLATFORMS_API_FALLBACK_URLS")
+CREDENTIAL_URL_FIELDS = ("AI_API_BASE", "PLATFORMS_API_URL", "PLATFORMS_API_FALLBACK_URLS", "S3_ENDPOINT_URL")
 CLEAR_SENTINEL = ":clear"
 
 
@@ -353,14 +384,14 @@ def _native_value(key: str, values: dict[str, str]) -> str:
     if key == "WEEKLY_TIME":
         hour, minute = values.get("WEEKLY_HOUR", ""), values.get("WEEKLY_MINUTE", "")
         return f"{int(hour):02d}:{int(minute):02d}" if hour.isdigit() and minute.isdigit() else ""
-    return values.get(key, "")
+    return values.get(key, BACKUP_DEFAULTS.get(key, ""))
 
 
 def edit_native_field(key: str, values: dict[str, str]) -> None:
     _, label, required, hint = FIELD_MAP[key]
     current = _native_value(key, values)
     while True:
-        note = "1 启用 / 2 禁用" if key == "AI_ANALYSIS_ENABLED" else hint
+        note = "1 启用 / 2 禁用" if key in ("AI_ANALYSIS_ENABLED", "R2_BACKUP_ENABLED") else hint
         prompt = f"{label} [{display_value(key, current)}]（{note}；回车保留，:cancel 取消"
         prompt += "）: " if required else "，:clear 清空）: "
         entered = getpass.getpass(prompt) if key in SECRET_FIELDS else input(prompt)
@@ -373,7 +404,7 @@ def edit_native_field(key: str, values: dict[str, str]) -> None:
                 print("必填字段不能清空。", flush=True)
                 continue
             entered = ""
-        if key == "AI_ANALYSIS_ENABLED":
+        if key in ("AI_ANALYSIS_ENABLED", "R2_BACKUP_ENABLED"):
             entered = {"1": "true", "2": "false"}.get(entered, entered.lower())
         errors = validate_field("MORNING_PUSH_TIME" if key == "WEEKLY_TIME" else key, entered)
         if key in TIME_FIELDS and entered and any(values.get(other) == entered for other in TIME_FIELDS if other != key):
@@ -386,6 +417,11 @@ def edit_native_field(key: str, values: dict[str, str]) -> None:
             values["WEEKLY_HOUR"], values["WEEKLY_MINUTE"] = (str(int(v)) if v else "" for v in parts)
         else:
             values[key] = entered
+        if key == "R2_BACKUP_ENABLED" and entered in ("true", "1"):
+            if values.get("STORAGE_BACKEND", "auto") in ("", "auto"):
+                values["STORAGE_BACKEND"] = "local"
+                print("备份适用于本地数据库；主存储 local 已加入待保存变更。", flush=True)
+            print("启用后将在每日设定时间上传本地快照；只允许一个部署写入同一日期对象。", flush=True)
         if key == "TZ" and values.get("TIMEZONE") and values["TIMEZONE"] != entered:
             print("旧 TIMEZONE 会覆盖 TZ。统一后才能应用时间配置。", flush=True)
             if input("同时将 TIMEZONE 统一为此时区？[y/N]: ").strip().lower() == "y":
@@ -411,7 +447,7 @@ def configure_terminal(output: Path, deployment: str = "linux", *, application=N
     for warning in app.schedule.warnings:
         print(f"警告：{warning}", flush=True)
     while True:
-        print("\n1 邮件推送\n2 AI 模型与接口\n3 采集与推送时间\n4 高级配置\n5 查看待保存变更\ns 保存并应用\nq 放弃修改并退出", flush=True)
+        print("\n1 邮件推送\n2 AI 模型与接口\n3 采集与推送时间\n4 高级配置\n5 查看待保存变更\n6 R2/S3 晚间备份（可选）\ns 保存并应用\nq 放弃修改并退出", flush=True)
         choice = input("选择: ").strip().lower()
         if choice in MENU_SECTIONS:
             title, keys = MENU_SECTIONS[choice]
@@ -508,6 +544,51 @@ def ssh_tunnel_command(user: str, host: str, ssh_port: int, setup_port: int) -> 
     return f"ssh{port_option} -L {setup_port}:127.0.0.1:{setup_port} {user}@{host}"
 
 
+MAX_FORM_BYTES = 64 * 1024
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+CSRF_FIELD = "_csrf"
+REJECTED_PAGE = "请求已拒绝：请在浏览器中重新打开终端提示的 http://127.0.0.1 配置地址后再提交。"
+
+
+class RequestGuard:
+    """Per-session defenses for the unauthenticated setup page.
+
+    Loopback binding stops neither another site's page from submitting a form
+    to 127.0.0.1 nor DNS rebinding from reading this page (and its token) under
+    a foreign name. Every request must name a loopback or explicitly bound
+    host; a POST must also come from this origin and echo the session token.
+    """
+
+    def __init__(self, bind_host: str):
+        self.token = secrets.token_urlsafe(32)
+        self.hosts = LOOPBACK_HOSTS | ({bind_host.lower()} - {"", "0.0.0.0", "::"})
+
+    def trusted(self, headers) -> bool:
+        host = (headers.get("Host") or "").lower()
+        try:
+            if urllib.parse.urlsplit("//" + host).hostname not in self.hosts:
+                return False
+        except ValueError:
+            return False
+        origin = headers.get("Origin")
+        return origin is None or origin.lower() == "http://" + host
+
+    def token_matches(self, form: dict[str, list[str]]) -> bool:
+        return hmac.compare_digest(form.get(CSRF_FIELD, [""])[0].encode(), self.token.encode())
+
+    def stamp(self, page: str) -> str:
+        field = f'<input type="hidden" name="{CSRF_FIELD}" value="{html.escape(self.token)}">'
+        return page.replace('<form method="post">', '<form method="post">' + field)
+
+
+def read_form(headers, stream) -> dict[str, list[str]]:
+    """Parse one bounded urlencoded body; raises ValueError/UnicodeError."""
+    length = int(headers.get("Content-Length", "0"))
+    if not 0 <= length <= MAX_FORM_BYTES:
+        raise ValueError
+    return urllib.parse.parse_qs(stream.read(length).decode("utf-8"), keep_blank_values=True)
+
+
 def serve(
     output: Path,
     host: str,
@@ -524,13 +605,14 @@ def serve(
     if application and document.original is None:
         current.update(read_env(application.app_dir / ".env.example"))
     done = threading.Event()
+    guard = RequestGuard(host)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args: object) -> None:
             return
 
         def send_page(self, body: str, status: int = 200) -> None:
-            encoded = body.encode("utf-8")
+            encoded = guard.stamp(body).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(encoded)))
@@ -546,11 +628,23 @@ def serve(
             return page
 
         def do_GET(self) -> None:
+            if not guard.trusted(self.headers):
+                self.send_page(REJECTED_PAGE, 403)
+                return
             self.send_page(self.page(current))
 
         def do_POST(self) -> None:
-            length = int(self.headers.get("Content-Length", "0"))
-            form = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8"), keep_blank_values=True)
+            if not guard.trusted(self.headers):
+                self.send_page(REJECTED_PAGE, 403)
+                return
+            try:
+                form = read_form(self.headers, self.rfile)
+            except (ValueError, UnicodeError):
+                self.send_page(self.page(current, ["请求格式无效"]), 400)
+                return
+            if not guard.token_matches(form):
+                self.send_page(REJECTED_PAGE, 403)
+                return
             submitted = dict(current)
             submitted.update({
                 key: form.get(key, [""])[0] if key in SECRET_FIELDS else form.get(key, [""])[0].strip()

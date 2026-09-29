@@ -38,6 +38,38 @@ from trendradar.utils.time import (
 )
 
 
+def _error_summary(error: Exception) -> str:
+    """Keep diagnostics without formatting provider-controlled error bodies."""
+    summary = type(error).__name__
+    response = getattr(error, "response", None)
+    metadata = response.get("ResponseMetadata") if isinstance(response, dict) else None
+    status = metadata.get("HTTPStatusCode") if isinstance(metadata, dict) else None
+    # Error.Code is arbitrary provider text, not necessarily a safe status code.
+    if type(status) is int and 100 <= status <= 599:
+        summary += f" (HTTP {status})"
+    return summary
+
+
+class RemoteObjectCheckError(RuntimeError):
+    """HEAD could not establish existence; safe to log, never an absence signal."""
+
+
+def _is_object_not_found(error: ClientError) -> bool:
+    """Accept object absence only, not bucket errors or contradictory statuses."""
+    response = getattr(error, "response", None)
+    if not isinstance(response, dict):
+        return False
+    details = response.get("Error", {})
+    metadata = response.get("ResponseMetadata", {})
+    if not isinstance(details, dict) or not isinstance(metadata, dict):
+        return False
+    code = details.get("Code", "")
+    status = metadata.get("HTTPStatusCode")
+    if status is not None and (type(status) is not int or status != 404):
+        return False
+    return code in ("404", "NoSuchKey", "Not Found") or (code in ("", None) and status == 404)
+
+
 class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
     """
     远程云存储后端（S3 兼容协议）
@@ -187,22 +219,25 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
             r2_key: 远程对象键
 
         Returns:
-            是否存在
+            True 表示存在；False 仅表示已确认对象不存在。
+
+        Raises:
+            RemoteObjectCheckError: 权限、网络或服务错误使存在性未知。
+                保留 SDK 自身的重试策略；SDK 报错后终止本次操作，不创建本地库。
+                调用方之后重试时会重新 HEAD，不缓存错误为不存在。
         """
         try:
             self.s3_client.head_object(Bucket=self.bucket_name, Key=r2_key)
             return True
         except ClientError as e:
-            error_code = e.response.get("Error", {}).get("Code", "")
-            # S3 兼容存储可能返回 404, NoSuchKey, 或其他变体
-            if error_code in ("404", "NoSuchKey", "Not Found"):
+            if _is_object_not_found(e):
                 return False
-            # 其他错误（如权限问题）也视为不存在，但打印警告
-            print(f"[远程存储] 检查对象存在性失败 ({r2_key}): {e}")
-            return False
+            print(f"[远程存储] 检查对象存在性失败: {_error_summary(e)}")
+            # mixin/上层可能直接格式化异常；不得传播原始供应商正文或异常链。
+            raise RemoteObjectCheckError(f"无法确认远程对象状态: {_error_summary(e)}") from None
         except Exception as e:
-            print(f"[远程存储] 检查对象存在性异常 ({r2_key}): {e}")
-            return False
+            print(f"[远程存储] 检查对象存在性异常: {_error_summary(e)}")
+            raise RemoteObjectCheckError(f"无法确认远程对象状态: {_error_summary(e)}") from None
 
     def _download_sqlite(self, date: Optional[str] = None, db_type: str = "news") -> Optional[Path]:
         """
@@ -216,7 +251,8 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
             db_type: 数据库类型 ("news" 或 "rss")
 
         Returns:
-            本地文件路径，如果不存在返回 None
+            本地文件路径，仅在确认远程对象不存在时返回 None。
+            HEAD 状态未知或下载失败则抛出异常，禁止继续初始化本地库。
         """
         r2_key = self._get_remote_db_key(date, db_type)
         local_path = self._get_local_db_path(date, db_type)
@@ -226,7 +262,7 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
 
         # 先检查文件是否存在
         if not self._check_object_exists(r2_key):
-            print(f"[远程存储] 文件不存在，将创建新数据库: {r2_key}")
+            print("[远程存储] 文件不存在，将创建新数据库")
             return None
 
         try:
@@ -237,19 +273,17 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
                 for chunk in response['Body'].iter_chunks(chunk_size=1024*1024):
                     f.write(chunk)
             self._downloaded_files.append(local_path)
-            print(f"[远程存储] 已下载: {r2_key} -> {local_path}")
+            print("[远程存储] 已下载数据库")
             return local_path
         except ClientError as e:
-            error_code = e.response.get("Error", {}).get("Code", "")
-            # S3 兼容存储可能返回不同的错误码
-            if error_code in ("404", "NoSuchKey", "Not Found"):
-                print(f"[远程存储] 文件不存在，将创建新数据库: {r2_key}")
+            if _is_object_not_found(e):
+                print("[远程存储] 文件不存在，将创建新数据库")
                 return None
             else:
-                print(f"[远程存储] 下载失败 (错误码: {error_code}): {e}")
+                print(f"[远程存储] 下载失败: {_error_summary(e)}")
                 raise
         except Exception as e:
-            print(f"[远程存储] 下载异常: {e}")
+            print(f"[远程存储] 下载异常: {_error_summary(e)}")
             raise
 
     def begin_batch(self):
@@ -300,13 +334,13 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
         r2_key = self._get_remote_db_key(date, db_type)
 
         if not local_path.exists():
-            print(f"[远程存储] 本地文件不存在，无法上传: {local_path}")
+            print("[远程存储] 本地文件不存在，无法上传")
             return False
 
         try:
             # 获取本地文件大小
             local_size = local_path.stat().st_size
-            print(f"[远程存储] 准备上传: {local_path} ({local_size} bytes) -> {r2_key}")
+            print(f"[远程存储] 准备上传数据库 ({local_size} bytes)")
 
             # 读取文件内容为 bytes 后上传
             # 避免传入文件对象时 requests 库使用 chunked transfer encoding
@@ -322,18 +356,22 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
                 ContentLength=local_size,
                 ContentType='application/x-sqlite3',
             )
-            print(f"[远程存储] 已上传: {local_path} -> {r2_key}")
+            print("[远程存储] 已上传数据库")
 
             # 验证上传成功
             if self._check_object_exists(r2_key):
-                print(f"[远程存储] 上传验证成功: {r2_key}")
+                print("[远程存储] 上传验证成功")
                 return True
             else:
                 print(f"[远程存储] 上传验证失败: 文件未在远程存储中找到")
                 return False
 
+        except RemoteObjectCheckError as e:
+            # PUT 已完成，HEAD 故障只代表结果无法确认；flush 保留脏项以供重试。
+            print(f"[远程存储] 上传结果无法确认: {_error_summary(e)}")
+            return False
         except Exception as e:
-            print(f"[远程存储] 上传失败: {e}")
+            print(f"[远程存储] 上传失败: {_error_summary(e)}")
             return False
 
     def _get_connection(self, date: Optional[str] = None, db_type: str = "news") -> sqlite3.Connection:
@@ -354,7 +392,7 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
             # 确保目录存在
             local_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # 如果本地不存在，尝试从远程存储下载
+            # 下载异常必须在 sqlite3.connect 前传播，不能把状态未知当作空库。
             if not local_path.exists():
                 self._download_sqlite(date, db_type)
 
@@ -569,11 +607,11 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
                     for failed_id in data.failed_ids:
                         f.write(f"{failed_id}\n")
 
-            print(f"[远程存储] TXT 快照已保存: {file_path}")
+            print("[远程存储] TXT 快照已保存")
             return str(file_path)
 
         except Exception as e:
-            print(f"[远程存储] 保存 TXT 快照失败: {e}")
+            print(f"[远程存储] 保存 TXT 快照失败: {_error_summary(e)}")
             return None
 
     def save_html_report(self, html_content: str, filename: str) -> Optional[str]:
@@ -591,11 +629,11 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(html_content)
 
-            print(f"[远程存储] HTML 报告已保存: {file_path}")
+            print("[远程存储] HTML 报告已保存")
             return str(file_path)
 
         except Exception as e:
-            print(f"[远程存储] 保存 HTML 报告失败: {e}")
+            print(f"[远程存储] 保存 HTML 报告失败: {_error_summary(e)}")
             return None
 
     # ========================================
@@ -613,9 +651,9 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
         for db_path, conn in list(db_connections.items()):
             try:
                 conn.close()
-                print(f"[远程存储] 关闭数据库连接: {db_path}")
+                print("[远程存储] 关闭数据库连接")
             except Exception as e:
-                print(f"[远程存储] 关闭连接失败 {db_path}: {e}")
+                print(f"[远程存储] 关闭连接失败: {_error_summary(e)}")
 
         if db_connections:
             db_connections.clear()
@@ -626,11 +664,11 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
             try:
                 if temp_dir.exists():
                     shutil.rmtree(temp_dir)
-                    print(f"[远程存储] 临时目录已清理: {temp_dir}")
+                    print("[远程存储] 临时目录已清理")
             except Exception as e:
                 # 忽略 Python 关闭时的错误
                 if sys.meta_path is not None:
-                    print(f"[远程存储] 清理临时目录失败: {e}")
+                    print(f"[远程存储] 清理临时目录失败: {_error_summary(e)}")
 
         downloaded_files = getattr(self, "_downloaded_files", None)
         if downloaded_files:
@@ -690,14 +728,14 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
                         deleted_count += batch_deleted
                         print(f"[远程存储] 删除 {batch_deleted} 个对象")
                     except Exception as e:
-                        print(f"[远程存储] 批量删除失败: {e}")
+                        print(f"[远程存储] 批量删除失败: {_error_summary(e)}")
 
                 print(f"[远程存储] 共清理 {deleted_count} 个过期数据库文件")
 
             return deleted_count
 
         except Exception as e:
-            print(f"[远程存储] 清理过期数据失败: {e}")
+            print(f"[远程存储] 清理过期数据失败: {_error_summary(e)}")
             return deleted_count
 
     def __del__(self):
@@ -744,27 +782,27 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
             for db_type in ("news", "rss"):
                 local_db_path = local_dir / db_type / f"{date_str}.db"
                 if local_db_path.exists():
-                    print(f"[远程存储] 跳过（本地已存在）: {db_type}/{date_str}.db")
+                    print("[远程存储] 跳过（本地已存在）")
                     continue
 
                 remote_key = self._get_remote_db_key(date_str, db_type)
-                if not self._check_object_exists(remote_key):
-                    print(f"[远程存储] 跳过（远程不存在）: {remote_key}")
-                    continue
-
                 partial_path = local_db_path.with_suffix(".db.part")
                 try:
+                    # 保持逐对象尽力拉取；HEAD 故障记为失败，而不是远程不存在。
+                    if not self._check_object_exists(remote_key):
+                        print("[远程存储] 跳过（远程不存在）")
+                        continue
                     local_db_path.parent.mkdir(parents=True, exist_ok=True)
                     response = self.s3_client.get_object(Bucket=self.bucket_name, Key=remote_key)
                     with open(partial_path, 'wb') as f:
                         for chunk in response['Body'].iter_chunks(chunk_size=1024*1024):
                             f.write(chunk)
                     partial_path.replace(local_db_path)
-                    print(f"[远程存储] 已拉取: {remote_key} -> {local_db_path}")
+                    print("[远程存储] 已拉取数据库")
                     pulled_count += 1
                 except Exception as e:
                     partial_path.unlink(missing_ok=True)
-                    print(f"[远程存储] 拉取失败 ({remote_key}): {e}")
+                    print(f"[远程存储] 拉取失败: {_error_summary(e)}")
 
         print(f"[远程存储] 拉取完成，共下载 {pulled_count} 个数据库文件")
         return pulled_count
@@ -795,5 +833,5 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
             return sorted(dates, reverse=True)
 
         except Exception as e:
-            print(f"[远程存储] 列出远程日期失败: {e}")
+            print(f"[远程存储] 列出远程日期失败: {_error_summary(e)}")
             return []

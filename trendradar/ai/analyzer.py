@@ -547,6 +547,7 @@ class AIAnalyzer:
 
             if result.success:
                 return result
+            self._dump_rejected_output(result, attempt + 1)
             if attempt == 0:
                 first_error = result.error
                 print(f"[AI] 输出校验失败，准备重试一次: {first_error}")
@@ -561,6 +562,31 @@ class AIAnalyzer:
             return result
 
         raise RuntimeError("AI 分析重试流程异常结束")
+
+    def _dump_rejected_output(self, result: AIAnalysisResult, attempt: int) -> None:
+        """质检失败时保存模型原始输出到 output/meta/，供人工复盘。
+
+        存档失败不得影响分析主流程，异常全部吞掉只打日志。
+        """
+        try:
+            response = (result.raw_response or "").strip()
+            if not response:
+                return
+            meta_dir = Path("output") / "meta"
+            meta_dir.mkdir(parents=True, exist_ok=True)
+            stamp = self.get_time_func().strftime("%Y-%m-%d_%H%M%S")
+            path = meta_dir / f"ai_reject_{stamp}_a{attempt}.md"
+            header = (
+                "<!-- AI 输出质检失败存档\n"
+                f"     model: {result.model or 'unknown'}\n"
+                f"     error: {result.error}\n"
+                f"     attempt: {attempt}\n"
+                "-->\n\n"
+            )
+            path.write_text(header + response + "\n", encoding="utf-8")
+            print(f"[AI] 原始输出已存档: {path}")
+        except Exception as exc:
+            print(f"[AI] 质检失败存档异常: {type(exc).__name__}: {exc}")
 
     def _format_time_range(self, first_time: str, last_time: str) -> str:
         """格式化时间范围（简化显示，只保留时分）"""

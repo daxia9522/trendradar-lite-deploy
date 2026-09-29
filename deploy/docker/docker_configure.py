@@ -12,7 +12,6 @@ import os
 import re
 import sys
 import threading
-import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import NamedTuple
@@ -61,6 +60,7 @@ PUBLIC_FIELDS = frozenset({
     "MAX_NEWS_PER_KEYWORD", "LOCAL_RETENTION_DAYS", "REMOTE_RETENTION_DAYS",
     "PULL_ENABLED", "PULL_DAYS", "DOCKER_CONTAINER", "SCHEDULE_ENABLED",
     "SCHEDULER_POLL_SECONDS", "SCHEDULER_MAX_ATTEMPTS", "STORAGE_TXT_ENABLED", "STORAGE_HTML_ENABLED",
+    "R2_BACKUP_ENABLED", "R2_BACKUP_TIME", "R2_BACKUP_LOOKBACK_DAYS",
 })
 FIELD_POLICIES = {key: FieldPolicy(shared.FIELD_MAP[key][1] if key in shared.FIELD_MAP else key,
                                   sensitive=key not in PUBLIC_FIELDS)
@@ -72,9 +72,21 @@ def field_policy(key: str) -> FieldPolicy:
     return FIELD_POLICIES.get(key, FieldPolicy(key))
 
 
+CREDENTIAL_URL_FIELDS = frozenset(shared.CREDENTIAL_URL_FIELDS) | {"S3_ENDPOINT_URL"}
+
+
+def credential_url(key: str, value: str) -> bool:
+    # S3 fragments are forbidden when enabled, but an old disabled draft may
+    # contain them. Hide them too, before validation and during error rendering.
+    return key in CREDENTIAL_URL_FIELDS and (
+        shared.carries_credentials(value) or (key == "S3_ENDPOINT_URL" and "#" in value))
+
+
 def display_value(key: str, value: str) -> str:
     if field_policy(key).sensitive:
         return "<已设置，隐藏>" if value else "<未设置>"
+    if credential_url(key, value):
+        return "<已设置，含敏感 URL，隐藏>"
     return shared.display_value(key, value)
 
 
@@ -96,6 +108,21 @@ def print_changes(before: dict[str, str], after: dict[str, str]) -> None:
 
 
 def edit_field(key: str, values: dict[str, str]) -> None:
+    if key == "S3_ENDPOINT_URL" and credential_url(key, values.get(key, "")):
+        # The shared prompt hides userinfo/query; this also hides legacy S3
+        # fragments and avoids passing an unredacted value into a prompt.
+        while True:
+            entered = input(f"{field_policy(key).label} [{display_value(key, values[key])}]"
+                            "（回车保留，:cancel 取消，:clear 清空）: ").strip()
+            if entered in ("", ":cancel"):
+                return
+            value = "" if entered == ":clear" else entered
+            errors = shared.validate_field(key, value)
+            if errors:
+                print("\n".join(errors), flush=True)
+                continue
+            values[key] = value
+            return
     if not field_policy(key).sensitive:
         shared.edit_native_field(key, values)
         return
@@ -242,7 +269,7 @@ def configure_terminal(application: DockerApplication) -> bool:
     print("TrendRadar Lite Docker 分组配置（仅保存时写磁盘；不会测试邮件、AI 或采集）", flush=True)
     print(f"配置文件：{application.output}", flush=True)
     while True:
-        print("\n1 邮件推送\n2 AI 模型与接口\n3 采集与推送时间\n4 高级配置\n5 查看待保存变更\ns 保存配置\nq 放弃修改并退出", flush=True)
+        print("\n1 邮件推送\n2 AI 模型与接口\n3 采集与推送时间\n4 高级配置\n5 查看待保存变更\n6 R2/S3晚间备份\ns 保存配置\nq 放弃修改并退出", flush=True)
         choice = input("选择: ").strip().lower()
         if choice in SECTIONS:
             title, keys = SECTIONS[choice]
@@ -289,8 +316,14 @@ def render(values, errors=None, saved=False, *, before=None, secret_edits=None) 
     secret_edits = secret_edits or {}
     # Never pass a sensitive value into the shared HTML template, including
     # fields that a future shared release adds without classifying as secret.
-    public = {key: value if not field_policy(key).sensitive else "" for key, value in values.items()}
+    public = {key: value if not field_policy(key).sensitive and not credential_url(key, value) else ""
+              for key, value in values.items()}
     page = shared.render(public, errors, saved, "docker")
+    for key, value in values.items():
+        if credential_url(key, value):
+            field = (f'<input name="{html.escape(key, quote=True)}" type="text" value="" '
+                     'placeholder="已设置，含凭据，不回显；留空保持不变，输入 :clear 清空">')
+            page = re.sub(r'<input name="' + re.escape(key) + r'"[^>]*>', lambda _match: field, page)
     # Reuse the shared web template, replacing just its two legacy weekly inputs.
     weekly = html.escape(shared._native_value("WEEKLY_TIME", values), quote=True)
     page = re.sub(r'<label><span>周报小时</span>.*?</label>',
@@ -332,13 +365,14 @@ def serve(application: DockerApplication, args) -> bool:
     secret_edits = {}
     done = threading.Event()
     saved = False
+    guard = shared.RequestGuard(args.host)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args):
             return
 
         def send_page(self, body, status=200):
-            encoded = body.encode("utf-8")
+            encoded = guard.stamp(body).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(encoded)))
@@ -346,17 +380,24 @@ def serve(application: DockerApplication, args) -> bool:
             self.wfile.write(encoded)
 
         def do_GET(self):
+            if not guard.trusted(self.headers):
+                self.send_page(shared.REJECTED_PAGE, 403)
+                return
             self.send_page(render(current, before=before, secret_edits=secret_edits))
 
         def do_POST(self):
             nonlocal saved, current
+            if not guard.trusted(self.headers):
+                self.send_page(shared.REJECTED_PAGE, 403)
+                return
             try:
-                length = int(self.headers.get("Content-Length", "0"))
-                if not 0 <= length <= 65536:
-                    raise ValueError
-                form = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8"), keep_blank_values=True)
+                form = shared.read_form(self.headers, self.rfile)
             except (ValueError, UnicodeError):
                 self.send_page(render(current, ["请求格式无效"], before=before, secret_edits=secret_edits), 400)
+                return
+            # Cancel ends setup too: a foreign page must not be able to trigger it.
+            if not guard.token_matches(form):
+                self.send_page(shared.REJECTED_PAGE, 403)
                 return
             action = form.get("_action", ["save"])[0]
             if action == "cancel":
@@ -371,13 +412,13 @@ def serve(application: DockerApplication, args) -> bool:
                     submitted[key] = form[key][0].strip()
             # Credential-bearing URLs render redacted: blank submits keep the
             # server-side draft, the explicit sentinel clears it.
-            for key in shared.CREDENTIAL_URL_FIELDS:
+            for key in CREDENTIAL_URL_FIELDS:
                 if key not in form:
                     continue
                 entered = form[key][0].strip()
                 if entered == shared.CLEAR_SENTINEL:
                     submitted[key] = ""
-                elif not entered and shared.carries_credentials(current.get(key, "")):
+                elif not entered and credential_url(key, current.get(key, "")):
                     submitted[key] = current[key]
             secret_keys = {key for key in set(current) | {key for key, *_ in shared._fields_for("docker")}
                            if application_key(key) and field_policy(key).sensitive}

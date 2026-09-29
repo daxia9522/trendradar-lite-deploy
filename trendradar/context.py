@@ -287,8 +287,11 @@ class AppContext:
         # Header「分析模型」展示本次实际调用成功的模型，而非仅配置主模型
         analysis_model = ""
         if ai_analysis is not None:
-            analysis_model = str(getattr(ai_analysis, "model", "") or "").strip()
-            analysis_model = analysis_model[:1].upper() + analysis_model[1:]
+            if getattr(ai_analysis, "success", False):
+                analysis_model = str(getattr(ai_analysis, "model", "") or "").strip()
+                analysis_model = analysis_model[:1].upper() + analysis_model[1:]
+            else:
+                analysis_model = "分析失败"
         return render_email_html_content(
             report_data=report_data,
             mode=mode,

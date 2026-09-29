@@ -19,9 +19,10 @@ done
 cd "$APP_DIR"
 check_docker
 set_identity
+unset TRENDRADAR_BUILD_IMAGE
 check_launcher
 if [[ $ACTION == build ]]; then
-  docker compose build trendradar
+  build_selected_image
 else
   docker compose pull trendradar
 fi

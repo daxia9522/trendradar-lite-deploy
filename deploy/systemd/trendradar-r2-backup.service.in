@@ -1,0 +1,12 @@
+[Unit]
+Description=TrendRadar optional local SQLite R2/S3 backup
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=@APP_DIR@
+EnvironmentFile=@ENV_FILE@
+ExecStart=@PYTHON@ deploy/r2_backup.py --configured
+TimeoutStartSec=10min
+Nice=10

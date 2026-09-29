@@ -1,9 +1,14 @@
 services:
   setup:
     profiles: ["setup"]
-    image: ${TREND_RADAR_IMAGE:-ghcr.io/daxia9522/trendradar-lite-deploy:latest}
+    # v26.9 OCI index (linux/amd64 + linux/arm64), verified against GHCR.
+    image: ${TREND_RADAR_IMAGE:-ghcr.io/daxia9522/trendradar-lite-deploy:v26.9@sha256:b07e2424a0d5451d50c3f8e205636edb2ce63ec0061dc97c9ac5636bba038760}
     pull_policy: missing
     user: "0:0"
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    # Atomic saves/backups keep host UID/GID and private 700/600 permissions.
+    cap_add: ["CHOWN", "DAC_OVERRIDE", "FOWNER"]
     entrypoint:
       - python
       - deploy/configure.py
@@ -30,9 +35,13 @@ services:
 
   volume-init:
     profiles: ["setup"]
-    image: ${TREND_RADAR_IMAGE:-ghcr.io/daxia9522/trendradar-lite-deploy:latest}
+    image: ${TREND_RADAR_IMAGE:-ghcr.io/daxia9522/trendradar-lite-deploy:v26.9@sha256:b07e2424a0d5451d50c3f8e205636edb2ce63ec0061dc97c9ac5636bba038760}
     pull_policy: missing
     user: "0:0"
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    # Traverse private pre-existing output directories, then change ownership.
+    cap_add: ["CHOWN", "DAC_READ_SEARCH"]
     network_mode: none
     entrypoint: ["python", "deploy/docker/manage.py", "init-volume"]
     volumes:
@@ -42,10 +51,12 @@ services:
   trendradar:
     build:
       context: .
-    image: ${TREND_RADAR_IMAGE:-ghcr.io/daxia9522/trendradar-lite-deploy:latest}
+    image: ${TREND_RADAR_IMAGE:-ghcr.io/daxia9522/trendradar-lite-deploy:v26.9@sha256:b07e2424a0d5451d50c3f8e205636edb2ce63ec0061dc97c9ac5636bba038760}
     pull_policy: missing
     restart: unless-stopped
     user: "${TRENDRADAR_UID:-1000}:${TRENDRADAR_GID:-1000}"
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
     environment:
       DOCKER_CONTAINER: "true"
       STORAGE_BACKEND: "local"

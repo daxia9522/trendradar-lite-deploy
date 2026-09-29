@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import random
 import time
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -12,6 +13,19 @@ from litellm import completion
 # 客户端默认值（config.yaml 只保留 timeout；重试次数不进配置）
 DEFAULT_TIMEOUT = 240
 DEFAULT_NUM_RETRIES = 2
+
+# 拥塞类错误（5xx/429）是快速拒绝，用指数退避等待恢复窗口；
+# 退避档数同时决定此类错误的额外重试机会（首尝试 + 档数）。
+# 408 超时是确定性慢（历史 6 次同模型超时重试 0 成功），
+# 单模型超时最多试 TIMEOUT_RETRY_LIMIT 次，失败立即切备用，不烧退避。
+RETRY_BACKOFF_SECONDS = (5, 15, 45)
+RETRY_BACKOFF_STATUSES = {429, 500, 502, 503, 504}
+TIMEOUT_RETRY_LIMIT = 2
+
+
+def _is_timeout_error(exc: Exception) -> bool:
+    status = getattr(exc, "status_code", None)
+    return status == 408 or type(exc).__name__ == "Timeout"
 
 
 def _normalize_model(model: Any) -> str:
@@ -109,13 +123,15 @@ class AIClient:
         self.last_model = None
         self.last_finish_reason = None
         for index, model in enumerate(models):
-            attempts = max(1, num_retries + 1)
-            for attempt in range(attempts):
-                attempt_number = attempt + 1
+            base_attempts = max(1, num_retries + 1)
+            slow_delays_left = list(RETRY_BACKOFF_SECONDS)
+            attempt = 0
+            while True:
+                attempt += 1
                 timeout = params["timeout"]
                 print(
                     f"[AI] 请求开始: model={model}, "
-                    f"attempt={attempt_number}/{attempts}, timeout={timeout}s"
+                    f"attempt={attempt}, timeout={timeout}s"
                 )
                 try:
                     response = completion(model=model, **params)
@@ -128,8 +144,19 @@ class AIClient:
                     status = getattr(exc, "status_code", None)
                     detail = type(exc).__name__ + (f"({status})" if status else "")
                     print(f"[AI] attempt 失败: {detail}")
-                    if attempt + 1 < attempts:
-                        time.sleep(min(2**attempt, 8))
+                    if status in RETRY_BACKOFF_STATUSES and slow_delays_left:
+                        delay = slow_delays_left.pop(0)
+                    elif _is_timeout_error(exc):
+                        # 超时单模型最多 TIMEOUT_RETRY_LIMIT 次，不给慢模型第三次机会
+                        if attempt >= TIMEOUT_RETRY_LIMIT:
+                            break
+                        delay = 1
+                    elif attempt < base_attempts:
+                        delay = min(2 ** (attempt - 1), 8)
+                    else:
+                        break
+                    # 0~1s 抖动，避免多个定时任务同拍重试
+                    time.sleep(delay + random.uniform(0, 1))
             if index + 1 < len(models):
                 print(f"[AI] 模型 {model} 调用失败，尝试备用模型")
 

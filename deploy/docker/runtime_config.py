@@ -28,6 +28,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 # Use exactly the literal parser behind read_env / EnvDocument, on bytes from
 # our single securely opened descriptor (their path I/O would reopen the file).
 from deploy.envfile import ConfigError, _records
+from deploy.backup_settings import BackupConfigError, DEFAULT_BACKUP_TIME, load_backup_settings
 
 RUNTIME_ENV_KEY = "TRENDRADAR_RUNTIME_ENV"
 DOCKER_MARKER = b"# TrendRadar env format: docker\n"
@@ -48,6 +49,7 @@ APP_KEYS = frozenset({
     "REMOTE_RETENTION_DAYS", "PULL_ENABLED", "PULL_DAYS", "CRAWLER_MINUTE",
     "MORNING_PUSH_TIME", "NOON_PUSH_TIME", "EVENING_PUSH_TIME", "DAILY_SUMMARY_TIME",
     "WEEKLY_WEEKDAY", "WEEKLY_HOUR", "WEEKLY_MINUTE", "DOCKER_CONTAINER",
+    "R2_BACKUP_ENABLED", "R2_BACKUP_TIME", "R2_BACKUP_LOOKBACK_DAYS",
 })
 TIME_KEYS = ("MORNING_PUSH_TIME", "NOON_PUSH_TIME", "EVENING_PUSH_TIME", "DAILY_SUMMARY_TIME")
 DEFAULT_TIMES = ("07:00", "12:00", "18:00", "22:00")
@@ -64,6 +66,7 @@ ERRORS = {
     "unsupported": "runtime configuration contains an unsupported environment key",
     "locked": "runtime configuration cannot change Docker/local storage identity",
     "schedule": "runtime configuration contains invalid schedule settings",
+    "backup": "runtime configuration contains invalid backup settings",
     "value": "runtime configuration contains an invalid application setting",
 }
 
@@ -192,12 +195,15 @@ class ScheduleSettings:
     weekly_minute: int
     poll_seconds: int
     max_attempts: int
+    backup_enabled: bool = False
+    backup_time: str = DEFAULT_BACKUP_TIME
 
     @property
     def timing_signature(self) -> tuple:
         # Poll/retry tuning and secrets are not schedule changes.
         return (self.timezone.key, self.crawler_minute, self.push_times,
-                self.weekly_weekday, self.weekly_hour, self.weekly_minute)
+                self.weekly_weekday, self.weekly_hour, self.weekly_minute,
+                self.backup_enabled, self.backup_time)
 
 
 def schedule_settings(values: Mapping[str, str]) -> ScheduleSettings:
@@ -211,6 +217,10 @@ def schedule_settings(values: Mapping[str, str]) -> ScheduleSettings:
     times = [values.get(key) or default for key, default in zip(TIME_KEYS, DEFAULT_TIMES)]
     if any(not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value) for value in times):
         raise RuntimeConfigError("schedule")
+    try:
+        backup = load_backup_settings(values)
+    except BackupConfigError:
+        raise RuntimeConfigError("backup") from None
     return ScheduleSettings(
         timezone, _integer(values, "CRAWLER_MINUTE", 0, 0, 59), frozenset(times),
         _integer(values, "WEEKLY_WEEKDAY", 6, 0, 6),
@@ -218,6 +228,7 @@ def schedule_settings(values: Mapping[str, str]) -> ScheduleSettings:
         _integer(values, "WEEKLY_MINUTE", 30, 0, 59),
         max(10, _integer(values, "SCHEDULER_POLL_SECONDS", 20, 1, 86400)),
         _integer(values, "SCHEDULER_MAX_ATTEMPTS", 3, 1, 100),
+        backup.enabled, backup.time,
     )
 
 
@@ -268,6 +279,8 @@ def load_runtime_config(base_env: Mapping[str, str] | None = None) -> RuntimeSna
         environment[RUNTIME_ENV_KEY] = base[RUNTIME_ENV_KEY]
     else:
         environment = base
-    environment.update(DOCKER_CONTAINER="true", STORAGE_BACKEND="local")
+    # Validate before injecting the locked Docker identity: opting in to backup
+    # must explicitly declare local storage even in historical env-only mode.
     settings = schedule_settings(environment)
+    environment.update(DOCKER_CONTAINER="true", STORAGE_BACKEND="local")
     return RuntimeSnapshot(MappingProxyType(environment), settings, external)

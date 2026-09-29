@@ -1,0 +1,11 @@
+[Unit]
+Description=TrendRadar optional evening R2/S3 backup
+
+[Timer]
+OnCalendar=@CALENDAR@
+Unit=trendradar-r2-backup.service
+Persistent=false
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

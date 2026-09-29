@@ -46,7 +46,7 @@ STOP = False
 # are stored. Old top-level task markers remain for state/API compatibility.
 MAX_COMPLETED_WINDOWS = 4096
 MAX_STATE_BYTES = 4 * 1024 * 1024
-TASKS = ("crawler", "weekly")
+TASKS = ("crawler", "weekly", "backup")
 
 
 class SchedulerStateError(ValueError):
@@ -192,6 +192,7 @@ class Scheduler:
         self.attempts: dict[str, tuple[str, int]] = {}
         self.signature: tuple | None = None
         self.blocked_minute: str | None = None
+        self.backup_blocked_minute: str | None = None
         self.latest_minute: str | None = None
         self.latest_instant: datetime | None = None
         self.error_code: str | None = None
@@ -214,6 +215,11 @@ class Scheduler:
         actual_now = local_now.astimezone(timezone.utc)
         actual_marker = actual_now.strftime("%Y-%m-%dT%H:%MZ")
         changed = self.signature != settings.timing_signature
+        if changed or self.invalid:
+            # New backup opt-in never backfills its first observed minute,
+            # including legacy env-only mode. Existing business tasks retain
+            # their historical immediate-start behavior in that mode.
+            self.backup_blocked_minute = actual_marker
         if snapshot.external and (changed or self.invalid):
             # Suppress the whole current minute, not only this poll/dispatch.
             self.blocked_minute = actual_marker
@@ -274,10 +280,14 @@ class Scheduler:
             "weekly": (selected_local.weekday() == selected_settings.weekly_weekday
                        and selected_local.hour == selected_settings.weekly_hour
                        and selected_local.minute == selected_settings.weekly_minute),
+            "backup": (selected_settings.backup_enabled
+                       and selected_local.strftime("%H:%M") == selected_settings.backup_time
+                       and selected_actual != self.backup_blocked_minute),
         }
         commands = {
             "crawler": [sys.executable, "-m", "trendradar"],
             "weekly": [sys.executable, "weekly_report/weekly_ai_report_email.py"],
+            "backup": [sys.executable, "deploy/r2_backup.py", "--configured"],
         }
         for name in TASKS:
             if not due[name]:

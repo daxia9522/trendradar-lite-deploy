@@ -2,6 +2,7 @@
 import contextlib
 import importlib.util
 import io
+import re
 import tempfile
 import unittest
 import urllib.parse
@@ -15,23 +16,26 @@ SPEC.loader.exec_module(configure)
 from envfile import read_env, write_env
 from native_config import NativeApplication
 
+CSRF = re.compile(r'name="_csrf" value="([^"]+)"')
+BROWSER = {"Host": "127.0.0.1:8765", "Origin": "http://127.0.0.1:8765"}
+VALUES = {"EMAIL_FROM": "sender@example.com", "EMAIL_TO": "reader@example.com",
+          "EMAIL_PASSWORD": "secret", "TZ": "UTC"}
+
 
 class WebRegressionTests(unittest.TestCase):
     def run_server(self, path, requests, deployment="docker", application=None):
+        """Each request is (method, fields[, headers]); a None header value omits it."""
         responses = []
         requests = iter(requests)
         class Server:
             server_port = 12345
             def __init__(self, _address, handler):
                 self.handler = handler
-            def handle_request(self):
-                try:
-                    method, fields = next(requests)
-                except StopIteration:
-                    raise EOFError("test requests exhausted")
+            def call(self, method, fields, headers=None):
                 handler = self.handler.__new__(self.handler)
                 body = urllib.parse.urlencode(fields).encode()
-                handler.headers = {"Content-Length": str(len(body))}
+                merged = {**BROWSER, "Content-Length": str(len(body)), **(headers or {})}
+                handler.headers = {key: value for key, value in merged.items() if value is not None}
                 handler.rfile = io.BytesIO(body)
                 handler.wfile = io.BytesIO()
                 status = []
@@ -39,7 +43,17 @@ class WebRegressionTests(unittest.TestCase):
                 handler.send_header = lambda *_: None
                 handler.end_headers = lambda: None
                 getattr(handler, f"do_{method}")()
-                responses.append((status[0], handler.wfile.getvalue().decode()))
+                return status[0], handler.wfile.getvalue().decode()
+            def handle_request(self):
+                try:
+                    method, fields, *headers = next(requests)
+                except StopIteration:
+                    raise EOFError("test requests exhausted")
+                if method == "POST" and "_csrf" not in fields:
+                    # Submit like a browser: from the page on screen, else a fresh GET.
+                    page = responses[-1][1] if responses and CSRF.search(responses[-1][1]) else self.call("GET", {})[1]
+                    fields = dict(fields, _csrf=CSRF.search(page)[1])
+                responses.append(self.call(method, fields, *headers))
             def server_close(self):
                 pass
         with mock.patch.object(configure, "HTTPServer", Server), contextlib.redirect_stdout(io.StringIO()):
@@ -118,6 +132,61 @@ class WebRegressionTests(unittest.TestCase):
             self.assertEqual(responses[0][0], 200)
             self.assertNotIn("user:***", responses[0][1])
             self.assertEqual(read_env(path, "docker")["AI_API_BASE"], "")
+
+    def test_cross_site_and_rebinding_requests_are_rejected_without_page_or_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".env"
+            write_env(path, VALUES, "docker")
+            attack = dict(VALUES, EMAIL_PASSWORD="", EMAIL_SMTP_SERVER="smtp.attacker.example", EMAIL_SMTP_PORT="465")
+            rebind = {"Host": "rebind.attacker.example:8765", "Origin": "http://rebind.attacker.example:8765"}
+            responses = self.run_server(path, [
+                ("GET", {}, dict(rebind, Origin=None)),
+                ("POST", attack, rebind),
+                ("POST", attack, {"Origin": "https://attacker.example"}),
+                ("POST", attack, {"Origin": "null"}),
+                ("POST", dict(attack, _csrf=""), {"Origin": None}),
+                ("POST", dict(attack, _csrf="guessed"), {"Origin": None}),
+                ("POST", VALUES),
+            ])
+            self.assertEqual([status for status, _ in responses], [403, 403, 403, 403, 403, 403, 200])
+            for _status, page in responses[:-1]:
+                self.assertNotIn("reader@example.com", page)
+                self.assertNotIn("_csrf", page)
+            self.assertNotIn("attacker", path.read_text())
+
+    def test_linux_oversized_or_malformed_form_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "env"
+            write_env(path, VALUES)
+            app = NativeApplication(path, unit_dir=Path(tmp) / "units",
+                                    runner=mock.Mock(side_effect=AssertionError("systemctl forbidden")))
+            changed = dict(VALUES, EMAIL_TO="changed@example.com")
+            responses = self.run_server(path, [
+                ("POST", changed, {"Content-Length": str(configure.MAX_FORM_BYTES + 1)}),
+                ("POST", changed, {"Content-Length": "-1"}),
+                ("POST", changed, {"Content-Length": "not-a-number"}),
+                ("POST", VALUES),
+            ], "linux", app)
+            self.assertEqual([status for status, _ in responses], [400, 400, 400, 200])
+            self.assertIn("请求格式无效", responses[0][1])
+            self.assertEqual(read_env(path)["EMAIL_TO"], "reader@example.com")
+
+    def test_request_guard_host_origin_and_token_rules(self):
+        guard = configure.RequestGuard("0.0.0.0")
+        for host in ("127.0.0.1:8765", "localhost:9000", "[::1]:8765", "LOCALHOST"):
+            self.assertTrue(guard.trusted({"Host": host}), host)
+        for host in (None, "", "attacker.example:8765", "127.0.0.1.attacker.example", "192.0.2.7:8765", "[::1"):
+            self.assertFalse(guard.trusted({"Host": host}), host)
+        self.assertTrue(guard.trusted({"Host": "127.0.0.1:8765", "Origin": "http://127.0.0.1:8765"}))
+        for origin in ("null", "https://attacker.example", "http://127.0.0.1:9999", "http://localhost:8765"):
+            self.assertFalse(guard.trusted({"Host": "127.0.0.1:8765", "Origin": origin}), origin)
+        # An explicit, non-wildcard bind address is what the operator opens.
+        self.assertTrue(configure.RequestGuard("192.0.2.7").trusted({"Host": "192.0.2.7:8765"}))
+        self.assertTrue(guard.token_matches({"_csrf": [guard.token]}))
+        for form in ({}, {"_csrf": [""]}, {"_csrf": ["令牌"]}, {"_csrf": [configure.RequestGuard("").token]}):
+            self.assertFalse(guard.token_matches(form), form)
+        page = guard.stamp(configure.render(VALUES))
+        self.assertEqual(CSRF.findall(page), [guard.token])
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ PYTHON_BIN=${PYTHON_BIN:-python3}
 ENABLE_TIMERS=true
 FORCE_CONFIGURE=false
 MODE_ARGS=()
+BACKUP_ARGS=()
 
 for arg in "$@"; do
   case "$arg" in
@@ -48,10 +49,14 @@ if [[ ! -x $APP_DIR/.venv/bin/python ]]; then
     exit 1
   fi
 fi
-"$APP_DIR/.venv/bin/python" -m pip install --upgrade pip
-"$APP_DIR/.venv/bin/python" -m pip install -r "$APP_DIR/requirements.txt"
+# Wheel-only hash checking also prevents unpinned PEP 517 build dependencies.
+# Keep the venv's bundled pip; upgrading the installer is an explicit maintenance task.
+"$APP_DIR/.venv/bin/python" -m pip install --require-hashes --only-binary=:all: -r "$APP_DIR/requirements.lock"
 
-"$PYTHON_BIN" "$APP_DIR/deploy/native_install.py" install-units --output "$ENV_FILE" --unit-dir "$UNIT_DIR"
+if [[ $ENABLE_TIMERS == true ]]; then
+  BACKUP_ARGS=(--enable-backup)
+fi
+"$PYTHON_BIN" "$APP_DIR/deploy/native_install.py" install-units --output "$ENV_FILE" --unit-dir "$UNIT_DIR" "${BACKUP_ARGS[@]}"
 "$PYTHON_BIN" "$APP_DIR/deploy/native_install.py" install-launcher --output "$ENV_FILE" --unit-dir "$UNIT_DIR"
 if [[ $NEW_INSTALL == true && $ENABLE_TIMERS == true ]]; then
   # Only a first installation explicitly enables timers. Maintenance preserves state.

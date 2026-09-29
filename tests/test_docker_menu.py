@@ -3,6 +3,7 @@ import contextlib
 import importlib.util
 import io
 import os
+import re
 import tempfile
 import unittest
 import urllib.parse
@@ -19,6 +20,9 @@ from envfile import ConfigError, EnvDocument, read_env, write_env
 VALID = {"EMAIL_FROM": "sender@example.com", "EMAIL_TO": "reader@example.com",
          "EMAIL_PASSWORD": "smtp $literal '$$' secret", "AI_API_KEY": "api-secret",
          "TZ": "UTC", "AI_ANALYSIS_ENABLED": "false", "WEEKLY_HOUR": "12", "WEEKLY_MINUTE": "30"}
+CSRF = re.compile(r'name="_csrf" value="([^"]+)"')
+# Compose publishes the container's 0.0.0.0:8765 on the host loopback only.
+BROWSER = {"Host": "127.0.0.1:8765", "Origin": "http://127.0.0.1:8765"}
 
 
 class DockerMenuTests(unittest.TestCase):
@@ -37,6 +41,137 @@ class DockerMenuTests(unittest.TestCase):
         with mock.patch("builtins.input", side_effect=answers), mock.patch.object(setup.shared.getpass, "getpass", side_effect=secrets), contextlib.redirect_stdout(transcript):
             result = setup.configure_terminal(app)
         return result, transcript.getvalue()
+
+    def backup_values(self, **updates):
+        return dict(VALID, STORAGE_BACKEND="local", R2_BACKUP_ENABLED="true", R2_BACKUP_TIME="23:40",
+                    R2_BACKUP_LOOKBACK_DAYS="2", S3_BUCKET_NAME="synthetic-bucket",
+                    S3_ENDPOINT_URL="https://s3.example.invalid", S3_REGION="auto",
+                    **{"S3_ACCESS_KEY_ID": "synthetic-s3-id", "S3_SECRET_ACCESS_KEY": "synthetic-s3-secret", **updates})
+
+    def test_backup_section_uses_shared_indexes_and_explicit_public_policy(self):
+        self.assertEqual(setup.SECTIONS["6"], setup.shared.MENU_SECTIONS["6"])
+        self.assertEqual(set(setup.SECTIONS["6"][1]), {"R2_BACKUP_ENABLED", "R2_BACKUP_TIME", "R2_BACKUP_LOOKBACK_DAYS",
+                                                    "S3_BUCKET_NAME", "S3_ENDPOINT_URL", "S3_ACCESS_KEY_ID",
+                                                    "S3_SECRET_ACCESS_KEY", "S3_REGION", "STORAGE_BACKEND"})
+        self.assertNotIn("5", setup.SECTIONS)
+        for key in ("R2_BACKUP_ENABLED", "R2_BACKUP_TIME", "R2_BACKUP_LOOKBACK_DAYS", "S3_BUCKET_NAME", "S3_ENDPOINT_URL", "S3_REGION"):
+            self.assertFalse(setup.field_policy(key).sensitive)
+        for key in ("S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"):
+            self.assertTrue(setup.field_policy(key).sensitive)
+
+    def test_backup_terminal_save_with_secrets_blank_retained_and_cancelled_edits(self):
+        values = self.backup_values()
+        app = self.application(values)
+        keys = setup.SECTIONS["6"][1]
+        time_index, access_index, secret_index = [str(keys.index(key) + 1) for key in
+                                               ("R2_BACKUP_TIME", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY")]
+        saved, text = self.menu(app, ["6", time_index, "23:41", access_index, secret_index, "0", "5", "s", "y"], ["", ""])
+        self.assertTrue(saved)
+        loaded = read_env(self.path)
+        self.assertEqual(loaded["R2_BACKUP_TIME"], "23:41")
+        self.assertEqual(loaded["S3_ACCESS_KEY_ID"], values["S3_ACCESS_KEY_ID"])
+        self.assertEqual(loaded["S3_SECRET_ACCESS_KEY"], values["S3_SECRET_ACCESS_KEY"])
+        for key in ("S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"):
+            self.assertNotIn(values[key], text)
+        before = self.path.read_bytes()
+        cancelled, _ = self.menu(setup.DockerApplication(self.path), ["6", time_index, "23:42", "0", "q", "y"])
+        self.assertFalse(cancelled)
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_backup_secret_clear_while_enabled_cannot_save_terminal(self):
+        values = self.backup_values()
+        app = self.application(values)
+        before = self.path.read_bytes()
+        secret_index = str(setup.SECTIONS["6"][1].index("S3_SECRET_ACCESS_KEY") + 1)
+        saved, text = self.menu(app, ["6", secret_index, "0", "s", "q", "y"], [":clear"])
+        self.assertFalse(saved)
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertFalse((self.path.parent / ".env.backups").exists())
+        self.assertIn("backup", text.lower())
+        self.assertNotIn(values["S3_SECRET_ACCESS_KEY"], text)
+
+    def test_backup_disabled_without_s3_credentials_saves_in_terminal(self):
+        app = self.application(dict(VALID, R2_BACKUP_ENABLED="false"))
+        saved, _ = self.menu(app, ["6", "0", "s", "y"])
+        self.assertTrue(saved)
+        self.assertEqual(read_env(self.path)["R2_BACKUP_ENABLED"], "false")
+        self.assertNotIn("S3_SECRET_ACCESS_KEY", read_env(self.path))
+
+    def test_backup_web_redacts_both_keys_and_saves_public_fields(self):
+        values = self.backup_values()
+        app = self.application(values)
+        form = dict(R2_BACKUP_ENABLED="true", R2_BACKUP_TIME="23:42", R2_BACKUP_LOOKBACK_DAYS="3",
+                    S3_ACCESS_KEY_ID="", S3_SECRET_ACCESS_KEY="", WEEKLY_TIME="12:30")
+        saved, responses = self.web(app, [("GET", {}), ("POST", dict(form, _action="preview")), ("POST", form)])
+        self.assertTrue(saved)
+        for status, page in responses:
+            self.assertEqual(status, 200)
+            self.assertIn('name="R2_BACKUP_TIME"', page)
+            self.assertIn("synthetic-bucket", page)
+            self.assertIn("https://s3.example.invalid", page)
+            self.assertNotIn(values["S3_ACCESS_KEY_ID"], page)
+            self.assertNotIn(values["S3_SECRET_ACCESS_KEY"], page)
+        loaded = read_env(self.path)
+        self.assertEqual(loaded["S3_ACCESS_KEY_ID"], values["S3_ACCESS_KEY_ID"])
+        self.assertEqual(loaded["S3_SECRET_ACCESS_KEY"], values["S3_SECRET_ACCESS_KEY"])
+        self.assertEqual(loaded["R2_BACKUP_TIME"], "23:42")
+        self.assertEqual(loaded["R2_BACKUP_LOOKBACK_DAYS"], "3")
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+
+    def test_backup_web_clear_failure_retains_draft_and_cancel_preserves_disk(self):
+        values = self.backup_values()
+        app = self.application(values)
+        before = self.path.read_bytes()
+        saved, responses = self.web(app, [("POST", {"_clear_S3_ACCESS_KEY_ID": "yes", "WEEKLY_TIME": "12:30"}),
+                                         ("GET", {}), ("POST", {"WEEKLY_TIME": "12:30"}),
+                                         ("POST", {"_action": "cancel"})])
+        self.assertFalse(saved)
+        self.assertEqual([code for code, _ in responses], [400, 200, 400, 200])
+        self.assertIn("待清空", responses[1][1])
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertFalse((self.path.parent / ".env.backups").exists())
+        for _, page in responses:
+            self.assertNotIn(values["S3_ACCESS_KEY_ID"], page)
+            self.assertNotIn(values["S3_SECRET_ACCESS_KEY"], page)
+
+    def test_backup_credential_endpoint_hidden_during_error_preview_and_terminal(self):
+        urls = ("https://user:SENSITIVE@s3.example.invalid", "https://s3.example.invalid?token=SENSITIVE",
+                "https://s3.example.invalid#SENSITIVE", "https://user:SENSITIVE@[broken")
+        for endpoint in urls:
+            with self.subTest(endpoint=endpoint):
+                values = dict(self.backup_values(), R2_BACKUP_ENABLED="false", S3_ENDPOINT_URL=endpoint)
+                app = self.application(values)
+                rendered = setup.render(values, before={}, errors=["fixed validation error"])
+                self.assertNotIn("SENSITIVE", rendered)
+                self.assertNotIn("SENSITIVE", "\n".join(setup.change_lines({}, values)))
+                endpoint_index = str(setup.SECTIONS["6"][1].index("S3_ENDPOINT_URL") + 1)
+                saved, text = self.menu(app, ["6", endpoint_index, "", "0", "5", "q"])
+                self.assertFalse(saved)
+                self.assertNotIn("SENSITIVE", text)
+                form = {"S3_ENDPOINT_URL": "", "WEEKLY_TIME": "12:30"}
+                malformed = "[broken" in endpoint
+                finish = {"_action": "cancel"} if malformed else form
+                saved, responses = self.web(app, [("POST", dict(form, _action="preview")), ("POST", finish)])
+                self.assertEqual(saved, not malformed)
+                self.assertEqual(responses[0][0], 400 if malformed else 200)
+                self.assertEqual(read_env(self.path)["S3_ENDPOINT_URL"], endpoint)
+                for _, page in responses:
+                    self.assertNotIn("SENSITIVE", page)
+
+    def test_backup_credential_endpoint_explicit_clear_and_invalid_enable(self):
+        values = dict(self.backup_values(), R2_BACKUP_ENABLED="false", S3_ENDPOINT_URL="https://s3.example.invalid?token=SENSITIVE")
+        app = self.application(values)
+        before = self.path.read_bytes()
+        saved, responses = self.web(app, [("POST", {"R2_BACKUP_ENABLED": "true", "WEEKLY_TIME": "12:30"}),
+                                         ("POST", {"_action": "cancel"})])
+        self.assertFalse(saved)
+        self.assertEqual(responses[0][0], 400)
+        self.assertNotIn("SENSITIVE", responses[0][1])
+        self.assertEqual(self.path.read_bytes(), before)
+        saved, _ = self.web(setup.DockerApplication(self.path), [("POST", {"S3_ENDPOINT_URL": setup.shared.CLEAR_SENTINEL,
+                                                                                  "WEEKLY_TIME": "12:30"})])
+        self.assertTrue(saved)
+        self.assertEqual(read_env(self.path)["S3_ENDPOINT_URL"], "")
 
     def test_credential_url_is_redacted_on_web_page_and_preview(self):
         cred_url = "https://user:***@router.example/v1"
@@ -193,27 +328,35 @@ class DockerMenuTests(unittest.TestCase):
         self.assertEqual(target.read_text(), "do not change")
 
     def web(self, app, requests):
+        """Each request is (method, fields[, headers]); a None header value omits it."""
         responses = []
         requests = iter(requests)
         class Server:
             server_port = 12345
             def __init__(self, _address, handler):
                 self.handler = handler
-            def handle_request(self):
-                method, fields = next(requests)
+            def call(self, method, fields, headers=None):
                 handler = self.handler.__new__(self.handler)
                 body = urllib.parse.urlencode(fields).encode()
-                handler.headers = {"Content-Length": str(len(body))}
+                merged = {**BROWSER, "Content-Length": str(len(body)), **(headers or {})}
+                handler.headers = {key: value for key, value in merged.items() if value is not None}
                 handler.rfile, handler.wfile = io.BytesIO(body), io.BytesIO()
                 status = []
                 handler.send_response = status.append
                 handler.send_header = lambda *_: None
                 handler.end_headers = lambda: None
                 getattr(handler, f"do_{method}")()
-                responses.append((status[0], handler.wfile.getvalue().decode()))
+                return status[0], handler.wfile.getvalue().decode()
+            def handle_request(self):
+                method, fields, *headers = next(requests)
+                if method == "POST" and "_csrf" not in fields:
+                    # Submit like a browser: from the page on screen, else a fresh GET.
+                    page = responses[-1][1] if responses and CSRF.search(responses[-1][1]) else self.call("GET", {})[1]
+                    fields = dict(fields, _csrf=CSRF.search(page)[1])
+                responses.append(self.call(method, fields, *headers))
             def server_close(self):
                 pass
-        args = SimpleNamespace(host="127.0.0.1", port=0, public_port=0, ssh_user="user", ssh_host="host", ssh_port=22)
+        args = SimpleNamespace(host="0.0.0.0", port=0, public_port=0, ssh_user="user", ssh_host="host", ssh_port=22)
         with mock.patch.object(setup, "HTTPServer", Server), contextlib.redirect_stdout(io.StringIO()):
             saved = setup.serve(app, args)
         return saved, responses
@@ -323,6 +466,31 @@ class DockerMenuTests(unittest.TestCase):
             self.assertNotIn("opaque-future-value", page)
             self.assertIn('name="AI_FUTURE_SETTING" type="password" value=""', page)
         self.assertNotIn("opaque-future-value", "\n".join(setup.change_lines({}, values)))
+
+    def test_web_rejects_cross_site_rebinding_and_oversized_requests_including_cancel(self):
+        app = self.application()
+        before = self.path.read_bytes()
+        attack = dict(VALID, EMAIL_PASSWORD="", AI_API_KEY="", WEEKLY_TIME="12:30",
+                      AI_API_BASE="https://attacker.example/v1")
+        saved, responses = self.web(app, [
+            ("GET", {}, {"Host": "rebind.attacker.example:8765", "Origin": None}),
+            ("POST", attack, {"Origin": "https://attacker.example"}),
+            ("POST", {"_action": "cancel", "_csrf": ""}, {"Origin": None}),
+            ("POST", dict(attack, _csrf="guessed"), {"Origin": None}),
+            ("POST", attack, {"Content-Length": str(setup.shared.MAX_FORM_BYTES + 1)}),
+            ("GET", {}, {"Host": "localhost:9000", "Origin": None}),
+            ("POST", {"_action": "cancel"}),
+        ])
+        self.assertFalse(saved)
+        self.assertEqual([status for status, _ in responses], [403, 403, 403, 403, 400, 200, 200])
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertFalse((self.path.parent / ".env.backups").exists())
+        for _status, page in responses[:4]:
+            self.assertNotIn(VALID["EMAIL_TO"], page)
+            self.assertNotIn("_csrf", page)
+        # A page that can submit carries exactly this session's token.
+        self.assertEqual(len(set(CSRF.findall(responses[4][1] + responses[5][1]))), 1)
+        self.assertEqual(responses[5][1].count('name="_csrf"'), 1)
 
 
 if __name__ == "__main__":

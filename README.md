@@ -106,6 +106,7 @@ TrendRadar Lite 配置
 3. 采集与推送时间
 4. 高级配置
 5. 查看待保存变更
+6. R2/S3 晚间备份（可选）
 s. 保存并应用
 q. 放弃修改并退出
 ```
@@ -117,6 +118,7 @@ q. 放弃修改并退出
 - 邮件分组包含发件人、授权码、收件人和 SMTP；AI 分组包含开关、模型、接口、密钥及备用模型。
 - 时间分组包含每小时采集分钟、早/午/晚推送、全天汇总、周报星期与时间、时区。
 - 高级配置包含 AI 请求超时、热榜数据接口及备用接口；通常保留默认值即可。
+- R2/S3 备份分组默认关闭；可设置夜间时间、回看天数及桶/端点/密钥，复用 Actions 的 `S3_*` 参数。仅对本地数据库部署启用，详见[可选夜间备份](#可选夜间-r2s3-备份)。
 - 修改先保存在内存，返回分组或主菜单不会写文件。修改项标注 `[待保存]`，`5` 查看旧值到新值的变更；恢复原值后不再列出。
 - `s` 校验并确认后备份、保存和应用；`q` 放弃，有改动时要求确认。EOF/Ctrl-C 不保存；首次安装取消后不继续启用任务。
 
@@ -126,6 +128,7 @@ q. 放弃修改并退出
 |---|---|
 | 邮件、AI、数据接口等 | 下次 oneshot 任务启动读取新 env，不重启当前任务 |
 | 采集、推送、周报时间或时区 | 同步环境覆盖与相关 timer，保持原来的启用/禁用状态 |
+| R2/S3 备份开关、时间 | 管理独立备份 timer；明确开关变化可启停，普通保存/重装保留人工暂停；不手动启动上传服务 |
 
 仍可使用 `nano ~/.config/trendradar-lite/env` 修改普通环境参数。
 
@@ -142,6 +145,8 @@ loginctl enable-linger "$USER"          # 退出 SSH 后 timer 仍要运行时�
 cd ~/trendradar-lite-deploy
 .venv/bin/python -m trendradar --force-run   # ⚠️ 真实链路：AI+邮件（绕过推送窗口与 once 去重）
 ```
+
+更新器只接受 fast-forward：先确认工作区干净，再显式 `fetch` + `merge --ff-only`；历史分叉、网络失败都会在改动前退出，不 rebase、不 stash，不受 `pull.rebase` 配置影响。
 
 原生 Linux 默认不自动回退到网页。无交互终端时会退出并提示；使用 SSH 请分配终端。网页配置仅通过 `trendradar --web` 或 `./deploy/linux/install.sh --configure --web` 显式开启，默认绑定 `127.0.0.1`；远程访问仍需 SSH 端口转发。
 
@@ -313,7 +318,7 @@ docker compose ps trendradar      # 状态应为 healthy
 docker compose logs --tail=50 trendradar
 ```
 
-安装器首次默认拉取 GHCR 预构建镜像，并校验其支持外置运行配置（镜像标签 `org.trendradar.runtime-config=1`）；旧镜像会被明确拒绝而不是默默重试。测试或未发布版本可显式 `./deploy/docker/install.sh --build`。取消配置不会启动服务；已有 `runtime/env` 不会被重写，旧部署的根目录 `.env` 应用参数会作为待保存草稿导入，确认保存时才迁移并保留私有备份。
+安装器首次默认拉取 GHCR 预构建镜像并校验兼容标签；默认固定 v26.9 多架构 digest，不跟随 `latest`。本地验证或测试版用 `install.sh --build`：digest 会自动改用本地构建标签 `trendradar-lite-deploy:local` 并在保存后记住；取消或构建失败不改变已保存选择。切换预构建版本：先在根 `.env` 把 `TREND_RADAR_IMAGE` 改为已验证的新 digest 再运行 update。取消配置不会启动服务；旧 `.env` 只在菜单确认后迁移。
 
 ### 修改配置（无需重建镜像或容器）
 
@@ -328,9 +333,11 @@ trendradar-docker
 镜像与程序升级是独立动作：
 
 ```bash
-./deploy/docker/update.sh            # 拉取新镜像后重建服务容器（已有 runtime/env 不变）
-./deploy/docker/update.sh --build    # 用当前源码构建后升级
+./deploy/docker/update.sh            # 拉取当前选定镜像并重建容器，不自动改版本/digest
+./deploy/docker/update.sh --build    # 显式构建源码；digest 自动切换为本地标签，成功后保存
 ```
+
+升级固定镜像前先在根 `.env` 验证并更新 `TREND_RADAR_IMAGE` 为目标 digest；仅运行 update 不会解除固定。旧 `.env` 显式设了 `latest` 时覆盖值仍优先，需自行改。
 
 旧部署尚无 `runtime/env` 时，安装和升级都会先打开菜单：旧 `.env` 只是草稿，补齐必填项并确认后才迁移。需要强制终端/网页模式时可追加 `--terminal` / `--web`；升级成功也会安装 `trendradar-docker` 入口。取消不保存应用配置、部署身份或迁移备份，也不启动服务，但不会撤销此前明确执行的镜像拉取/构建。
 
@@ -351,6 +358,8 @@ trendradar-docker
 
 `output/` 存于 Docker volume；`config/` 宿主只读挂载。服务容器以宿主机用户 UID/GID 运行（安装时记录在根 `.env` 的 `TRENDRADAR_UID/GID`），`runtime/` 目录 `700`、`env` 文件 `600`，密钥不进镜像也不通过容器创建时的环境快照注入。`setup` 配置容器只写挂载项目目录，用于原子替换 `runtime/env` 和保存私有备份，**不挂载业务数据卷**。单独的 `volume-init` 临时容器只在明确安装/升级时初始化数据卷归属，且没有网络和项目目录挂载。常驻服务只读挂载 `runtime/` 目录（而非单文件），保证菜单原子保存后容器可见新内容。
 
+三个服务都启用 `no-new-privileges` 并移除全部 capabilities；root 配置容器只补回保存配置必需的 `CHOWN/DAC_OVERRIDE/FOWNER`，`volume-init` 只补 `CHOWN/DAC_READ_SEARCH`，常驻服务无补回。能力配置需目标 Docker 环境实测。
+
 手动诊断与临时任务统一走镜像入口（自动读最新配置）：
 
 ```bash
@@ -364,10 +373,30 @@ docker compose exec trendradar python deploy/docker/entrypoint.py force-run   # 
 ```bash
 ./deploy/docker/uninstall.sh               # 停容器/网络，留数据、runtime/env、镜像
 ./deploy/docker/uninstall.sh --purge-data  # 另删数据卷、runtime/env 与 .env
-./deploy/docker/uninstall.sh --purge-all   # 另删本地镜像
+./deploy/docker/uninstall.sh --purge-all   # 另尝试删除本次选定镜像，不强制删除在用镜像
 ```
 
 ---
+
+## 可选：夜间 R2/S3 备份
+
+原生与 Docker 均支持“本地 SQLite 每晚备份到 R2/S3”，**默认关闭**；菜单 `6` 设置，密钥不回显，不开启就不需要凭据。
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `R2_BACKUP_ENABLED` | `false` | 设为 `true` 才自动上传 |
+| `R2_BACKUP_TIME` | `23:40` | 按 `TZ`/`TIMEZONE` 每日执行 |
+| `R2_BACKUP_LOOKBACK_DAYS` | `2` | 当天+昨天；首次补齐历史可调大 |
+
+开启需 `STORAGE_BACKEND=local` 和已有的四个 `S3_*` 必填项。两端共用 `deploy/r2_backup.py`：原生用独立备份 timer（菜单开关即启停，人工暂停不会被重装恢复），Docker 用容器内调度器。验证新 Docker 功能需 `--build`，旧固定镜像不含此功能。
+
+备份对象与 Actions 远程存储同一布局（`news/`、`rss/` 按日文件），因此同一桶持续同步后切 Actions 不用搬数据库。**同日期整库覆盖，切换前必须：停旧端 → 最后一次同步 → 再启新端。**
+
+```bash
+python3 deploy/native_install.py backup-status                    # 原生：开关/计划/timer状态
+.venv/bin/python deploy/native_install.py install-backup --enable # 原生：明确安装/启用timer
+docker compose exec trendradar python deploy/docker/entrypoint.py backup --dry-run  # Docker：列举待传，不上传
+```
 
 ## 手动运行
 
@@ -410,9 +439,16 @@ output/
 
 ## 开发与验证
 
+### 供应链固定
+
+- 依赖：安装与 CI 均从 `requirements.lock`（精确版本+SHA-256，与官方 PyPI 逐一核对）哈希校验且仅收 wheel；改 `requirements.txt` 后用 `deploy/lock_dependencies.py` 重解、审阅、验证。哈希防供应链替换，不防包自身漏洞。
+- Actions：第三方 action 全部固定完整 commit SHA（官方 API 解析），更新时重新核对。
+- 镜像：发布工作流对双架构 index digest 生成 GitHub artifact attestation；消费者用 `gh attestation verify "oci://ghcr.io/<镜像@digest>" --repo daxia9522/trendradar-lite-deploy --signer-workflow daxia9522/trendradar-lite-deploy/.github/workflows/release-image.yml` 验证。现存 v26.9 早于签名流程，无追溯签名；`Dockerfile` 另固定了 Python 基础镜像 digest，更新前需到 registry 重新核验。
+
 仅部署使用可忽略本节；**修改代码后、push 之前**，本地先跑一遍与 CI 相同的自检，避免推上去才看到红叉：
 
 ```bash
+python -m pip install --require-hashes -r requirements.lock
 python -m compileall -q trendradar weekly_report deploy tests   # 语法编译
 python -m unittest discover -s tests                            # 全量行为测试
 for script in install.sh deploy/linux/*.sh deploy/docker/*.sh; do

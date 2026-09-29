@@ -5,6 +5,7 @@ import glob
 import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -12,7 +13,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "deploy"))
-from envfile import EnvDocument, atomic_write, literal, private_backup
+from envfile import BACKUP_KEEP, EnvDocument, atomic_write, literal, private_backup
 
 
 class EnvWhitespaceTests(unittest.TestCase):
@@ -98,6 +99,42 @@ class EnvWhitespaceTests(unittest.TestCase):
                     finally:
                         free(output)
                     self.assertEqual(EnvDocument(path).values, expected)
+
+
+class PrivateBackupRetentionTests(unittest.TestCase):
+    def test_only_newest_backups_survive_and_foreign_entries_are_untouched(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "env"
+            path.write_bytes(b"current")
+            backups = Path(directory) / ".env.backups"
+            backups.mkdir(mode=0o700)
+            (backups / "notes.txt").write_text("keep")
+            (backups / "before-link").symlink_to(path)
+            (backups / "before-dir").mkdir()
+            base = time.time_ns() - 10**12
+            created = []
+            for index in range(BACKUP_KEEP + 3):
+                created.append(private_backup(path, f"old-{index}".encode()))
+                # Deterministic order even with coarse filesystem timestamps.
+                os.utime(created[-1], ns=(base + index * 10**9,) * 2)
+            remaining = sorted(item.read_bytes() for item in backups.iterdir()
+                               if item.name.startswith("before-") and not item.is_symlink() and item.is_file())
+            self.assertEqual(remaining, sorted(f"old-{index}".encode() for index in range(3, BACKUP_KEEP + 3)))
+            self.assertTrue(created[-1].exists())
+            self.assertEqual((backups / "notes.txt").read_text(), "keep")
+            self.assertTrue((backups / "before-link").is_symlink())
+            self.assertTrue((backups / "before-dir").is_dir())
+            self.assertEqual(path.read_bytes(), b"current")
+
+    def test_repeated_saves_cap_backups_and_prune_failure_never_blocks_save(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "env"
+            for index in range(BACKUP_KEEP + 4):
+                EnvDocument(path).save({"EMAIL_PASSWORD": f"secret-{index}"})
+            self.assertEqual(len(list((Path(directory) / ".env.backups").iterdir())), BACKUP_KEEP)
+            with mock.patch.object(Path, "unlink", side_effect=PermissionError):
+                self.assertTrue(EnvDocument(path).save({"EMAIL_PASSWORD": "after-failed-prune"}))
+            self.assertEqual(EnvDocument(path).values["EMAIL_PASSWORD"], "after-failed-prune")
 
 
 if __name__ == "__main__":

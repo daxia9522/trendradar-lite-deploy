@@ -162,6 +162,9 @@ def atomic_write(path: Path, content: bytes, mode: int = 0o600) -> None:
             os.unlink(temporary)
 
 
+BACKUP_KEEP = 5
+
+
 def private_backup(path: Path, content: bytes) -> Path:
     directory = path.parent / f".{path.name.lstrip('.')}.backups"
     if directory.is_symlink():
@@ -179,7 +182,27 @@ def private_backup(path: Path, content: bytes) -> Path:
         stream.write(content)
         stream.flush()
         os.fsync(stream.fileno())
+    _prune_backups(directory, Path(filename).name)
     return Path(filename)
+
+
+def _prune_backups(directory: Path, newest: str) -> None:
+    """Keep the newest BACKUP_KEEP backups: every older copy holds replaced secrets.
+
+    Best effort: only regular before-* files count, links are never followed,
+    and a failed deletion must not fail the save this backup protects.
+    """
+    try:
+        entries = [(item.lstat(), item) for item in directory.iterdir()
+                   if item.name.startswith("before-") and item.name != newest]
+    except OSError:
+        return
+    older = sorted((info.st_mtime_ns, item.name, item) for info, item in entries if stat.S_ISREG(info.st_mode))
+    for _mtime, _name, item in older[:max(0, len(older) - (BACKUP_KEEP - 1))]:
+        try:
+            item.unlink()
+        except OSError:
+            pass
 
 
 class EnvDocument:

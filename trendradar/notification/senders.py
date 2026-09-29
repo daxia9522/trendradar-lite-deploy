@@ -39,9 +39,9 @@ SEND_RETRY_DELAYS = (3, 15)
 
 
 def _is_retryable_smtp_error(exc: Exception) -> bool:
-    # 保留供应商兼容策略：认证错误仍重试（包括 535），不泛化到其他 5xx。
+    # 认证错误（含 535）不重试：反复重试只会招致邮箱服务商风控/锁号。
     if isinstance(exc, smtplib.SMTPAuthenticationError):
-        return True
+        return False
     if isinstance(exc, smtplib.SMTPRecipientsRefused):
         # 抛异常表示本次未投递；仅全部为临时拒收时才重试整个信封。
         return bool(exc.recipients) and all(

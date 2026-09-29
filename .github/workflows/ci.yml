@@ -12,13 +12,16 @@ jobs:
   python:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
           cache: pip
+          cache-dependency-path: requirements.lock
       - name: Install dependencies
-        run: python -m pip install -r requirements.txt
+        run: python -m pip install --require-hashes -r requirements.lock
       - name: Compile Python
         run: python -m compileall -q trendradar weekly_report deploy tests
       - name: Run tests
@@ -28,12 +31,18 @@ jobs:
       - name: Check CLI
         run: python -m trendradar --help
       - name: Check shell scripts
-        run: bash -n install.sh deploy/linux/*.sh deploy/docker/*.sh
+        # bash -n parses only its first operand; the rest become $1, $2, ...
+        run: |
+          for script in install.sh deploy/linux/*.sh deploy/docker/*.sh; do
+            bash -n "$script" || exit 1
+          done
 
   container:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
       - name: Prepare Compose environment
         run: cp .env.example .env
       - name: Validate Compose

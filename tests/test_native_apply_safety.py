@@ -85,7 +85,7 @@ class SafetyRunner:
         name = command[3]
         if self.show_hook:
             self.show_hook(name)
-        active, enabled = self.states[name]
+        active, enabled = self.states.get(name, ("inactive", "not-found"))
         output = (f"ActiveState={active}\nUnitFileState={enabled}\nFragmentPath={self.units / name}\n"
                   f"DropInPaths={self.dropins}\nLastTriggerUSec={self.last}\n"
                   f"SubState={self.substate}\nNeedDaemonReload={self.dirty}\n")
@@ -293,8 +293,9 @@ class NativeApplySafetyTests(unittest.TestCase):
                 self.assert_no_mutations()
 
     def test_repeat_preflight_before_reload_rolls_back_if_state_becomes_unknown(self):
+        original_env = self.env.read_bytes()
         def state_changes(name):
-            if self.runner.show_count >= 3:
+            if self.env.read_bytes() != original_env:
                 self.runner.last = "n/a"
         self.runner.show_hook = state_changes
         with self.assertRaisesRegex(ApplyError, "env 已恢复"):
@@ -310,7 +311,8 @@ class NativeApplySafetyTests(unittest.TestCase):
                 self.runner.dropins = ""
                 self.runner.show_count = 0
                 self.application = NativeApplication(self.env, self.app_dir, self.units, runner=self.runner)
-                self.runner.show_hook = lambda name: change() if self.runner.show_count == 3 else None
+                original_env = self.env.read_bytes()
+                self.runner.show_hook = lambda name: change() if self.env.read_bytes() != original_env else None
                 with self.assertRaisesRegex(ApplyError, "env 已恢复"):
                     self.save()
                 self.assert_original()

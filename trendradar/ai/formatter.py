@@ -91,13 +91,12 @@ def render_ai_analysis_html_rich(result: AIAnalysisResult) -> str:
     if not result:
         return ""
 
-    # 检查是否成功
+    # 检查是否成功；失败只展示简短提示，详细错误仅留在日志（daily.py 已打印）
     if not result.success:
-        error_msg = result.error or "未知错误"
         return f"""
                 <div class="ai-section-shell">
                 <div class="ai-section">
-                    <div class="ai-error">⚠️ AI 分析失败: {_escape_html(str(error_msg))}</div>
+                    <div class="ai-error">⚠️ AI 分析失败</div>
                 </div>
                 </div>"""
 

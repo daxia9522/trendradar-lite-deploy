@@ -21,10 +21,16 @@ import manage
 from envfile import ConfigError, read_env, write_env
 
 FAKE_DOCKER = '''#!/usr/bin/env python3
-import json, os, subprocess, sys
+import json, os, re, subprocess, sys
 from pathlib import Path
 args = sys.argv[1:]
 root = Path(os.environ["FAKE_ROOT"])
+saved_image = ""
+if (root / ".env").exists():
+    matches = re.findall(r'^TREND_RADAR_IMAGE="([^"\\n]+)"$', (root / ".env").read_text(), re.M)
+    if matches:
+        saved_image = matches[-1]
+image = os.environ.get("TREND_RADAR_IMAGE") or saved_image or os.environ.get("FAKE_COMPOSE_IMAGE", "test/trendradar:local")
 with open(os.environ["FAKE_LOG"], "a") as stream:
     stream.write(json.dumps(args) + "\\n")
 if args[:2] == ["image", "inspect"]:
@@ -39,12 +45,16 @@ if "config" in args and "--images" in args:
         print("test/trendradar:local")
         print("other/app:1")
         sys.exit(0)
-    print("test/trendradar:local")
+    print(image)
     if not selector:
         # Whole-project listing repeats the image once per service.
-        print("test/trendradar:local")
-        print("test/trendradar:local")
+        print(image)
+        print(image)
     sys.exit(0)
+if "build" in args:
+    if "@" in image:
+        sys.exit(97)
+    sys.exit(int(os.environ.get("FAKE_BUILD_EXIT", "0")))
 if "run" in args:
     if "--pull" not in args or args[args.index("--pull") + 1] != "never" or "--no-deps" not in args:
         sys.exit(89)
@@ -94,6 +104,8 @@ class DockerInstallTests(unittest.TestCase):
                         FAKE_ROOT=str(self.root), FAKE_LOG=str(self.log), LITELLM_LOCAL_MODEL_COST_MAP="True")
         self.env.pop("TRENDRADAR_UID", None)
         self.env.pop("TRENDRADAR_GID", None)
+        self.env.pop("TREND_RADAR_IMAGE", None)
+        self.env.pop("TRENDRADAR_BUILD_IMAGE", None)
         self.path = self.root / "runtime/env"
 
     def run_script(self, *args, input="", script="install.sh", **env):
@@ -396,6 +408,74 @@ class DockerInstallTests(unittest.TestCase):
         self.assertEqual(os.waitstatus_to_exitcode(status), 2, transcript.decode(errors="replace"))
         self.assertFalse(self.path.exists())
         self.assertFalse(any("up" in call for call in self.calls()))
+
+    def test_digest_build_switches_to_local_tag_and_persists_only_after_success(self):
+        write_env(self.path, VALID)
+        before = self.path.read_bytes()
+        result = self.run_script("--build", "--no-start", FAKE_COMPOSE_IMAGE="test/app@sha256:" + "a" * 64)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.path.read_bytes(), before)
+        deployment = read_env(self.root / ".env")
+        self.assertEqual(deployment["TREND_RADAR_IMAGE"], "trendradar-lite-deploy:local")
+        inspect = next(call for call in self.calls() if call[:2] == ["image", "inspect"])
+        self.assertEqual(inspect[-1], deployment["TREND_RADAR_IMAGE"])
+        self.log.write_text("")
+        result = self.run_script("--configure", "--terminal", input="q\ny\n")
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        inspect = next(call for call in self.calls() if call[:2] == ["image", "inspect"])
+        self.assertEqual(inspect[-1], "trendradar-lite-deploy:local")
+        self.assert_no_upgrade()
+
+    def test_digest_update_build_preserves_unrelated_deployment_settings(self):
+        pin = "test/app@sha256:" + "a" * 64
+        write_env(self.path, VALID)
+        write_env(self.root / ".env", {"TREND_RADAR_IMAGE": pin, "SETUP_PORT": "9999"}, "docker")
+        result = self.run_script("--build", script="update.sh")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(read_env(self.root / ".env")["SETUP_PORT"], "9999")
+        self.assertEqual(read_env(self.root / ".env")["TREND_RADAR_IMAGE"], "trendradar-lite-deploy:local")
+        self.assertTrue(any("up" in call for call in self.calls()))
+
+    def test_explicit_build_tag_is_retained(self):
+        write_env(self.path, VALID)
+        result = self.run_script("--build", "--no-start", TREND_RADAR_IMAGE="custom/project:local")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(read_env(self.root / ".env")["TREND_RADAR_IMAGE"], "custom/project:local")
+
+    def test_cancel_after_digest_build_does_not_save_image_or_identity(self):
+        pin = "test/app@sha256:" + "a" * 64
+        write_env(self.root / ".env", {"TREND_RADAR_IMAGE": pin}, "docker")
+        before = (self.root / ".env").read_bytes()
+        result = self.run_script("--build", "--terminal", input="q\ny\n")
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertEqual((self.root / ".env").read_bytes(), before)
+        self.assertFalse(self.path.exists())
+        self.assertFalse((self.root / ".env.backups").exists())
+        self.assertFalse(any("persist-identity" in call or "up" in call for call in self.calls()))
+
+    def test_build_failure_stops_before_setup_and_persistence(self):
+        result = self.run_script("--build", FAKE_COMPOSE_IMAGE="test/app@sha256:" + "a" * 64, FAKE_BUILD_EXIT="41")
+        self.assertEqual(result.returncode, 41, result.stdout + result.stderr)
+        self.assertFalse((self.root / ".env").exists())
+        self.assertFalse(any("run" in call or "up" in call for call in self.calls()))
+
+    def test_purge_all_removes_only_the_selected_image_before_env_is_lost(self):
+        pin = "test/custom@sha256:" + "b" * 64
+        write_env(self.path, VALID)
+        write_env(self.root / ".env", {"TREND_RADAR_IMAGE": pin}, "docker")
+        result = self.run_script("--purge-all", script="uninstall.sh")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([call for call in self.calls() if call[:2] == ["image", "rm"]], [["image", "rm", "--", pin]])
+        self.assertFalse((self.root / ".env").exists())
+        calls = self.calls()
+        self.assertLess(next(i for i, call in enumerate(calls) if "config" in call), next(i for i, call in enumerate(calls) if "down" in call))
+
+    def test_purge_all_ambiguous_image_fails_before_destructive_operations(self):
+        write_env(self.path, VALID)
+        result = self.run_script("--purge-all", script="uninstall.sh", FAKE_COMPOSE_MULTI_IMAGE="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(self.path.exists())
+        self.assertFalse(any("down" in call or "rm" in call for call in self.calls()))
 
     def test_uninstall_stop_preserves_and_purge_removes_private_state(self):
         write_env(self.path, VALID)
