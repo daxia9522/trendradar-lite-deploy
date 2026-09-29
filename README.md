@@ -1,6 +1,6 @@
 # TrendRadar Lite Deploy
 
-> 版本 v26.9 ｜ [Release](https://github.com/daxia9522/trendradar-lite-deploy/releases/tag/v26.9) ｜ 镜像 `ghcr.io/daxia9522/trendradar-lite-deploy`
+> 版本 v26.10 ｜ [Release](https://github.com/daxia9522/trendradar-lite-deploy/releases/tag/v26.10) ｜ 镜像 `ghcr.io/daxia9522/trendradar-lite-deploy`
 
 聚合 11 平台热榜与 RSS → 关键词筛选 → AI 事件分析 → HTML 日报/周报邮件推送。
 
