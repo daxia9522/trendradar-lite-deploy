@@ -55,7 +55,7 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(third.env["PYTHONPATH"], "/controlled/lib")
         self.assertEqual(third.env["DOCKER_CONTAINER"], "true")
         self.assertEqual(third.env["STORAGE_BACKEND"], "local")
-        self.assertEqual(third.settings.crawler_minute, 0)
+        self.assertEqual(third.settings.crawler_minute, 5)
         self.assertEqual(third.settings.push_times, frozenset(runtime.DEFAULT_TIMES))
         self.assertEqual(dict(os.environ), before)
         self.assertEqual(self.base["AI_API_KEY"], "old-key")
@@ -226,7 +226,7 @@ class RuntimeConfigTests(unittest.TestCase):
             b"SCHEDULER_POLL_SECONDS=\nSCHEDULER_MAX_ATTEMPTS=\nTZ=UTC\n"
         )
         settings = runtime.schedule_settings(values)
-        self.assertEqual(settings.crawler_minute, 0)
+        self.assertEqual(settings.crawler_minute, 5)
         self.assertEqual(settings.push_times, frozenset(runtime.DEFAULT_TIMES))
         self.assertEqual((settings.weekly_weekday, settings.weekly_hour, settings.weekly_minute), (6, 12, 30))
         self.assertEqual((settings.poll_seconds, settings.max_attempts), (20, 3))

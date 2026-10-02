@@ -29,6 +29,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 # our single securely opened descriptor (their path I/O would reopen the file).
 from deploy.envfile import ConfigError, _records
 from deploy.backup_settings import BackupConfigError, DEFAULT_BACKUP_TIME, load_backup_settings
+from deploy.delivery_windows import DELIVERY_DEFAULTS, DeliveryWindowError, delivery_times
 
 RUNTIME_ENV_KEY = "TRENDRADAR_RUNTIME_ENV"
 DOCKER_MARKER = b"# TrendRadar env format: docker\n"
@@ -51,8 +52,8 @@ APP_KEYS = frozenset({
     "WEEKLY_WEEKDAY", "WEEKLY_HOUR", "WEEKLY_MINUTE", "DOCKER_CONTAINER",
     "R2_BACKUP_ENABLED", "R2_BACKUP_TIME", "R2_BACKUP_LOOKBACK_DAYS",
 })
-TIME_KEYS = ("MORNING_PUSH_TIME", "NOON_PUSH_TIME", "EVENING_PUSH_TIME", "DAILY_SUMMARY_TIME")
-DEFAULT_TIMES = ("07:00", "12:00", "18:00", "22:00")
+TIME_KEYS = tuple(DELIVERY_DEFAULTS)
+DEFAULT_TIMES = tuple(DELIVERY_DEFAULTS.values())
 ERRORS = {
     "path": "runtime configuration path is invalid",
     "missing": "runtime configuration file is missing",
@@ -66,6 +67,7 @@ ERRORS = {
     "unsupported": "runtime configuration contains an unsupported environment key",
     "locked": "runtime configuration cannot change Docker/local storage identity",
     "schedule": "runtime configuration contains invalid schedule settings",
+    "delivery_overlap": "delivery windows must use different hours; each ends at HH:59",
     "backup": "runtime configuration contains invalid backup settings",
     "value": "runtime configuration contains an invalid application setting",
 }
@@ -214,15 +216,16 @@ def schedule_settings(values: Mapping[str, str]) -> ScheduleSettings:
         timezone = ZoneInfo(tz)
     except (ZoneInfoNotFoundError, ValueError, TypeError):
         raise RuntimeConfigError("schedule") from None
-    times = [values.get(key) or default for key, default in zip(TIME_KEYS, DEFAULT_TIMES)]
-    if any(not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value) for value in times):
-        raise RuntimeConfigError("schedule")
+    try:
+        times = delivery_times(values)
+    except DeliveryWindowError as exc:
+        raise RuntimeConfigError("delivery_overlap" if exc.code == "overlap" else "schedule") from None
     try:
         backup = load_backup_settings(values)
     except BackupConfigError:
         raise RuntimeConfigError("backup") from None
     return ScheduleSettings(
-        timezone, _integer(values, "CRAWLER_MINUTE", 0, 0, 59), frozenset(times),
+        timezone, _integer(values, "CRAWLER_MINUTE", 5, 0, 59), frozenset(times),
         _integer(values, "WEEKLY_WEEKDAY", 6, 0, 6),
         _integer(values, "WEEKLY_HOUR", 12, 0, 23),
         _integer(values, "WEEKLY_MINUTE", 30, 0, 59),
@@ -244,7 +247,9 @@ def validate_runtime_values(values: Mapping[str, str]) -> None:
     schedule_settings(values)
     for key in ("AI_ANALYSIS_ENABLED", "DEBUG", "SORT_BY_POSITION_FIRST", "SCHEDULE_ENABLED",
                 "STORAGE_TXT_ENABLED", "STORAGE_HTML_ENABLED", "PULL_ENABLED"):
-        if values.get(key) and values[key].lower() not in ("true", "false", "1", "0"):
+        # Match loader._get_env_bool without rewriting the literal environment:
+        # whitespace-only means YAML fallback, not an explicit false override.
+        if values.get(key, "").strip().lower() not in ("", "true", "false", "1", "0"):
             raise RuntimeConfigError("value")
     for key, low, high in (("AI_TIMEOUT", 1, 2147483647), ("EMAIL_SMTP_PORT", 1, 65535)):
         if values.get(key):

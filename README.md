@@ -1,6 +1,6 @@
 # TrendRadar Lite Deploy
 
-> 版本 v26.10 ｜ [Release](https://github.com/daxia9522/trendradar-lite-deploy/releases/tag/v26.10) ｜ 镜像 `ghcr.io/daxia9522/trendradar-lite-deploy`
+> 源码版本 v26.10.02 ｜ [Releases](https://github.com/daxia9522/trendradar-lite-deploy/releases) ｜ 镜像 `ghcr.io/daxia9522/trendradar-lite-deploy`
 
 聚合 11 平台热榜与 RSS → 关键词筛选 → AI 事件分析 → HTML 日报/周报邮件推送。
 
@@ -47,6 +47,8 @@ trendradar-docker
 
 ### AI
 
+应用布尔环境变量（`DEBUG`、`SORT_BY_POSITION_FIRST`、`SCHEDULE_ENABLED`、`AI_ANALYSIS_ENABLED`、`STORAGE_TXT_ENABLED`、`STORAGE_HTML_ENABLED`、`PULL_ENABLED`）接受 `true/false/1/0`（忽略大小写和首尾空白）；未设置、空字符串或仅含空白时沿用 YAML。Docker 外部 `runtime/env`、原生环境文件与配置菜单采用同一规则，其他非空值会明确报错，不再把拼写错误静默当作关闭。`R2_BACKUP_ENABLED` 使用相同布尔字面量，但留空表示关闭备份，不读取 YAML；`DOCKER_CONTAINER=true` 是 Docker 固定身份，不属于应用开关。
+
 | 变量 | 必填 | 说明 |
 |---|---|---|
 | `AI_API_KEY` | **必填**（启用 AI 时） | 中转站或官方 Key |
@@ -88,6 +90,8 @@ cd trendradar-lite-deploy
 ```
 
 安装器创建每小时采集、日推和周报的 systemd user timer，环境文件保存于 `~/.config/trendradar-lite/env`（权限 `600`）。设置了 `XDG_CONFIG_HOME` 时，配置和 user units 位于该目录。采集、推送与周报统一使用配置的时区，默认 `Asia/Shanghai`。首次安装默认启用定时器，之后会按计划运行；`--no-enable` 只安装而不启用。菜单和安装器不会额外执行采集/AI/发信测试。
+
+重新运行安装器时，会修正旧生成器写入 `WorkingDirectory` / `EnvironmentFile` 的外层引号；只迁移匹配当前安装路径的已知旧格式，保留自定义服务选项和现有 timer 时间。仅更新源码不会改动已安装的 unit。
 
 ### 一个命令打开菜单
 
@@ -318,6 +322,8 @@ docker compose ps trendradar      # 状态应为 healthy
 docker compose logs --tail=50 trendradar
 ```
 
+源码版本为 **v26.10.02**；默认预构建镜像暂仍固定在已验证的 **v26.10** digest。新版镜像需在 Actions 的 **Release Container Image** 工作流中选择 `main` 手动运行，生成后再切换镜像引用；仅更新源码不会更换已固定的镜像。
+
 安装器首次默认拉取 GHCR 预构建镜像并校验兼容标签；默认固定 v26.10 多架构 digest，不跟随 `latest`。本地验证或测试版用 `install.sh --build`：digest 会自动改用本地构建标签 `trendradar-lite-deploy:local` 并在保存后记住；取消或构建失败不改变已保存选择。切换预构建版本：先在根 `.env` 把 `TREND_RADAR_IMAGE` 改为已验证的新 digest 再运行 update。取消配置不会启动服务；旧 `.env` 只在菜单确认后迁移。
 
 ### 修改配置（无需重建镜像或容器）
@@ -345,7 +351,9 @@ trendradar-docker
 
 ### 调度与数据
 
-容器内置轻量调度器，按 `runtime/env` 的 `TZ` 调度，默认 `Asia/Shanghai`（北京时间）；每轮读取最新时间设置，改动不补跑当前分钟，夏令时重叠窗口不重复发送。下表为 `.env.example` 的默认配置（首次安装作为菜单草稿默认值）：
+本地 SQLite 使用 WAL 和 30 秒锁等待，减少读写互相阻塞；这不是无限重试，也不替代任务去重。远端模式仍使用可独立上传的单文件日志模式，备份通过 SQLite 快照接口读取已提交数据，不直接复制活跃 WAL 数据库的主文件。
+
+容器内置轻量调度器，按 `runtime/env` 的 `TZ` 调度，默认 `Asia/Shanghai`（北京时间）。启动时可执行当前分钟到期的任务，不追补更早时段；热修改时间或从无效配置恢复时，不补跑当分钟。日报、周报和备份各自最多运行一个子进程，周报不会阻塞后续采集；同类任务未结束时不再重入，错过的历史分钟不排队补跑。夏令时重叠窗口仍按执行记录去重。下表为 `.env.example` 的默认配置，清空 `CRAWLER_MINUTE` 也回退到 `5`：
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
@@ -355,6 +363,8 @@ trendradar-docker
 | `EVENING_PUSH_TIME` | `18:00` | 傍晚推送 |
 | `DAILY_SUMMARY_TIME` | `22:00` | 全天汇总 |
 | `WEEKLY_WEEKDAY` / `WEEKLY_HOUR` / `WEEKLY_MINUTE` | `6` / `12` / `30` | 周报（周日 12:30，Python 约定周日=6） |
+
+定时器决定何时启动，timeline 决定是否允许分析和推送。四档推送时间覆盖窗口的起点，终点为同小时 `:59`：例如 `07:30` 对应 `07:30–07:59`，不会在 `07:05` 提前推送。**部署配置的四档必须位于不同小时**；即使分钟不同，`07:00` 与 `07:30` 也会造成窗口重叠，配置菜单、原生调度和 Docker 运行配置会明确拒绝，不自动截断窗口或改成 `last_wins`。初次配置和 Docker 的未填写项参与校验时使用上表默认时间，因此只将午间改为 `07:30` 也会与默认早间窗口冲突。已安装的原生调度修改按 YAML/env 推定后的有效时间校验，显式清空时间仍会拒绝；仅保存邮件/AI 不强制规范化旧调度。未覆盖的 YAML 自定义窗口保持原样，其实际范围冲突仍由 Scheduler 按 YAML 的冲突策略校验。窗口内仍遵循 `once`，已成功记录的分析／推送不会因再次采集而重复；窗口本身不保证断电后的补发，也不是跨进程的严格去重锁。
 
 `output/` 存于 Docker volume；`config/` 宿主只读挂载。服务容器以宿主机用户 UID/GID 运行（安装时记录在根 `.env` 的 `TRENDRADAR_UID/GID`），`runtime/` 目录 `700`、`env` 文件 `600`，密钥不进镜像也不通过容器创建时的环境快照注入。`setup` 配置容器只写挂载项目目录，用于原子替换 `runtime/env` 和保存私有备份，**不挂载业务数据卷**。单独的 `volume-init` 临时容器只在明确安装/升级时初始化数据卷归属，且没有网络和项目目录挂载。常驻服务只读挂载 `runtime/` 目录（而非单文件），保证菜单原子保存后容器可见新内容。
 
@@ -439,6 +449,14 @@ output/
 
 ## 开发与验证
 
+### 代码职责与个人邮件
+
+- `trendradar/daily_flow/`：`runner` 编排日报执行顺序与开关，`collection` 负责采集和落库，`inputs` 准备各模式输入，`rss` 处理 RSS 模式与时效，`models` 定义步骤间的数据边界。历史读取只返回新闻、来源、标题信息和新增标题，热榜关键词规则由报告准备阶段单独获取；历史阶段仍保留原有词表复核及失败处理，但不再向下游携带这三项词表数据；RSS 只向下游传递统计、新增统计和原始条目，新增条目计算与 `is_new` 标记仍留在 RSS 模块内。
+- `trendradar/report/`：`daily`、`weekly` 各自组织报告内容；`components` 提供唯一的 Header 和 AI 卡片，`shell` 提供唯一的文档外壳，`models.ReportMeta` 只传展示数据。Header 的元信息、关键词和 AI 卡片的可选标题由内容决定，不按日报/周报切换布局。日报新闻区与 AI 卡片仍遵守 `region_order`、新增区与独立区开关；周报使用同样的 Header 和 AI 卡片，不额外重复标题。周报现有的 `weekly_report/{collection,keywords,prompting,runtime}` 继续负责采集、关键词、提示词和运行环境。CLI 直接调用 `trendradar.daily_flow.runner.DailyRunner`，`AppContext` 直接调用 `trendradar.report.daily.render_daily_html`；周报保留 `weekly_report/weekly_ai_report_email.py` 公开脚本入口，由该主脚本直接调用 `trendradar.report.weekly.render_weekly_html`，不再保留旧呈现适配层。
+- `report/markdown.py` 是唯一安全 Markdown 渲染器：连续行以 `<br>` 连接、空行分段，支持三级标题、列表（保留显式起始数字）、引用、粗体、斜体和行内代码；原始 HTML 始终转义。日报 AI 正文直接交给相同的渲染入口，不转换旧式 `【标题】`，不按板块格式自动给标题或列表加编号；标题与编号遵循输入的标准 Markdown，不改变分析器契约。
+- 邮件 CSS 仅有 `styles/{base,header,ai,news}.css` 四份：日报内嵌 `base + header + ai + news`，周报内嵌前三份；`styles.py` 的 `load_stylesheets` 接收组件名序列，通过资源白名单和 `importlib.resources` 加载，不依赖工作目录或外部样式。Header 与 AI 卡片以原日报视觉为统一基准；每个组件自行维护深色和 640px 窄屏规则，新闻选择器限定在 `.news-region`，页面布局单独使用 `.report-layout`。设计值仅维护在所属 CSS 中，关键颜色保留邮件客户端所需的直接值，不另建 Python 主题常量。
+- 日报、周报及 CLI 统一调用 `send_report` 发送单封报告邮件，返回本次独立的 `EmailDeliveryResult`；仅支持邮件推送，没有多渠道分发接口或镜像状态、群发队列或营销批量逻辑。配置自己的个人邮箱即可；底层 SMTP 重试与部分投递后禁止整封重发的保护保持不变。
+
 ### 供应链固定
 
 - 依赖：安装与 CI 均从 `requirements.lock`（精确版本+SHA-256，与官方 PyPI 逐一核对）哈希校验且仅收 wheel；改 `requirements.txt` 后用 `deploy/lock_dependencies.py` 重解、审阅、验证。哈希防供应链替换，不防包自身漏洞。
@@ -455,7 +473,11 @@ for script in install.sh deploy/linux/*.sh deploy/docker/*.sh; do
   bash -n "$script" || exit 1                                  # 逐个脚本检查语法
 done
 docker compose config --quiet                                   # compose 配置校验
+docker build --tag trendradar-lite-deploy:ci .
+bash .github/scripts/container_smoke.sh trendradar-lite-deploy:ci # 禁网运行镜像入口
 ```
+
+容器 CI 在构建后实际运行配置检查、doctor、日报／周报帮助入口和调度展示；不挂载业务数据，不注入宿主凭据，禁用网络。周报源码按采集筛选、关键词、提示词、呈现和运行环境分模块，原 `weekly_report/weekly_ai_report_email.py` 命令入口保持不变。
 
 测试全部使用 mock 与临时目录：不抓取真实新闻、不调用真实 AI、不发送真实邮件；原生菜单与安装器测试使用临时 HOME/XDG 和模拟 systemctl，不操作开发者的真实定时器。测试代码不打入镜像、不由安装器部署。
 

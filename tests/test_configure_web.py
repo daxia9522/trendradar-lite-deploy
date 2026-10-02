@@ -23,6 +23,39 @@ VALUES = {"EMAIL_FROM": "sender@example.com", "EMAIL_TO": "reader@example.com",
 
 
 class WebRegressionTests(unittest.TestCase):
+    def test_new_invalid_boolean_draft_survives_get_blank_and_omitted_retries(self):
+        for deployment in ("linux", "docker"):
+            with self.subTest(deployment=deployment), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "env"
+                write_env(path, dict(VALUES, AI_ANALYSIS_ENABLED="false"), deployment)
+                responses = self.run_server(path, [
+                    ("POST", dict(VALUES, AI_ANALYSIS_ENABLED="synthetic-private-boolean")),
+                    ("GET", {}),
+                    ("POST", dict(VALUES, AI_ANALYSIS_ENABLED="")),
+                    ("POST", dict(VALUES)),
+                    ("POST", dict(VALUES, AI_ANALYSIS_ENABLED=":clear")),
+                ], deployment)
+                self.assertEqual([status for status, _ in responses], [400, 200, 400, 400, 200])
+                self.assertEqual(read_env(path, deployment)["AI_ANALYSIS_ENABLED"], "")
+                for _, page in responses:
+                    self.assertNotIn("synthetic-private-boolean", page)
+
+    def test_invalid_boolean_is_redacted_and_blank_retry_does_not_bypass_rejection(self):
+        for deployment in ("linux", "docker"):
+            with self.subTest(deployment=deployment), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "env"
+                values = dict(VALUES, AI_ANALYSIS_ENABLED="synthetic-private-boolean")
+                write_env(path, values, deployment)
+                responses = self.run_server(path, [
+                    ("GET", {}),
+                    ("POST", dict(VALUES, AI_ANALYSIS_ENABLED="")),
+                    ("POST", dict(VALUES, AI_ANALYSIS_ENABLED=":clear")),
+                ], deployment)
+                self.assertEqual([status for status, _ in responses], [200, 400, 200])
+                self.assertEqual(read_env(path, deployment)["AI_ANALYSIS_ENABLED"], "")
+                for _, page in responses:
+                    self.assertNotIn("synthetic-private-boolean", page)
+
     def run_server(self, path, requests, deployment="docker", application=None):
         """Each request is (method, fields[, headers]); a None header value omits it."""
         responses = []
@@ -101,7 +134,10 @@ class WebRegressionTests(unittest.TestCase):
             values = {"EMAIL_FROM": "sender@example.com", "EMAIL_TO": "reader@example.com",
                       "EMAIL_PASSWORD": "secret", "TZ": "UTC"}
             write_env(path, values, "docker")
-            responses = self.run_server(path, [("POST", dict(values, AI_ANALYSIS_ENABLED="yes")), ("POST", values)])
+            # Redacted invalid drafts now require an explicit correction/clear;
+            # omitting the field must not silently turn it into YAML fallback.
+            responses = self.run_server(path, [("POST", dict(values, AI_ANALYSIS_ENABLED="yes")),
+                                                ("POST", dict(values, AI_ANALYSIS_ENABLED=":clear"))])
             self.assertEqual([status for status, _ in responses], [400, 200])
             self.assertFalse(read_env(path, "docker").get("AI_ANALYSIS_ENABLED"))
 

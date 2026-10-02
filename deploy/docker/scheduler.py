@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Foreground Docker scheduler with per-dispatch immutable runtime snapshots.
 
-External-file mode deliberately arms *after* its first observed minute, and
-again after a timing/timezone change or invalid->valid recovery. It never
-backfills that minute. Env-only deployments retain immediate-start behavior.
+The first valid configuration may dispatch work due in the current minute;
+subsequent timing/timezone changes and invalid->valid recovery never backfill
+that minute. Env-only deployments retain immediate-start behavior.
 Each poll selects its due windows once. Each new task reloads and validates
 the file; a forward-moving clock retains selected windows, while a changed
 schedule, invalid config or clock rollback cancels the remaining selection.
@@ -21,6 +21,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Event
 from typing import Callable, Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -30,23 +31,18 @@ from deploy.docker.runtime_config import RuntimeConfigError, RuntimeSnapshot, _r
 from deploy.envfile import ConfigError, atomic_write
 
 STATE_PATH = Path("output/meta/docker-scheduler.json")
-# Compatibility names; effective settings come from each runtime snapshot.
-TIMEZONE = ZoneInfo("Asia/Shanghai")
-CRAWLER_MINUTE = 0
-PUSH_TIMES = {"07:00", "12:00", "18:00", "22:00"}
-WEEKLY_WEEKDAY = 6
-WEEKLY_HOUR = 12
-WEEKLY_MINUTE = 30
 POLL_SECONDS = 20
-MAX_ATTEMPTS_PER_WINDOW = 3
 PARTIAL_EMAIL_EXIT_CODE = 6
 STOP = False
+STOP_EVENT = Event()
+ACTIVE_SCHEDULER = None
 # At most one completion/task/UTC minute: 4096 entries retain at least 68 hours,
 # longer than IANA's largest backward offset transition (24 hours). No secrets
 # are stored. Old top-level task markers remain for state/API compatibility.
 MAX_COMPLETED_WINDOWS = 4096
 MAX_STATE_BYTES = 4 * 1024 * 1024
 TASKS = ("crawler", "weekly", "backup")
+CHILD_SHUTDOWN_TIMEOUT = 5.0
 
 
 class SchedulerStateError(ValueError):
@@ -57,6 +53,9 @@ class SchedulerStateError(ValueError):
 def _stop(_signum: int, _frame: object) -> None:
     global STOP
     STOP = True
+    STOP_EVENT.set()
+    if ACTIVE_SCHEDULER is not None:
+        ACTIVE_SCHEDULER._forward_stop(_signum)
 
 
 def _parse_marker(value: object, *, utc: bool | None = None) -> datetime:
@@ -138,9 +137,17 @@ def _save_state(state: dict) -> None:
         raise SchedulerStateError() from None
 
 
-def _run(name: str, command: list[str], marker: str, state: dict,
-         env: Mapping[str, str] | None = None, *, window: dict[str, str] | None = None) -> bool:
-    """Keep the original four-argument API; scheduler supplies env and window."""
+class RunningTask:
+    def __init__(self, name: str, marker: str, process: subprocess.Popen,
+                 window: dict[str, str] | None):
+        self.name = name
+        self.marker = marker
+        self.process = process
+        self.window = window
+
+
+def _record_completion(name: str, marker: str, state: dict,
+                       *, window: dict[str, str] | None = None) -> None:
     windows = list(state.get("_windows", {}).get(name, []))
     if window is not None and not windows and name in state:
         # Preserve the only known pre-history completion before replacing its
@@ -155,20 +162,6 @@ def _run(name: str, command: list[str], marker: str, state: dict,
         if previous_utc < window["utc"]:
             windows.append({"utc": previous_utc, "local": previous.astimezone(zone).strftime("%Y-%m-%dT%H:%M"),
                             "timezone": zone.key})
-    print(f"[scheduler] starting {name}: {marker}", flush=True)
-    try:
-        kwargs = {"env": dict(env)} if env is not None else {}
-        result = subprocess.run(command, check=False, **kwargs)
-    except OSError:
-        print(f"[scheduler] {name} could not start; it remains eligible for retry", flush=True)
-        return False
-    print(f"[scheduler] {name} exited with {result.returncode}", flush=True)
-    partial = name == "weekly" and result.returncode == PARTIAL_EMAIL_EXIT_CODE
-    if partial:
-        print("[scheduler] weekly partially delivered; no automatic whole-task retry", flush=True)
-    elif result.returncode != 0:
-        print(f"[scheduler] {name} failed; it remains eligible for retry", flush=True)
-        return False
     state[name] = marker
     if window is not None:
         windows.append(dict(window))
@@ -178,7 +171,6 @@ def _run(name: str, command: list[str], marker: str, state: dict,
         # do not persist an old external ledger with now-stale last markers.
         state.pop("_windows", None)
     _save_state(state)
-    return not partial
 
 
 class Scheduler:
@@ -198,6 +190,83 @@ class Scheduler:
         self.error_code: str | None = None
         self.invalid = False
         self.poll_seconds = POLL_SECONDS
+        self.running: dict[str, RunningTask] = {}
+
+    def _reap_children(self) -> None:
+        """Collect finished children without ever waiting on a live one."""
+        for name, task in list(self.running.items()):
+            returncode = task.process.poll()
+            if returncode is None:
+                continue
+            del self.running[name]
+            print(f"[scheduler] {name} exited with {returncode}", flush=True)
+            partial = name == "weekly" and returncode == PARTIAL_EMAIL_EXIT_CODE
+            if partial:
+                print("[scheduler] weekly partially delivered; no automatic whole-task retry", flush=True)
+            elif returncode != 0:
+                print(f"[scheduler] {name} failed; it remains eligible for retry", flush=True)
+                continue
+            _record_completion(name, task.marker, self.state, window=task.window)
+
+    def _spawn(self, name: str, command: list[str], marker: str,
+               env: Mapping[str, str], *, window: dict[str, str] | None = None) -> bool:
+        """Start one independently pollable child task."""
+        if name in self.running:
+            return False
+        print(f"[scheduler] starting {name}: {marker}", flush=True)
+        try:
+            process = subprocess.Popen(command, env=dict(env))
+        except OSError:
+            print(f"[scheduler] {name} could not start; it remains eligible for retry", flush=True)
+            return False
+        self.running[name] = RunningTask(name, marker, process, window)
+        # Reap an already-finished child without making the dispatch path
+        # synchronous; real long-running children still remain in the slot.
+        self._reap_children()
+        return True
+
+    def shutdown(self) -> None:
+        """Bound both termination stages; state write failures never skip cleanup."""
+        failure = None
+
+        def reap():
+            nonlocal failure
+            try:
+                self._reap_children()
+            except SchedulerStateError as error:
+                failure = error
+
+        self._forward_stop()
+        deadline = time.monotonic() + CHILD_SHUTDOWN_TIMEOUT
+        while self.running and time.monotonic() < deadline:
+            reap()
+            if self.running:
+                time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+        for task in self.running.values():
+            if task.process.poll() is None:
+                try:
+                    task.process.kill()
+                except ProcessLookupError:
+                    pass
+        # SIGKILL delivery and waitpid still need time after the grace deadline.
+        kill_deadline = time.monotonic() + 2.0
+        for task in list(self.running.values()):
+            try:
+                task.process.wait(timeout=max(0.0, kill_deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                print(f"[scheduler] {task.name} did not exit after SIGKILL", flush=True)
+        reap()
+        if failure is not None:
+            raise failure
+
+    def _forward_stop(self, signum: int = signal.SIGTERM) -> None:
+        """Pass the shutdown signal to every live child immediately."""
+        for task in self.running.values():
+            if task.process.poll() is None:
+                try:
+                    task.process.send_signal(signum)
+                except ProcessLookupError:
+                    pass
 
     def _refresh(self, now: datetime | None) -> tuple[RuntimeSnapshot, datetime, str] | None:
         try:
@@ -215,17 +284,17 @@ class Scheduler:
         actual_now = local_now.astimezone(timezone.utc)
         actual_marker = actual_now.strftime("%Y-%m-%dT%H:%MZ")
         changed = self.signature != settings.timing_signature
-        if changed or self.invalid:
-            # New backup opt-in never backfills its first observed minute,
-            # including legacy env-only mode. Existing business tasks retain
-            # their historical immediate-start behavior in that mode.
+        rearming = self.invalid or (changed and self.signature is not None)
+        if rearming:
+            # Startup can dispatch the current minute; a hot change or recovery
+            # from invalid configuration must not retroactively trigger it.
             self.backup_blocked_minute = actual_marker
-        if snapshot.external and (changed or self.invalid):
-            # Suppress the whole current minute, not only this poll/dispatch.
-            self.blocked_minute = actual_marker
+            if snapshot.external:
+                self.blocked_minute = actual_marker
         if changed or self.invalid:
             print("[scheduler] configuration accepted" +
-                  ("; current minute is not backfilled" if snapshot.external else "; legacy env-only mode"), flush=True)
+                  ("; current minute is not backfilled" if snapshot.external and rearming
+                   else "; initial configuration"), flush=True)
         self.signature = settings.timing_signature
         self.error_code = None
         self.invalid = False
@@ -268,6 +337,7 @@ class Scheduler:
         # Explicit now fixes time only for deterministic single-instant tests.
         # Select due business windows once, not a stale environment. Reload
         # before dispatch but never add new tasks just because a child ran long.
+        self._reap_children()
         selected = self._refresh(now)
         if selected is None:
             return self.poll_seconds
@@ -304,6 +374,8 @@ class Scheduler:
                 break
             if self._completed(name, selected_local, selected_actual):
                 continue
+            if name in self.running:
+                continue
             previous, count = self.attempts.get(name, ("", 0))
             if previous != selected_marker:
                 count = 0
@@ -311,7 +383,7 @@ class Scheduler:
                 self.attempts[name] = (selected_marker, count + 1)
                 window = ({"utc": selected_actual, "local": selected_local.strftime("%Y-%m-%dT%H:%M"),
                            "timezone": settings.timezone.key} if snapshot.external else None)
-                _run(name, commands[name], selected_marker, self.state, env=snapshot.env, window=window)
+                self._spawn(name, commands[name], selected_marker, snapshot.env, window=window)
         return self.poll_seconds
 
 
@@ -323,17 +395,35 @@ def main(base_env: Mapping[str, str] | None = None) -> int:
     except RuntimeConfigError as error:
         print(f"[scheduler] cannot start: {error}", file=sys.stderr, flush=True)
         return 2
-    signal.signal(signal.SIGTERM, _stop)
-    signal.signal(signal.SIGINT, _stop)
+    global ACTIVE_SCHEDULER, STOP
+    STOP = False
+    STOP_EVENT.clear()
+    previous_handlers = {sig: signal.signal(sig, _stop) for sig in (signal.SIGTERM, signal.SIGINT)}
+    scheduler: Scheduler | None = None
+    exit_code = 0
     try:
         scheduler = Scheduler(loader)
+        ACTIVE_SCHEDULER = scheduler
         while not STOP:
-            time.sleep(scheduler.poll())
+            delay = scheduler.poll()
+            if not STOP:
+                STOP_EVENT.wait(delay)
     except SchedulerStateError as error:
         print(f"[scheduler] cannot continue: {error}", file=sys.stderr, flush=True)
-        return 2
+        exit_code = 2
+    finally:
+        try:
+            if scheduler is not None:
+                scheduler.shutdown()
+        except SchedulerStateError as error:
+            print(f"[scheduler] cannot save completion: {error}", file=sys.stderr, flush=True)
+            exit_code = 2
+        finally:
+            ACTIVE_SCHEDULER = None
+            for sig, handler in previous_handlers.items():
+                signal.signal(sig, handler)
     print("[scheduler] stopped", flush=True)
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":

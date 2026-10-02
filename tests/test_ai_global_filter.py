@@ -5,7 +5,8 @@ import unittest
 from unittest.mock import Mock
 
 from trendradar.core.analyzer import count_word_frequency
-from trendradar.daily import NewsAnalyzer
+from trendradar.daily_flow.models import KeywordRules, ModeInput, PreparedReportInput, RSSResult
+from trendradar.daily_flow.runner import DailyRunner
 
 
 class _FakeContext:
@@ -34,26 +35,35 @@ class AiKeywordPoolTests(unittest.TestCase):
             "count": 1,
             "titles": [{"title": "AI命中RSS", "source_name": "RSS源"}],
         }]
-        analyzer = NewsAnalyzer.__new__(NewsAnalyzer)
+        analyzer = DailyRunner.__new__(DailyRunner)
         analyzer.ctx = _FakeContext(hotlist_stats)
+        analyzer.ctx.count_frequency = Mock(wraps=analyzer.ctx.count_frequency)
         analyzer._get_mode_strategy = Mock(return_value={"report_type": "当前榜单"})
         analyzer._run_ai_analysis = Mock(return_value=None)
 
-        analyzer._run_analysis_pipeline(
-            data_source={"source": {"AI命中标题": {}, "无关键词标题": {}}},
+        prepared = PreparedReportInput(
             mode="current",
-            title_info={},
-            new_titles={},
-            word_groups=[],
-            filter_words=[],
-            id_to_name={"source": "测试源"},
-            global_filters=["震惊"],
-            rss_items=rss_stats,
-            raw_rss_items=[{"title": "未命中关键词的原始RSS"}],
-            standalone_data={"platforms": []},
-            schedule=object(),
+            hotlist=ModeInput(
+                results={"source": {"AI命中标题": {}, "无关键词标题": {}}},
+                id_to_name={"source": "测试源"}, title_info={}, new_titles={},
+            ),
+            keywords=KeywordRules(word_groups=[], filter_words=[], global_filters=["震惊"]),
+            rss=RSSResult(stats=rss_stats, raw_items=[{"title": "未命中关键词的原始RSS"}]),
+            standalone={"platforms": []}, quiet=True,
         )
+        schedule = object()
+        artifacts = analyzer.analyze_report(prepared, schedule)
 
+        analyzer.ctx.count_frequency.assert_called_once_with(
+            prepared.hotlist.results, [], [], prepared.hotlist.id_to_name, {}, {},
+            mode="current", global_filters=["震惊"], quiet=True,
+        )
+        analyzer._run_ai_analysis.assert_called_once_with(
+            hotlist_stats, rss_stats, "current", "当前榜单", prepared.hotlist.id_to_name,
+            schedule=schedule, standalone_data=prepared.standalone,
+        )
+        self.assertIs(artifacts.stats, hotlist_stats)
+        self.assertIsNone(artifacts.html_file)
         call = analyzer._run_ai_analysis.call_args
         self.assertIs(call.args[0], hotlist_stats)
         self.assertIs(call.args[1], rss_stats)

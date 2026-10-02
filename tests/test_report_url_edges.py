@@ -1,7 +1,7 @@
 """Report URLs degrade to escaped titles instead of aborting the HTML report."""
 import unittest
 
-from trendradar.report import html as report_html
+from trendradar.report.daily import render_report_body
 from trendradar.report.helpers import safe_report_url
 
 
@@ -41,7 +41,7 @@ class ReportUrlEdgeTests(unittest.TestCase):
                 ],
             }],
         }
-        rendered = report_html._render_report_body(report, region_order=["hotlist"])
+        rendered = render_report_body(report, region_order=["hotlist"])
         self.assertIn("坏链接 &lt;b&gt;仍保留&lt;/b&gt;", rendered)
         self.assertNotIn("https://[invalid", rendered)
         self.assertNotIn("<b>仍保留</b>", rendered)
@@ -59,7 +59,7 @@ class ReportUrlEdgeTests(unittest.TestCase):
             "total_new_count": 1,
             "stats": [],
         }
-        rendered = report_html._render_report_body(report, region_order=["new_items"])
+        rendered = render_report_body(report, region_order=["new_items"])
         self.assertIn("新增标题", rendered)
         self.assertNotIn('<a href="', rendered)
         self.assertNotIn("https://[invalid", rendered)

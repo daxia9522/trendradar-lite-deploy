@@ -2,7 +2,6 @@
 import importlib.util
 import io
 import smtplib
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -10,19 +9,42 @@ from contextlib import redirect_stdout
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
+from zoneinfo import ZoneInfo
 
 from trendradar.core.scheduler import ResolvedSchedule
-from trendradar.daily import NewsAnalyzer
+from trendradar.daily_flow.runner import DailyRunner
 from trendradar.notification import senders
 from trendradar.notification.dispatcher import NotificationDispatcher
 from weekly_report import weekly_ai_report_email as weekly
 
 
 ROOT = Path(__file__).resolve().parents[1]
+TEST_TIMEZONE = ZoneInfo("Asia/Shanghai")
 SPEC = importlib.util.spec_from_file_location("partial_delivery_scheduler", ROOT / "deploy/docker/scheduler.py")
 scheduler = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(scheduler)
 REFUSED = {"two@example.invalid": (550, b"synthetic rejection")}
+
+
+class FakePopen:
+    """Pollable child double for Docker scheduler tests."""
+
+    def __init__(self, returncode=0, *, running=False):
+        self.returncode = None if running else returncode
+        self.signals = []
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def send_signal(self, signum):
+        self.signals.append(signum)
+        self.returncode = -signum
+
+    def kill(self):
+        self.returncode = -9
 
 
 def smtp_server(result):
@@ -53,7 +75,7 @@ class PartialDeliveryFlowTests(unittest.TestCase):
 
     def daily_analyzer(self):
         # Avoid constructor setup, storage, crawling, AI and all real environment loads.
-        analyzer = NewsAnalyzer.__new__(NewsAnalyzer)
+        analyzer = DailyRunner.__new__(DailyRunner)
         analyzer.report_mode = "current"
         analyzer.ctx = Mock()
         analyzer.ctx.config = self.config
@@ -71,7 +93,7 @@ class PartialDeliveryFlowTests(unittest.TestCase):
         server = smtp_server(smtp_result)
         with patch.object(senders.smtplib, "SMTP_SSL", return_value=server) as factory:
             with patch.object(senders.time, "sleep") as sleep:
-                with patch("trendradar.daily._is_manual_force_run", return_value=False), redirect_stdout(io.StringIO()):
+                with patch.object(analyzer, "_manual_force_run", return_value=False), redirect_stdout(io.StringIO()):
                     results = [analyzer._send_notification_if_needed(
                         [{"count": 1, "titles": [{"title": "synthetic news"}]}],
                         "current", html_file_path=str(self.report), schedule=schedule,
@@ -97,17 +119,17 @@ class PartialDeliveryFlowTests(unittest.TestCase):
         self.assertEqual(factory.call_count, 1)
         gate.record_execution.assert_called_once_with("morning", "push", "2026-09-21")
 
-    def test_dispatcher_partial_flag_is_reset_for_each_dispatch(self):
+    def test_dispatcher_returns_independent_partial_results_for_each_send(self):
         dispatcher = NotificationDispatcher(self.config, self.clock)
         server = smtp_server({})
         server.send_message.side_effect = [REFUSED, {}, smtplib.SMTPDataError(554, b"rejected")]
-        flags, results = [], []
+        results = []
         with patch.object(senders.smtplib, "SMTP_SSL", return_value=server), redirect_stdout(io.StringIO()):
             for _ in range(3):
-                results.append(dispatcher.dispatch_all("daily", str(self.report)))
-                flags.append(dispatcher.email_partially_delivered)
-        self.assertEqual(results, [{"email": False}, {"email": True}, {"email": False}])
-        self.assertEqual(flags, [True, False, False])
+                results.append(dispatcher.send_report("daily", str(self.report)))
+        self.assertEqual([result.configured for result in results], [True, True, True])
+        self.assertEqual([result.sent for result in results], [False, True, False])
+        self.assertEqual([result.partially_delivered for result in results], [True, False, False])
         self.assertEqual(server.send_message.call_count, 3)
 
     def weekly_exit(self, smtp_result):
@@ -128,7 +150,7 @@ class PartialDeliveryFlowTests(unittest.TestCase):
             "parse_structured_report": Mock(return_value=("synthetic report", [])),
             "keywords_from_themes": Mock(return_value=["甲", "乙", "丙", "丁", "戊"]),
             "extract_headline_keywords": Mock(side_effect=AssertionError("unexpected keyword AI path")),
-            "render_html": Mock(return_value="<html>synthetic weekly</html>"),
+            "render_weekly_html": Mock(return_value="<html>synthetic weekly</html>"),
             "build_rule_entity_headlines": Mock(return_value=[]),
         }
         argv = ["weekly", "--start", "2026-09-15", "--end", "2026-09-21"]
@@ -139,6 +161,7 @@ class PartialDeliveryFlowTests(unittest.TestCase):
         replacements["load_runtime_env"].assert_called_once_with()
         client.chat.assert_called_once()
         replacements["extract_headline_keywords"].assert_not_called()
+        replacements["render_weekly_html"].assert_called_once()
         self.assertEqual(factory.call_count, 1)
         sleep.assert_not_called()
         return result
@@ -155,11 +178,16 @@ class PartialDeliveryFlowTests(unittest.TestCase):
     def test_docker_partial_weekly_is_terminal_but_not_success(self):
         state = {}
         output = io.StringIO()
-        with patch.object(scheduler.subprocess, "run", return_value=subprocess.CompletedProcess([], weekly.PARTIAL_EMAIL_EXIT_CODE)):
+        now = datetime(2026, 9, 20, 12, 30, tzinfo=TEST_TIMEZONE)
+        values = {"TZ": TEST_TIMEZONE.key, "CRAWLER_MINUTE": "5",
+                  "WEEKLY_WEEKDAY": "6", "WEEKLY_HOUR": "12", "WEEKLY_MINUTE": "30"}
+        clock = scheduler.Scheduler(lambda: scheduler.load_runtime_config(values), state=state,
+                                    clock=lambda: now)
+        with patch.object(scheduler.subprocess, "Popen",
+                          return_value=FakePopen(weekly.PARTIAL_EMAIL_EXIT_CODE)):
             with patch.object(scheduler, "_save_state") as save, redirect_stdout(output):
-                result = scheduler._run("weekly", ["synthetic-command"], "marker", state)
-        self.assertFalse(result)
-        self.assertEqual(state, {"weekly": "marker"})
+                clock.poll()
+        self.assertEqual(state, {"weekly": now.strftime("%Y-%m-%dT%H:%M")})
         save.assert_called_once_with(state)
         self.assertIn("partially delivered", output.getvalue())
         self.assertIn("no automatic whole-task retry", output.getvalue())
@@ -169,15 +197,24 @@ class PartialDeliveryFlowTests(unittest.TestCase):
         for name, code in (("weekly", 1), ("weekly", 2), ("weekly", 3), ("weekly", 4), ("weekly", 5), ("crawler", 6)):
             with self.subTest(name=name, code=code):
                 state = {}
-                with patch.object(scheduler.subprocess, "run", return_value=subprocess.CompletedProcess([], code)):
+                if name == "weekly":
+                    now = datetime(2026, 9, 20, 12, 30, tzinfo=TEST_TIMEZONE)
+                    values = {"TZ": TEST_TIMEZONE.key, "CRAWLER_MINUTE": "5",
+                              "WEEKLY_WEEKDAY": "6", "WEEKLY_HOUR": "12", "WEEKLY_MINUTE": "30"}
+                else:
+                    now = datetime(2026, 9, 20, 12, 5, tzinfo=TEST_TIMEZONE)
+                    values = {"TZ": TEST_TIMEZONE.key, "CRAWLER_MINUTE": "5",
+                              "WEEKLY_WEEKDAY": "6", "WEEKLY_HOUR": "12", "WEEKLY_MINUTE": "30"}
+                clock = scheduler.Scheduler(lambda: scheduler.load_runtime_config(values), state=state,
+                                            clock=lambda: now)
+                with patch.object(scheduler.subprocess, "Popen", return_value=FakePopen(code)):
                     with patch.object(scheduler, "_save_state") as save, redirect_stdout(io.StringIO()):
-                        result = scheduler._run(name, ["synthetic-command"], "marker", state)
-                self.assertFalse(result)
+                        clock.poll()
                 self.assertEqual(state, {})
                 save.assert_not_called()
 
     def test_docker_next_poll_does_not_repeat_partially_delivered_weekly(self):
-        now = datetime(2026, 9, 20, 12, 30, tzinfo=scheduler.TIMEZONE)
+        now = datetime(2026, 9, 20, 12, 30, tzinfo=TEST_TIMEZONE)
         ticks = []
 
         def next_poll(_seconds):
@@ -187,17 +224,19 @@ class PartialDeliveryFlowTests(unittest.TestCase):
 
         state = {}
         replacements = {
-            "STOP": False, "CRAWLER_MINUTE": 0, "PUSH_TIMES": set(),
-            "WEEKLY_WEEKDAY": 6, "WEEKLY_HOUR": 12, "WEEKLY_MINUTE": 30,
+            "STOP": False,
             "_load_state": Mock(return_value=state), "_save_state": Mock(),
             "datetime": Mock(now=Mock(return_value=now)),
         }
+        base = {"TZ": TEST_TIMEZONE.key, "CRAWLER_MINUTE": "5",
+                "WEEKLY_WEEKDAY": "6", "WEEKLY_HOUR": "12", "WEEKLY_MINUTE": "30"}
         with patch.multiple(scheduler, **replacements):
             with patch.object(scheduler.signal, "signal"):
-                with patch.object(scheduler.time, "sleep", side_effect=next_poll):
-                    with patch.object(scheduler.subprocess, "run", return_value=subprocess.CompletedProcess([], weekly.PARTIAL_EMAIL_EXIT_CODE)) as run:
+                with patch.object(scheduler.STOP_EVENT, "wait", side_effect=next_poll):
+                    with patch.object(scheduler.subprocess, "Popen",
+                                      return_value=FakePopen(weekly.PARTIAL_EMAIL_EXIT_CODE)) as run:
                         with redirect_stdout(io.StringIO()):
-                            result = scheduler.main()
+                            result = scheduler.main(base)
         self.assertEqual(result, 0)
         self.assertEqual(len(ticks), 2)
         self.assertEqual(run.call_count, 1)

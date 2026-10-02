@@ -49,3 +49,5 @@ jobs:
         run: docker compose config --quiet
       - name: Build image
         run: docker build --tag trendradar-lite-deploy:ci .
+      - name: Run image smoke tests (offline)
+        run: bash .github/scripts/container_smoke.sh trendradar-lite-deploy:ci

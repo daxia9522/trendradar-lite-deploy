@@ -18,11 +18,15 @@ from trendradar.utils.time import DEFAULT_TIMEZONE
 
 
 def _get_env_bool(key: str) -> Optional[bool]:
-    """从环境变量获取布尔值，如果未设置返回 None"""
+    """读取显式布尔值；空值沿用 YAML，拼写错误立即报错。"""
     value = os.environ.get(key, "").strip().lower()
     if not value:
         return None
-    return value in ("true", "1")
+    if value in ("true", "1"):
+        return True
+    if value in ("false", "0"):
+        return False
+    raise ValueError(f"{key} 必须为 true/false/1/0")
 
 
 def _get_env_int(key: str, default: int = 0) -> int:
@@ -138,11 +142,12 @@ def _load_app_config(config_data: Dict) -> Dict:
     """加载应用配置"""
     app_config = config_data.get("app", {})
     advanced = config_data.get("advanced", {})
+    debug_env = _get_env_bool("DEBUG")
     return {
         "VERSION_CHECK_URL": advanced.get("version_check_url", ""),
         "CONFIGS_VERSION_CHECK_URL": advanced.get("configs_version_check_url", ""),
         "TIMEZONE": _get_env_str("TIMEZONE") or _get_env_str("TZ") or app_config.get("timezone", DEFAULT_TIMEZONE),
-        "DEBUG": _get_env_bool("DEBUG") if _get_env_bool("DEBUG") is not None else advanced.get("debug", False),
+        "DEBUG": debug_env if debug_env is not None else advanced.get("debug", False),
     }
 
 

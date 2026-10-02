@@ -21,9 +21,13 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from envfile import ConfigError, EnvDocument, read_env, write_env
 from backup_settings import BackupConfigError, DEFAULT_BACKUP_TIME, DEFAULT_LOOKBACK_DAYS, load_backup_settings
+from delivery_windows import DELIVERY_DEFAULTS, DeliveryWindowError, delivery_times
 
 
 SECRET_FIELDS = {"EMAIL_PASSWORD", "AI_API_KEY", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"}
+APP_BOOLEAN_KEYS = ("DEBUG", "SORT_BY_POSITION_FIRST", "SCHEDULE_ENABLED", "AI_ANALYSIS_ENABLED",
+                    "STORAGE_TXT_ENABLED", "STORAGE_HTML_ENABLED", "PULL_ENABLED")
+BOOLEAN_KEYS = (*APP_BOOLEAN_KEYS, "R2_BACKUP_ENABLED")
 BACKUP_DEFAULTS = {"R2_BACKUP_ENABLED": "false", "R2_BACKUP_TIME": DEFAULT_BACKUP_TIME,
                    "R2_BACKUP_LOOKBACK_DAYS": str(DEFAULT_LOOKBACK_DAYS)}
 FIELDS = [
@@ -32,7 +36,7 @@ FIELDS = [
     ("EMAIL_TO", "收件邮箱", True, "多个地址用逗号分隔"),
     ("EMAIL_SMTP_SERVER", "SMTP 服务器", False, "留空则按发件邮箱自动识别"),
     ("EMAIL_SMTP_PORT", "SMTP 端口", False, "留空则按发件邮箱自动识别"),
-    ("AI_ANALYSIS_ENABLED", "启用日报 AI 分析", False, "true / false"),
+    ("AI_ANALYSIS_ENABLED", "启用日报 AI 分析", False, "true / false / 1 / 0；留空沿用 YAML"),
     ("AI_MODEL", "AI 模型", False, "openai/gpt-4o-mini"),
     ("AI_API_KEY", "AI API Key", False, ""),
     ("AI_API_KEY_FILE", "AI API Key 文件", False, "native Linux 可填写服务器上的密钥文件路径"),
@@ -84,6 +88,9 @@ def render(
             # The raw value stays server-side only; blank submits keep the draft.
             value = ""
             placeholder = "已设置，含凭据，不回显；留空保持不变，输入 :clear 清空"
+        if boolean_field_never_renders(key, value):
+            value = ""
+            placeholder = "无效布尔值，内容隐藏；留空保持不变，输入 :clear 清空"
         field = (
             f'<label><span>{html.escape(label)}{" *" if required else ""}</span>'
             f'<input name="{key}" type="{input_type}" '
@@ -115,10 +122,10 @@ button{{font:inherit;padding:11px 16px;background:#1769aa;color:white;border:0;b
 {notice}{error}<form method="post">{section_html}<button type="submit">保存配置并继续安装</button></form></main></html>"""
 
 
-def validate(values: dict[str, str], deployment: str = "linux") -> list[str]:
+def validate(values: dict[str, str], deployment: str = "linux", *, check_delivery_windows: bool = True) -> list[str]:
     fields = _fields_for(deployment)
     errors = [f"请填写：{label}" for key, label, required, _hint in fields if required and not values.get(key)]
-    if values.get("AI_ANALYSIS_ENABLED", "false").lower() == "true":
+    if values.get("AI_ANALYSIS_ENABLED", "").strip().lower() in ("true", "1"):
         has_key = values.get("AI_API_KEY") or (
             deployment != "docker" and values.get("AI_API_KEY_FILE")
         )
@@ -128,10 +135,16 @@ def validate(values: dict[str, str], deployment: str = "linux") -> list[str]:
     if bool(values.get("EMAIL_SMTP_SERVER")) != bool(values.get("EMAIL_SMTP_PORT")):
         errors.append("EMAIL_SMTP_SERVER 和 EMAIL_SMTP_PORT 必须同时填写，或同时留空")
     for key, *_ in fields:
-        errors.extend(validate_field(key, values.get(key, "")))
-    times = [values.get(key) for key in TIME_FIELDS if values.get(key)]
-    if len(times) != len(set(times)):
-        errors.append("四个推送时间不能重复")
+        if key not in APP_BOOLEAN_KEYS:
+            errors.extend(validate_field(key, values.get(key, "")))
+    errors.extend(validate_app_booleans(values))
+    if check_delivery_windows:
+        try:
+            delivery_times(values)
+        except DeliveryWindowError as error:
+            if error.code == "overlap":
+                errors.append("四个推送时间不能重复或位于同一小时：推送窗口从触发时间持续至该小时 :59（未填写项使用默认时间）")
+            # validate_field already reports malformed times with the field name.
     if values.get("TIMEZONE") and values.get("TZ") and values["TIMEZONE"] != values["TZ"]:
         errors.append("TIMEZONE 与 TZ 冲突；请在时间菜单确认统一时区后保存")
     try:
@@ -141,7 +154,13 @@ def validate(values: dict[str, str], deployment: str = "linux") -> list[str]:
     return errors
 
 
-TIME_FIELDS = ("MORNING_PUSH_TIME", "NOON_PUSH_TIME", "EVENING_PUSH_TIME", "DAILY_SUMMARY_TIME")
+TIME_FIELDS = tuple(DELIVERY_DEFAULTS)
+
+
+def validate_app_booleans(values: dict[str, str]) -> list[str]:
+    """Check preserved/hidden app switches too, without requiring menu fields."""
+    return [error for key in APP_BOOLEAN_KEYS
+            for error in validate_field(key, values.get(key, ""))]
 
 
 def validate_field(key: str, value: str) -> list[str]:
@@ -169,10 +188,8 @@ def validate_field(key: str, value: str) -> list[str]:
             return [f"{key} 必须在 {minimum}-{maximum} 之间"]
     if key in (*TIME_FIELDS, "R2_BACKUP_TIME") and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value):
         return [f"{key} 必须使用 HH:MM 格式"]
-    if key == "AI_ANALYSIS_ENABLED" and value.lower() not in ("true", "false"):
-        return ["AI_ANALYSIS_ENABLED 必须是 true 或 false"]
-    if key == "R2_BACKUP_ENABLED" and value.lower() not in ("true", "false", "1", "0"):
-        return ["R2_BACKUP_ENABLED 必须是 true 或 false"]
+    if key in BOOLEAN_KEYS and value.strip().lower() not in ("", "true", "false", "1", "0"):
+        return [f"{key} 必须是 true/false/1/0，或留空"]
     if key == "STORAGE_BACKEND" and value not in ("local", "remote", "auto"):
         return ["STORAGE_BACKEND 必须是 local、remote 或 auto"]
     if key in ("AI_API_BASE", "PLATFORMS_API_URL", "PLATFORMS_API_FALLBACK_URLS", "S3_ENDPOINT_URL"):
@@ -213,13 +230,10 @@ def _write_timer(path: Path, description: str, calendars: list[str]) -> None:
 
 
 def write_systemd_timer(path: Path, values: dict[str, str]) -> None:
+    # This legacy generator is callable without the full form validation.
+    # Reject overlapping windows before creating directories or writing bytes.
+    push_times = delivery_times(values)
     crawler_minute = int(values.get("CRAWLER_MINUTE") or "5")
-    push_times = [
-        values.get("MORNING_PUSH_TIME", "07:00"),
-        values.get("NOON_PUSH_TIME", "12:00"),
-        values.get("EVENING_PUSH_TIME", "18:00"),
-        values.get("DAILY_SUMMARY_TIME", "22:00"),
-    ]
     timezone = values.get("TZ") or "Asia/Shanghai"
     calendars = [f"*-*-* *:{crawler_minute:02d}:00 {timezone}"]
     calendars.extend(f"*-*-* {value}:00 {timezone}" for value in push_times)
@@ -265,7 +279,7 @@ def _prompt_field(
     elif is_secret:
         note = hint
     elif has_current:
-        note = f"当前 {current[key]}，回车保持不变"
+        note = f"当前 {display_value(key, current[key])}，回车保持不变"
     else:
         note = hint
     label_text = f"{label}{' *' if required else ''}"
@@ -321,8 +335,13 @@ FIELD_MAP["WEEKLY_TIME"] = ("WEEKLY_TIME", "周报时间", False, "HH:MM")
 def display_value(key: str, value: str) -> str:
     if key in SECRET_FIELDS:
         return "<已设置，隐藏>" if value else "<未设置>"
-    if key in ("AI_ANALYSIS_ENABLED", "R2_BACKUP_ENABLED") and value.lower() in ("true", "false", "1", "0"):
-        return "已启用" if value.lower() in ("true", "1") else "已停用"
+    if key in BOOLEAN_KEYS:
+        if validate_field(key, value):
+            return "<无效布尔值，内容隐藏>"
+        normalized = value.strip().lower()
+        if not normalized:
+            return "<使用程序配置>" if key in APP_BOOLEAN_KEYS else "已停用"
+        return "已启用" if normalized in ("true", "1") else "已停用"
     if key == "WEEKLY_WEEKDAY" and value in tuple(str(day) for day in range(7)):
         return f"周{'一二三四五六日'[int(value)]}（{value}）"
     if "URL" in key or key == "AI_API_BASE":
@@ -360,6 +379,11 @@ def carries_credentials(value: str) -> bool:
 def url_field_never_renders(key: str, value: str) -> bool:
     """Public URL inputs may carry bearer credentials; never echo those back."""
     return key in CREDENTIAL_URL_FIELDS and carries_credentials(value)
+
+
+def boolean_field_never_renders(key: str, value: str) -> bool:
+    """A secret accidentally pasted into a switch must not reach a preview."""
+    return key in BOOLEAN_KEYS and bool(validate_field(key, value))
 
 
 def changes_between(before: dict[str, str], after: dict[str, str]) -> dict[str, str]:
@@ -500,12 +524,15 @@ def configure_terminal(output: Path, deployment: str = "linux", *, application=N
             if not schedule_changed:
                 check_values.setdefault("TZ", values.get("TIMEZONE") or "Asia/Shanghai")
                 check_values.pop("TIMEZONE", None)
-            errors = validate(check_values)
+            # NativeSchedule.prepare validates resolved YAML/env times before
+            # any writes; stock defaults here would misclassify custom YAML.
+            # An unrelated mail/AI save must not normalize a legacy schedule.
+            errors = validate(check_values, check_delivery_windows=False)
             if errors:
                 print("\n".join(errors), flush=True)
                 continue
             if schedule_changed and app.schedule.warnings:
-                print("时间配置将规范化：四次推送窗口收敛到指定分钟，timer 显式使用 TZ。", flush=True)
+                print("时间配置将规范化：四次推送窗口从指定触发时间持续至该小时 :59，timer 显式使用 TZ。", flush=True)
                 for warning in app.schedule.warnings:
                     print(f"警告：{warning}", flush=True)
                 if input("确认规范化时间配置？[y/N]: ").strip().lower() != "y":
@@ -650,13 +677,14 @@ def serve(
                 key: form.get(key, [""])[0] if key in SECRET_FIELDS else form.get(key, [""])[0].strip()
                 for key, *_rest in _fields_for(deployment)
             })
-            for key in CREDENTIAL_URL_FIELDS:
-                if key not in form:
+            for key in (*CREDENTIAL_URL_FIELDS, *BOOLEAN_KEYS):
+                if key not in form and key not in BOOLEAN_KEYS:
                     continue
-                entered = form[key][0].strip()
+                entered = form.get(key, [""])[0].strip()
                 if entered == CLEAR_SENTINEL:
                     submitted[key] = ""
-                elif not entered and carries_credentials(current.get(key, "")):
+                elif not entered and (url_field_never_renders(key, current.get(key, ""))
+                                      or boolean_field_never_renders(key, current.get(key, ""))):
                     # Redacted input submitted unchanged: keep the server-side draft.
                     submitted[key] = current[key]
             for key in SECRET_FIELDS:
@@ -677,7 +705,15 @@ def serve(
                     if not check_values.get("TZ"):
                         check_values["TZ"] = submitted.get("TIMEZONE") or "Asia/Shanghai"
                     check_values.pop("TIMEZONE", None)
-            errors = validate(check_values, deployment=deployment)
+            # Installed native schedules use YAML/env resolution in prepare,
+            # not the stock defaults used by fresh setup and Docker.
+            # Keep redacted switch drafts after rejection: an unchanged blank
+            # retry must not turn an invalid value into a YAML fallback.
+            for key in BOOLEAN_KEYS:
+                if key in submitted:
+                    current[key] = submitted[key]
+            errors = validate(check_values, deployment=deployment,
+                              check_delivery_windows=application is None)
             if errors:
                 self.send_page(self.page(submitted, errors), 400)
                 return

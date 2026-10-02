@@ -24,6 +24,34 @@ ENABLED = {
 }
 
 
+class FakePopen:
+    """Pollable child double; it never makes the scheduler wait."""
+
+    def __init__(self, returncode=0, *, running=False):
+        self.returncode = None if running else returncode
+        self.signals = []
+        self.command = None
+        self.env = None
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def send_signal(self, signum):
+        self.signals.append(signum)
+        self.returncode = -signum
+
+    def kill(self):
+        self.returncode = -9
+
+
+def fake_process(value):
+    """Turn a legacy CompletedProcess-shaped result into a Popen double."""
+    return FakePopen(value.returncode if isinstance(value, subprocess.CompletedProcess) else value)
+
+
 class DockerBackupTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -48,7 +76,7 @@ class DockerBackupTests(unittest.TestCase):
         return datetime(2026, 9, 20, hour, minute, second, tzinfo=timezone.utc)
 
     def successful(self):
-        return patch.object(scheduler.subprocess, "run", return_value=subprocess.CompletedProcess([], 0))
+        return patch.object(scheduler.subprocess, "Popen", return_value=FakePopen(0))
 
     def test_only_three_explicit_backup_keys_are_supported(self):
         keys = {"R2_BACKUP_ENABLED", "R2_BACKUP_TIME", "R2_BACKUP_LOOKBACK_DAYS"}
@@ -121,11 +149,11 @@ class DockerBackupTests(unittest.TestCase):
         self.assertEqual(self.clock.state["backup"], "2026-09-21T23:40Z")
         self.assertEqual(len(self.clock.state["_windows"]["backup"]), 2)
 
-    def test_first_start_and_enabling_current_minute_do_not_backfill(self):
+    def test_first_start_runs_current_minute_but_enabling_does_not_backfill(self):
         with self.successful() as run:
             self.clock.poll(self.at())
             self.clock.poll(self.at(second=20))
-            run.assert_not_called()
+            self.assertEqual(run.call_count, 1)
         self.put({"R2_BACKUP_ENABLED": "false"})
         clock = scheduler.Scheduler(lambda: runtime.load_runtime_config(self.base), state={})
         clock.poll(self.at(minute=39))
@@ -138,14 +166,14 @@ class DockerBackupTests(unittest.TestCase):
             clock.poll(self.at() + timedelta(days=1))
         self.assertEqual(run.call_count, 1)
 
-    def test_legacy_env_only_backup_also_avoids_startup_backfill(self):
+    def test_legacy_env_only_backup_runs_current_startup_minute(self):
         clock = scheduler.Scheduler(lambda: runtime.load_runtime_config(ENABLED), state={})
         with self.successful() as run:
             clock.poll(self.at())
             clock.poll(self.at(second=20))
-            run.assert_not_called()
+            self.assertEqual(run.call_count, 1)
             clock.poll(self.at() + timedelta(days=1))
-        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_count, 2)
 
     def test_missed_minutes_and_dst_spring_gap_are_not_backfilled(self):
         self.clock.poll(self.at(minute=39))
@@ -215,7 +243,8 @@ class DockerBackupTests(unittest.TestCase):
                 self.assertEqual(kwargs["env"], original)
             return subprocess.CompletedProcess(command, 0)
 
-        with patch.object(scheduler.subprocess, "run", side_effect=child) as run:
+        with patch.object(scheduler.subprocess, "Popen",
+                         side_effect=lambda command, **kwargs: fake_process(child(command, **kwargs))) as run:
             self.clock.poll(self.at())
         self.assertEqual(run.call_count, 3)
         commands = [call.args[0] for call in run.call_args_list]
@@ -239,7 +268,8 @@ class DockerBackupTests(unittest.TestCase):
                     self.put(change)
                     return subprocess.CompletedProcess(command, 0)
 
-                with patch.object(scheduler.subprocess, "run", side_effect=child) as run:
+                with patch.object(scheduler.subprocess, "Popen",
+                                 side_effect=lambda command, **kwargs: fake_process(child(command, **kwargs))) as run:
                     clock.poll(self.at())
                     clock.poll(self.at(second=20))
                 self.assertEqual(run.call_count, 1)
@@ -295,7 +325,8 @@ class DockerBackupTests(unittest.TestCase):
                 self.put({"S3_SECRET_ACCESS_KEY": "after-long-crawler"})
             return subprocess.CompletedProcess(command, 0)
 
-        with patch.object(scheduler.subprocess, "run", side_effect=child) as run:
+        with patch.object(scheduler.subprocess, "Popen",
+                         side_effect=lambda command, **kwargs: fake_process(child(command, **kwargs))) as run:
             clock.poll()
             clock.poll()
         self.assertEqual(run.call_count, 2)
@@ -315,7 +346,8 @@ class DockerBackupTests(unittest.TestCase):
             instant = self.at(second=10)
             return subprocess.CompletedProcess(command, 0)
 
-        with patch.object(scheduler.subprocess, "run", side_effect=child) as run:
+        with patch.object(scheduler.subprocess, "Popen",
+                         side_effect=lambda command, **kwargs: fake_process(child(command, **kwargs))) as run:
             clock.poll()
             instant = self.at(second=40)
             clock.poll()
@@ -324,7 +356,7 @@ class DockerBackupTests(unittest.TestCase):
 
     def test_backup_failure_code_six_retries_with_same_budget_not_weekly_partial(self):
         self.clock.poll(self.at(minute=39))
-        with patch.object(scheduler.subprocess, "run", return_value=subprocess.CompletedProcess([], 6)) as run:
+        with patch.object(scheduler.subprocess, "Popen", return_value=FakePopen(6)) as run:
             self.clock.poll(self.at())
             self.put({"S3_SECRET_ACCESS_KEY": "retry-secret"})
             for second in (10, 20, 30, 40, 50):
@@ -336,7 +368,7 @@ class DockerBackupTests(unittest.TestCase):
 
     def test_weekly_partial_still_deduplicates_and_does_not_prevent_backup(self):
         self.all_due()
-        with patch.object(scheduler.subprocess, "run", side_effect=[subprocess.CompletedProcess([], code)
+        with patch.object(scheduler.subprocess, "Popen", side_effect=[FakePopen(code)
                                                                   for code in (0, 6, 0)]) as run:
             self.clock.poll(self.at())
             self.clock.poll(self.at(second=20))

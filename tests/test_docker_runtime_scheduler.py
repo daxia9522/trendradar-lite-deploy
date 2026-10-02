@@ -13,6 +13,7 @@ from unittest.mock import patch
 from deploy.docker import scheduler
 from deploy.docker.runtime_config import RUNTIME_ENV_KEY, load_runtime_config
 from deploy.envfile import atomic_write
+from tests.fake_process import FakeProcess
 
 
 class RuntimeSchedulerTests(unittest.TestCase):
@@ -42,22 +43,22 @@ class RuntimeSchedulerTests(unittest.TestCase):
         # Sunday, so weekly is due at 12:00 UTC as well as daily collection.
         return datetime(2026, 9, 20, hour, minute, second, tzinfo=timezone.utc)
 
-    def test_startup_due_minute_is_not_backfilled_but_next_due_runs(self):
-        with patch.object(scheduler.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
+    def test_startup_due_minute_runs_once_and_next_due_runs(self):
+        with patch.object(scheduler.subprocess, "Popen", return_value=FakeProcess([], 0)) as run:
             self.clock.poll(self.at(12, 0))
             self.clock.poll(self.at(12, 0, 20))
             self.clock.poll(self.at(12, 0, 40))
-            run.assert_not_called()
+            self.assertEqual(run.call_count, 2)  # Crawler and weekly, once each.
             self.clock.poll(self.at(13, 0))
             self.clock.poll(self.at(13, 0, 20))
-        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_count, 3)
         self.assertEqual(self.clock.state["crawler"], "2026-09-20T13:00Z")
-        self.assertNotIn("weekly", self.clock.state)
-        self.assertEqual(len(self.clock.state["_windows"]["crawler"]), 1)
+        self.assertEqual(self.clock.state["weekly"], "2026-09-20T12:00Z")
+        self.assertEqual(len(self.clock.state["_windows"]["crawler"]), 2)
 
     def test_new_timing_cannot_trigger_current_minute_and_repeated_save_does_not_rearm(self):
         self.clock.poll(self.at(11, 59))
-        with patch.object(scheduler.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
+        with patch.object(scheduler.subprocess, "Popen", return_value=FakeProcess([], 0)) as run:
             self.put({"CRAWLER_MINUTE": "1", "WEEKLY_MINUTE": "1"})
             self.clock.poll(self.at(12, 1))
             self.clock.poll(self.at(12, 1, 20))
@@ -69,7 +70,7 @@ class RuntimeSchedulerTests(unittest.TestCase):
 
     def test_timezone_switch_dedup_uses_actual_minute_and_no_backfill(self):
         self.clock.poll(self.at(11, 59))
-        with patch.object(scheduler.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
+        with patch.object(scheduler.subprocess, "Popen", return_value=FakeProcess([], 0)) as run:
             self.clock.poll(self.at(12, 0))
             self.assertEqual(run.call_count, 2)
             self.put({"TZ": "Asia/Shanghai", "WEEKLY_HOUR": "20"})
@@ -92,9 +93,9 @@ class RuntimeSchedulerTests(unittest.TestCase):
                 self.put({"AI_MODEL": "openai/after", "EMAIL_TO": "new@example.invalid"},
                          remove=("AI_API_KEY",))
                 self.assertEqual(kwargs["env"], old_env)  # Running child remains unchanged.
-            return subprocess.CompletedProcess(command, 0)
+            return FakeProcess(command, 0)
 
-        with patch.object(scheduler.subprocess, "run", side_effect=child) as run:
+        with patch.object(scheduler.subprocess, "Popen", side_effect=child) as run:
             self.clock.poll(self.at(12, 0))
             self.assertEqual(run.call_count, 2)
             self.assertEqual(run.call_args_list[0].kwargs["env"]["AI_API_KEY"], "first")
@@ -108,16 +109,16 @@ class RuntimeSchedulerTests(unittest.TestCase):
 
         def child(command, **kwargs):
             atomic_write(self.path, b"TZ=invalid-synthetic-zone\n")
-            return subprocess.CompletedProcess(command, 0)
+            return FakeProcess(command, 0)
 
-        with patch.object(scheduler.subprocess, "run", side_effect=child) as run:
+        with patch.object(scheduler.subprocess, "Popen", side_effect=child) as run:
             self.clock.poll(self.at(12, 0))
             self.assertEqual(run.call_count, 1)
             self.put()
             self.clock.poll(self.at(12, 0, 20))
             self.assertEqual(run.call_count, 1)
             run.side_effect = None
-            run.return_value = subprocess.CompletedProcess([], 0)
+            run.return_value = FakeProcess([], 0)
             self.clock.poll(self.at(13, 0))
         self.assertEqual(run.call_count, 2)
 
@@ -135,7 +136,7 @@ class RuntimeSchedulerTests(unittest.TestCase):
             return snapshot
 
         self.clock.loader = loader
-        with patch.object(scheduler.subprocess, "run") as run:
+        with patch.object(scheduler.subprocess, "Popen") as run:
             self.clock.poll(self.at(12, 0))
         self.assertEqual(reads, 2)
         run.assert_not_called()
@@ -145,10 +146,10 @@ class RuntimeSchedulerTests(unittest.TestCase):
 
         def child(command, **kwargs):
             scheduler._stop(15, None)
-            return subprocess.CompletedProcess(command, 0)
+            return FakeProcess(command, 0)
 
         with patch.object(scheduler, "STOP", False):
-            with patch.object(scheduler.subprocess, "run", side_effect=child) as run:
+            with patch.object(scheduler.subprocess, "Popen", side_effect=child) as run:
                 self.clock.poll(self.at(12, 0))
         self.assertEqual(run.call_count, 1)
 
@@ -161,9 +162,9 @@ class RuntimeSchedulerTests(unittest.TestCase):
 
                 def child(command, **kwargs):
                     self.put(change)
-                    return subprocess.CompletedProcess(command, 0)
+                    return FakeProcess(command, 0)
 
-                with patch.object(scheduler.subprocess, "run", side_effect=child) as run:
+                with patch.object(scheduler.subprocess, "Popen", side_effect=child) as run:
                     clock.poll(self.at(12, 0))
                     clock.poll(self.at(12, 0, 20))
                 self.assertEqual(run.call_count, 1)
@@ -179,9 +180,9 @@ class RuntimeSchedulerTests(unittest.TestCase):
             if command[1] == "-m":
                 instant = self.at(12, 1)
                 self.put({"AI_MODEL": "openai/after-long-crawler"}, remove=("AI_API_KEY",))
-            return subprocess.CompletedProcess(command, 0)
+            return FakeProcess(command, 0)
 
-        with patch.object(scheduler.subprocess, "run", side_effect=child) as run:
+        with patch.object(scheduler.subprocess, "Popen", side_effect=child) as run:
             clock.poll()
             clock.poll()
         self.assertEqual(run.call_count, 2)
@@ -199,9 +200,9 @@ class RuntimeSchedulerTests(unittest.TestCase):
         def child(command, **kwargs):
             nonlocal instant
             instant = self.at(12, 1)
-            return subprocess.CompletedProcess(command, 0)
+            return FakeProcess(command, 0)
 
-        with patch.object(scheduler.subprocess, "run", side_effect=child) as run:
+        with patch.object(scheduler.subprocess, "Popen", side_effect=child) as run:
             clock.poll()
         self.assertEqual(run.call_count, 1)
         self.assertNotIn("weekly", clock.state)
@@ -220,10 +221,10 @@ class RuntimeSchedulerTests(unittest.TestCase):
             if command[1] == "-m":
                 instant = at(5, 32)
                 self.put({"AI_MODEL": "openai/fresh-partial"})
-                return subprocess.CompletedProcess(command, 0)
-            return subprocess.CompletedProcess(command, 6)
+                return FakeProcess(command, 0)
+            return FakeProcess(command, 6)
 
-        with patch.object(scheduler.subprocess, "run", side_effect=child) as run:
+        with patch.object(scheduler.subprocess, "Popen", side_effect=child) as run:
             clock.poll()
             self.assertEqual(run.call_count, 2)
             self.assertEqual(run.call_args_list[1].kwargs["env"]["AI_MODEL"], "openai/fresh-partial")
@@ -244,9 +245,9 @@ class RuntimeSchedulerTests(unittest.TestCase):
         def child(command, **kwargs):
             nonlocal instant
             instant = self.at(12, 0, 10)
-            return subprocess.CompletedProcess(command, 0)
+            return FakeProcess(command, 0)
 
-        with patch.object(scheduler.subprocess, "run", side_effect=child) as run:
+        with patch.object(scheduler.subprocess, "Popen", side_effect=child) as run:
             clock.poll()
             instant = self.at(12, 0, 40)
             clock.poll()
@@ -256,7 +257,7 @@ class RuntimeSchedulerTests(unittest.TestCase):
     def test_invalid_file_never_reuses_old_secrets_log_transition_only_and_recover_safely(self):
         self.clock.poll(self.at(11, 59))
         atomic_write(self.path, b'AI_API_KEY="SECRET_INVALID\n')
-        with patch.object(scheduler.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
+        with patch.object(scheduler.subprocess, "Popen", return_value=FakeProcess([], 0)) as run:
             with redirect_stdout(io.StringIO()) as output:
                 for second in (0, 20, 40):
                     self.clock.poll(self.at(12, 0, second))
@@ -272,7 +273,7 @@ class RuntimeSchedulerTests(unittest.TestCase):
 
     def test_invalid_initial_file_can_be_polled_without_stale_fallback(self):
         self.path.unlink()
-        with patch.object(scheduler.subprocess, "run") as run, redirect_stdout(io.StringIO()):
+        with patch.object(scheduler.subprocess, "Popen") as run, redirect_stdout(io.StringIO()):
             self.clock.poll(self.at(11, 59))
             self.put()
             self.clock.poll(self.at(12, 0))
@@ -282,7 +283,7 @@ class RuntimeSchedulerTests(unittest.TestCase):
     def test_retry_budget_stays_three_and_each_retry_gets_fresh_environment(self):
         self.put({"WEEKLY_MINUTE": "30"})
         self.clock.poll(self.at(11, 59))
-        with patch.object(scheduler.subprocess, "run", return_value=subprocess.CompletedProcess([], 1)) as run:
+        with patch.object(scheduler.subprocess, "Popen", return_value=FakeProcess([], 1)) as run:
             self.clock.poll(self.at(12, 0))
             self.put({"AI_API_KEY": "second"})
             self.clock.poll(self.at(12, 0, 10))
@@ -303,9 +304,9 @@ class RuntimeSchedulerTests(unittest.TestCase):
 
         def child(command, **kwargs):
             code = 6 if command[1].endswith("weekly_ai_report_email.py") else 1
-            return subprocess.CompletedProcess(command, code)
+            return FakeProcess(command, code)
 
-        with patch.object(scheduler.subprocess, "run", side_effect=child) as run:
+        with patch.object(scheduler.subprocess, "Popen", side_effect=child) as run:
             for second in (0, 10, 20, 30, 40):
                 self.clock.poll(self.at(12, 0, second))
         self.assertEqual(run.call_count, 4)  # 3 crawler failures, 1 partial weekly.
@@ -317,7 +318,7 @@ class RuntimeSchedulerTests(unittest.TestCase):
     def test_process_spawn_failure_retries_without_logging_exception_secrets(self):
         self.put({"WEEKLY_MINUTE": "30"})
         self.clock.poll(self.at(11, 59))
-        with patch.object(scheduler.subprocess, "run", side_effect=OSError("SECRET_EXEC_FAILURE")) as run:
+        with patch.object(scheduler.subprocess, "Popen", side_effect=OSError("SECRET_EXEC_FAILURE")) as run:
             with redirect_stdout(io.StringIO()) as output:
                 for second in (0, 10, 20, 30):
                     self.clock.poll(self.at(12, 0, second))
@@ -327,7 +328,7 @@ class RuntimeSchedulerTests(unittest.TestCase):
 
     def test_legacy_env_only_keeps_first_due_minute_and_existing_task_markers(self):
         legacy = scheduler.Scheduler(lambda: load_runtime_config({"TZ": "UTC", "CRAWLER_MINUTE": "0"}), state={})
-        with patch.object(scheduler.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
+        with patch.object(scheduler.subprocess, "Popen", return_value=FakeProcess([], 0)) as run:
             legacy.poll(self.at(12, 0))
             legacy.poll(self.at(12, 0, 20))
         self.assertEqual(run.call_count, 1)
@@ -336,7 +337,7 @@ class RuntimeSchedulerTests(unittest.TestCase):
     def test_poll_settings_reload_without_a_real_sleep_loop(self):
         self.assertEqual(self.clock.poll(self.at(11, 59)), 20)
         self.put({"SCHEDULER_POLL_SECONDS": "35", "SCHEDULER_MAX_ATTEMPTS": "2"})
-        with patch.object(scheduler.subprocess, "run", return_value=subprocess.CompletedProcess([], 1)) as run:
+        with patch.object(scheduler.subprocess, "Popen", return_value=FakeProcess([], 1)) as run:
             self.assertEqual(self.clock.poll(self.at(12, 0)), 35)
             self.clock.poll(self.at(12, 0, 10))
             self.clock.poll(self.at(12, 0, 20))
@@ -353,7 +354,7 @@ class RuntimeSchedulerTests(unittest.TestCase):
                   "WEEKLY_HOUR": "1", "WEEKLY_MINUTE": "30"})
         def at(hour, minute):
             return datetime(2026, 11, 1, hour, minute, tzinfo=timezone.utc)
-        with patch.object(scheduler.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
+        with patch.object(scheduler.subprocess, "Popen", return_value=FakeProcess([], 0)) as run:
             self.clock.poll(at(5, 29))
             self.clock.poll(at(5, 30))  # First local 01:30 (EDT).
             self.clock.poll(at(6, 30))  # Second local 01:30 (EST).
@@ -367,7 +368,7 @@ class RuntimeSchedulerTests(unittest.TestCase):
     def test_dst_fold_partial_weekly_is_not_retried(self):
         self.put({"TZ": "America/New_York", "CRAWLER_MINUTE": "17",
                   "WEEKLY_HOUR": "1", "WEEKLY_MINUTE": "30"})
-        with patch.object(scheduler.subprocess, "run", return_value=subprocess.CompletedProcess([], 6)) as run:
+        with patch.object(scheduler.subprocess, "Popen", return_value=FakeProcess([], 6)) as run:
             self.clock.poll(datetime(2026, 11, 1, 5, 29, tzinfo=timezone.utc))
             self.clock.poll(datetime(2026, 11, 1, 5, 30, tzinfo=timezone.utc))
             self.clock.poll(datetime(2026, 11, 1, 6, 30, tzinfo=timezone.utc))
@@ -379,9 +380,9 @@ class RuntimeSchedulerTests(unittest.TestCase):
         at = lambda h, m: datetime(2026, 11, 1, h, m, tzinfo=timezone.utc)
 
         def child(command, **kwargs):
-            return subprocess.CompletedProcess(command, 6 if command[1].endswith(".py") else 0)
+            return FakeProcess(command, 6 if command[1].endswith(".py") else 0)
 
-        with patch.object(scheduler.subprocess, "run", side_effect=child) as run:
+        with patch.object(scheduler.subprocess, "Popen", side_effect=child) as run:
             for h, m in ((4, 59), (5, 0), (5, 30)):
                 self.clock.poll(at(h, m))
             state_path = Path(self.temp.name) / "state.json"
@@ -398,7 +399,7 @@ class RuntimeSchedulerTests(unittest.TestCase):
     def test_equivalent_timezone_during_fold_preserves_all_prior_business_windows(self):
         self.put({"TZ": "America/New_York", "MORNING_PUSH_TIME": "01:30", "WEEKLY_HOUR": "12"})
         at = lambda h, m: datetime(2026, 11, 1, h, m, tzinfo=timezone.utc)
-        with patch.object(scheduler.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
+        with patch.object(scheduler.subprocess, "Popen", return_value=FakeProcess([], 0)) as run:
             self.clock.poll(at(4, 59))
             self.clock.poll(at(5, 0))
             self.clock.poll(at(5, 30))
@@ -413,9 +414,9 @@ class RuntimeSchedulerTests(unittest.TestCase):
         self.put({"TZ": "America/New_York", "MORNING_PUSH_TIME": "01:30",
                   "WEEKLY_HOUR": "12"})
         at = lambda h, m, s=0: datetime(2026, 11, 1, h, m, s, tzinfo=timezone.utc)
-        with patch.object(scheduler.subprocess, "run", side_effect=[
-                subprocess.CompletedProcess([], 1), subprocess.CompletedProcess([], 0),
-                subprocess.CompletedProcess([], 0)]) as run:
+        with patch.object(scheduler.subprocess, "Popen", side_effect=[
+                FakeProcess([], 1), FakeProcess([], 0),
+                FakeProcess([], 0)]) as run:
             self.clock.poll(at(4, 59))
             self.clock.poll(at(5, 0))
             self.clock.poll(at(5, 0, 20))
@@ -427,13 +428,13 @@ class RuntimeSchedulerTests(unittest.TestCase):
     def test_uncompleted_dst_window_keeps_retry_budget_and_retries_in_second_fold(self):
         self.put({"TZ": "America/New_York", "MORNING_PUSH_TIME": "01:30", "WEEKLY_HOUR": "12"})
         at = lambda h, m, s=0: datetime(2026, 11, 1, h, m, s, tzinfo=timezone.utc)
-        with patch.object(scheduler.subprocess, "run", return_value=subprocess.CompletedProcess([], 1)) as run:
+        with patch.object(scheduler.subprocess, "Popen", return_value=FakeProcess([], 1)) as run:
             self.clock.poll(at(4, 59))
             for second in (0, 10, 20, 30):
                 self.clock.poll(at(5, 0, second))
             self.assertEqual(run.call_count, 3)
             self.assertEqual(self.clock.state, {})
-            run.return_value = subprocess.CompletedProcess([], 0)
+            run.return_value = FakeProcess([], 0)
             self.clock.poll(at(5, 30))
             self.clock.poll(at(6, 0))
             self.clock.poll(at(6, 30))
@@ -443,7 +444,7 @@ class RuntimeSchedulerTests(unittest.TestCase):
     def test_legacy_env_only_preserves_plain_state_shape_without_extended_history(self):
         legacy_env = {"TZ": "America/New_York", "CRAWLER_MINUTE": "0", "MORNING_PUSH_TIME": "01:30"}
         clock = scheduler.Scheduler(lambda: load_runtime_config(legacy_env), state={})
-        with patch.object(scheduler.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
+        with patch.object(scheduler.subprocess, "Popen", return_value=FakeProcess([], 0)) as run:
             for hour, minute in ((5, 0), (5, 0), (5, 30), (5, 30)):
                 clock.poll(datetime(2026, 11, 1, hour, minute, tzinfo=timezone.utc))
         self.assertEqual(run.call_count, 2)
@@ -452,8 +453,8 @@ class RuntimeSchedulerTests(unittest.TestCase):
     def test_switching_to_legacy_mode_does_not_write_stale_external_history(self):
         state = {"crawler": "2026-09-20T12:00Z", "_windows": {"crawler": [
             {"utc": "2026-09-20T12:00Z", "local": "2026-09-20T12:00", "timezone": "UTC"}]}}
-        clock = scheduler.Scheduler(lambda: load_runtime_config({"TZ": "UTC"}), state=state)
-        with patch.object(scheduler.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)):
+        clock = scheduler.Scheduler(lambda: load_runtime_config({"TZ": "UTC", "CRAWLER_MINUTE": "0"}), state=state)
+        with patch.object(scheduler.subprocess, "Popen", return_value=FakeProcess([], 0)):
             clock.poll(self.at(13, 0))
         self.assertEqual(clock.state, {"crawler": "2026-09-20T13:00"})
         scheduler._validate_state(clock.state)
@@ -463,7 +464,7 @@ class RuntimeSchedulerTests(unittest.TestCase):
         start = self.at(12, 0)
         self.clock.poll(start - timedelta(minutes=1))
         with patch.object(scheduler, "MAX_COMPLETED_WINDOWS", 4):
-            with patch.object(scheduler.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
+            with patch.object(scheduler.subprocess, "Popen", return_value=FakeProcess([], 0)) as run:
                 for hour in range(8):
                     self.clock.poll(start + timedelta(hours=hour))
                 self.clock.poll(start + timedelta(hours=7, seconds=20))
@@ -475,7 +476,7 @@ class RuntimeSchedulerTests(unittest.TestCase):
         for marker in ("2026-11-01T05:30Z", "2026-11-01T01:30"):
             with self.subTest(marker=marker):
                 clock = scheduler.Scheduler(lambda: load_runtime_config(self.base), state={"crawler": marker})
-                with patch.object(scheduler.subprocess, "run") as run:
+                with patch.object(scheduler.subprocess, "Popen") as run:
                     clock.poll(datetime(2026, 11, 1, 6, 29, tzinfo=timezone.utc))
                     clock.poll(datetime(2026, 11, 1, 6, 30, tzinfo=timezone.utc))
                 run.assert_not_called()
@@ -486,7 +487,7 @@ class RuntimeSchedulerTests(unittest.TestCase):
         for marker in ("2026-11-01T05:00Z", "2026-11-01T01:00"):
             with self.subTest(marker=marker):
                 clock = scheduler.Scheduler(lambda: load_runtime_config(self.base), state={"crawler": marker})
-                with patch.object(scheduler.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
+                with patch.object(scheduler.subprocess, "Popen", return_value=FakeProcess([], 0)) as run:
                     clock.poll(at(5, 29))
                     clock.poll(at(5, 30))
                     clock.poll(at(6, 0))
@@ -507,7 +508,7 @@ class RuntimeSchedulerTests(unittest.TestCase):
             with self.subTest(payload=payload):
                 state_path.write_text(payload)
                 with patch.object(scheduler, "STATE_PATH", state_path), patch.object(scheduler, "STOP", False):
-                    with patch.object(scheduler.subprocess, "run") as run, patch.object(
+                    with patch.object(scheduler.subprocess, "Popen") as run, patch.object(
                             scheduler.time, "sleep", side_effect=AssertionError("must not run scheduler loop")):
                         with redirect_stdout(io.StringIO()) as output, patch("sys.stderr", new=io.StringIO()) as errors:
                             self.assertEqual(scheduler.main(self.base), 2)
@@ -599,10 +600,10 @@ class RuntimeSchedulerTests(unittest.TestCase):
         self.clock.poll(self.at(11, 59))
 
         def child(command, **kwargs):
-            return subprocess.CompletedProcess(command, 6 if command[1].endswith(".py") else 0)
+            return FakeProcess(command, 6 if command[1].endswith(".py") else 0)
 
         with patch.object(scheduler, "STATE_PATH", state_path):
-            with patch.object(scheduler.subprocess, "run", side_effect=child) as run:
+            with patch.object(scheduler.subprocess, "Popen", side_effect=child) as run:
                 self.clock.poll(self.at(12, 0))
                 self.clock.poll(self.at(13, 0))
                 self.assertEqual(scheduler._load_state(), self.clock.state)
@@ -616,7 +617,7 @@ class RuntimeSchedulerTests(unittest.TestCase):
     def test_state_save_failure_is_fail_closed_before_next_child(self):
         self.clock.poll(self.at(11, 59))
         self.save_patch.stop()
-        with patch.object(scheduler.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
+        with patch.object(scheduler.subprocess, "Popen", return_value=FakeProcess([], 0)) as run:
             with patch.object(scheduler, "atomic_write", side_effect=OSError("SECRET_WRITE")):
                 with self.assertRaises(scheduler.SchedulerStateError) as error:
                     self.clock.poll(self.at(12, 0))

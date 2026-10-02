@@ -1,4 +1,4 @@
-import io
+from contextlib import closing
 import sqlite3
 import tempfile
 import unittest
@@ -67,9 +67,18 @@ class StorageBackendTests(unittest.TestCase):
             backend._get_configured_time = Mock(return_value=datetime(2026, 8, 23, 12, 0, 0))
             backend._check_object_exists = Mock(return_value=True)
 
+            fixture = Path(temp_dir) / "fixture.db"
+            with closing(sqlite3.connect(fixture)) as connection:
+                connection.execute("CREATE TABLE sample (value TEXT)")
+                connection.execute("INSERT INTO sample VALUES ('offline fixture')")
+                connection.commit()
+            payload = fixture.read_bytes()
+            bodies = []
+
             def get_object(Bucket, Key):
                 body = Mock()
-                body.iter_chunks.return_value = iter([Key.encode("utf-8")])
+                body.iter_chunks.return_value = iter([payload])
+                bodies.append(body)
                 return {"Body": body}
 
             backend.s3_client.get_object.side_effect = get_object
@@ -77,14 +86,12 @@ class StorageBackendTests(unittest.TestCase):
             pulled = backend.pull_recent_days(1, temp_dir)
 
             self.assertEqual(pulled, 2)
-            self.assertEqual(
-                (Path(temp_dir) / "news" / "2026-08-23.db").read_bytes(),
-                b"news/2026-08-23.db",
-            )
-            self.assertEqual(
-                (Path(temp_dir) / "rss" / "2026-08-23.db").read_bytes(),
-                b"rss/2026-08-23.db",
-            )
+            for db_type in ("news", "rss"):
+                self.assertEqual(
+                    (Path(temp_dir) / db_type / "2026-08-23.db").read_bytes(), payload,
+                )
+            for body in bodies:
+                body.close.assert_called_once_with()
             self.assertFalse(list(Path(temp_dir).rglob("*.part")))
 
     def test_remote_date_listing_merges_news_and_rss_dates(self):

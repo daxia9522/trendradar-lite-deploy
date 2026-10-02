@@ -224,7 +224,7 @@ class NativeTests(unittest.TestCase):
     def test_boolean_explicit_enable_disable_choices(self):
         result, output, _ = self.menu(["2", "1", "maybe", "1", "1", "2", "0", "q"])
         self.assertFalse(result)
-        self.assertIn("必须是 true 或 false", output)
+        self.assertIn("AI_ANALYSIS_ENABLED 必须是 true/false/1/0", output)
 
     def test_schedule_applies_both_timers_without_start_restart_or_enable(self):
         values = dict(self.values, TZ="UTC")

@@ -8,7 +8,16 @@ import random
 import time
 from typing import Any, Dict, List, Optional, Sequence
 
-from litellm import completion
+try:
+    # Keep non-AI commands (doctor, config validation, storage maintenance)
+    # usable when the optional runtime dependency is not installed.  The
+    # scheduled AI path still fails explicitly at the point where a request
+    # is attempted instead of making every TrendRadar import fail.
+    from litellm import completion
+except ModuleNotFoundError as exc:  # pragma: no cover - exercised by lean installs
+    if exc.name != "litellm":
+        raise
+    completion = None
 
 # 客户端默认值（config.yaml 只保留 timeout；重试次数不进配置）
 DEFAULT_TIMEOUT = 240
@@ -105,6 +114,10 @@ class AIClient:
         ok, error = self.validate_config()
         if not ok:
             raise ValueError(error)
+        if completion is None:
+            raise RuntimeError(
+                "LiteLLM 未安装，无法调用 AI；请安装项目锁定依赖 requirements.lock"
+            )
 
         params: Dict[str, Any] = {
             "messages": messages,

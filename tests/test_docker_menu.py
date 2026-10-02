@@ -26,6 +26,20 @@ BROWSER = {"Host": "127.0.0.1:8765", "Origin": "http://127.0.0.1:8765"}
 
 
 class DockerMenuTests(unittest.TestCase):
+    def test_invalid_boolean_web_draft_is_redacted_and_requires_correction_or_clear(self):
+        app = self.application()
+        saved, responses = self.web(app, [
+            ("POST", {"AI_ANALYSIS_ENABLED": "synthetic-private-boolean"}),
+            ("GET", {}),
+            ("POST", {"AI_ANALYSIS_ENABLED": ""}),
+            ("POST", {"AI_ANALYSIS_ENABLED": ":clear"}),
+        ])
+        self.assertTrue(saved)
+        self.assertEqual([status for status, _ in responses], [400, 200, 400, 200])
+        self.assertEqual(read_env(self.path)["AI_ANALYSIS_ENABLED"], "")
+        for _, page in responses:
+            self.assertNotIn("synthetic-private-boolean", page)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

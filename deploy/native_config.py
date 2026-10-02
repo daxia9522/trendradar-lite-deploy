@@ -304,6 +304,10 @@ class NativeApplication:
 
     def save(self, values: dict[str, str], normalize: bool = False) -> str:
         values = dict(self.document.values, **values)
+        from configure import validate_app_booleans
+        errors = validate_app_booleans(values)
+        if errors:
+            raise ConfigError("\n".join(errors))
         if normalize:
             for key, suggestion in self.schedule.suggested.items():
                 if key not in values or (not values[key] and not self.document.values.get(key)):

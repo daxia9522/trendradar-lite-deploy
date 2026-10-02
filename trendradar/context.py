@@ -23,10 +23,8 @@ from trendradar.core import (
     count_word_frequency,
     Scheduler,
 )
-from trendradar.report import (
-    generate_html_report,
-    render_email_html_content,
-)
+from trendradar.report import generate_html_report
+from trendradar.report.daily import render_daily_html
 from trendradar.notification import NotificationDispatcher
 from trendradar.storage import get_storage_manager
 
@@ -292,11 +290,12 @@ class AppContext:
                 analysis_model = analysis_model[:1].upper() + analysis_model[1:]
             else:
                 analysis_model = "分析失败"
-        return render_email_html_content(
+        generated_at = self.get_time().strftime("%Y-%m-%d %H:%M:%S")
+        return render_daily_html(
             report_data=report_data,
             mode=mode,
             region_order=self.region_order,
-            get_time_func=self.get_time,
+            generated_at=generated_at,
             rss_items=rss_items,
             rss_new_items=rss_new_items,
             display_mode=self.display_mode,
@@ -304,6 +303,7 @@ class AppContext:
             analysis_model=analysis_model,
             show_new_section=self.show_new_section,
             standalone_data=standalone_data,
+            parse_timestamp=datetime.fromisoformat,
         )
 
     # === 通知发送 ===

@@ -9,17 +9,18 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+# Support the native launcher's sibling imports and direct importlib loading.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from delivery_windows import DELIVERY_DEFAULTS, DeliveryWindowError, delivery_times
 
 DEFAULT_SCHEDULE = {
     "TZ": "Asia/Shanghai",
     "CRAWLER_MINUTE": "5",
-    "MORNING_PUSH_TIME": "07:00",
-    "NOON_PUSH_TIME": "12:00",
-    "EVENING_PUSH_TIME": "18:00",
-    "DAILY_SUMMARY_TIME": "22:00",
+    **DELIVERY_DEFAULTS,
     "WEEKLY_WEEKDAY": "6",
     "WEEKLY_HOUR": "12",
     "WEEKLY_MINUTE": "30",
@@ -301,8 +302,10 @@ def _validate(values: dict) -> dict[str, str]:
     for key in PERIOD_KEYS.values():
         if not re.fullmatch(_TIME, result[key]):
             raise ScheduleError(f"{key} must use HH:MM")
-    if len({result[key] for key in PERIOD_KEYS.values()}) != len(PERIOD_KEYS):
-        raise ScheduleError("Delivery times must not overlap")
+    try:
+        delivery_times(result)
+    except DeliveryWindowError as exc:
+        raise ScheduleError(str(exc)) from exc
     zone = result["TZ"]
     if not re.fullmatch(_ZONE, zone) or zone.startswith("/") or ".." in zone.split("/"):
         raise ScheduleError("TZ must be an IANA timezone name")
@@ -374,7 +377,7 @@ class NativeSchedule:
         for key, (start, end) in self._windows.items():
             self.suggested[key] = start
             if not _plain(self.initial.get(key)) and start != end:
-                self._warn(f"{key}：YAML 推送窗口为 {start}-{end}；规范化将其收敛到指定分钟（start=end）")
+                self._warn(f"{key}：YAML 推送窗口为 {start}-{end}；规范化后的窗口从指定触发时间持续至该小时 :59")
 
     def _inspect_timer(self, name: str, data: bytes):
         _, _, calendars = _timer_lines(data, name)

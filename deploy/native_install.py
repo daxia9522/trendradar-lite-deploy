@@ -50,6 +50,23 @@ def unit_path(value: Path, executable: bool = False) -> str:
     return f'"{text}"'
 
 
+def migrate_quoted_unit_paths(text: str, app: Path, env: Path) -> str:
+    """Repair only the two path directives emitted by the old generator."""
+    replacements = {}
+    for directive, prefix, path in (("WorkingDirectory", "", app), ("EnvironmentFile", "-", env)):
+        legacy = str(path).replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+        replacements[f'{directive}={prefix}"{legacy}"'] = f"{directive}={prefix}{unit_path(path)}"
+    lines = []
+    section = ""
+    for line in text.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        if body.startswith("["):
+            section = body
+        replacement = replacements.get(body) if section == "[Service]" else None
+        lines.append(replacement + line[len(body):] if replacement is not None else line)
+    return "".join(lines)
+
+
 def install_units(app: Path, env: Path, units: Path, runner=None, *, enable_backup=False) -> bool:
     from native_schedule import NativeSchedule, ScheduleError
     from native_backup import BackupPlan, commit_plan
@@ -76,8 +93,11 @@ def install_units(app: Path, env: Path, units: Path, runner=None, *, enable_back
             raise ConfigError("服务 unit 是符号链接；拒绝覆盖")
         if path.exists():
             text = path.read_text()
-            if str(app) not in text or str(env) not in text:
+            migrated = migrate_quoted_unit_paths(text, app, env)
+            if unit_path(app) not in migrated or unit_path(env) not in migrated:
                 raise ConfigError("现有服务 unit 不属于此 checkout/config；拒绝覆盖")
+            if migrated != text:
+                changes[path] = migrated.encode()
             continue
         text = (app / f"deploy/systemd/{name}.service.in").read_text()
         text = text.replace("@APP_DIR@", unit_path(app)).replace("@ENV_FILE@", unit_path(env))

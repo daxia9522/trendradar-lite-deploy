@@ -1,0 +1,77 @@
+/* One header, using the daily report's spacing, type and blue gradient. */
+.header {
+  background-color: #3186FF;
+  background-image: linear-gradient(to top right, #3186FF 0%, #3186FF 75%, #A9A8FF 99.6%);
+  color: #ffffff;
+  padding: 18px 18px 14px;
+  text-align: left;
+  border-radius: 16px;
+  margin: 0 0 8px;
+  box-shadow: 0 8px 24px rgba(49, 134, 255, 0.18);
+  position: relative;
+  overflow: hidden;
+}
+.header-title {
+  position: relative;
+  z-index: 1;
+  margin: 0 0 8px;
+  font-size: 22px;
+  line-height: 1.25;
+  font-weight: 800;
+  color: #ffffff;
+}
+.header-meta {
+  position: relative;
+  z-index: 1;
+  font-size: 12px;
+  line-height: 1.55;
+  color: rgba(255, 255, 255, 0.92);
+  display: block;
+  text-align: left;
+  margin: 0;
+}
+.header-meta strong { color: #ffffff; }
+.meta-item {
+  display: block;
+  margin: 0 0 2px;
+  white-space: nowrap;
+}
+.meta-item:last-child { margin-bottom: 0; }
+.tab-strip {
+  position: relative;
+  z-index: 1;
+  margin-top: 12px;
+  display: block;
+  white-space: nowrap;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: 2px;
+}
+.tab-strip::-webkit-scrollbar { height: 3px; }
+.tab-pill {
+  display: inline-block;
+  margin: 0 6px 6px 0;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+@media (prefers-color-scheme: dark) {
+  /* The blue header stays light-on-blue in either page color scheme. */
+  .header { background-color: #3186FF !important; color: #ffffff !important; }
+  .header-title, .header-meta strong, .tab-pill { color: #ffffff !important; }
+  .header-meta { color: rgba(255, 255, 255, 0.92) !important; }
+}
+@media (max-width: 640px) {
+  .header { padding: 14px 14px 12px; }
+  .header-title { font-size: 17px; margin-bottom: 6px; }
+  .header-meta { font-size: 11px; line-height: 1.35; }
+  .meta-item { white-space: normal; overflow-wrap: anywhere; }
+  .tab-strip { margin-top: 8px; }
+  .tab-pill { padding: 3px 8px; font-size: 10px; margin: 0 4px 4px 0; }
+}

@@ -1,35 +1,35 @@
-import importlib.util
-import subprocess
+"""Task outcome bookkeeping is driven by nonblocking process completion."""
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
-
-ROOT = Path(__file__).resolve().parents[1]
-SPEC = importlib.util.spec_from_file_location(
-    "docker_scheduler", ROOT / "deploy" / "docker" / "scheduler.py"
-)
-scheduler = importlib.util.module_from_spec(SPEC)
-assert SPEC.loader is not None
-SPEC.loader.exec_module(scheduler)
+from deploy.docker import scheduler
+from deploy.docker.runtime_config import load_runtime_config
+from tests.fake_process import FakeProcess
 
 
 class DockerSchedulerTests(unittest.TestCase):
-    def test_failed_run_is_not_marked_successful(self):
-        state = {}
-        with patch.object(scheduler.subprocess, "run", return_value=subprocess.CompletedProcess([], 1)):
-            with patch.object(scheduler, "_save_state") as save_state:
-                self.assertFalse(scheduler._run("crawler", ["false"], "marker", state))
-        self.assertEqual(state, {})
-        save_state.assert_not_called()
+    def setUp(self):
+        self.clock = scheduler.Scheduler(lambda: load_runtime_config({"TZ": "UTC"}), state={})
 
-    def test_successful_run_is_marked_successful(self):
-        state = {}
-        with patch.object(scheduler.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)):
-            with patch.object(scheduler, "_save_state") as save_state:
-                self.assertTrue(scheduler._run("crawler", ["true"], "marker", state))
-        self.assertEqual(state, {"crawler": "marker"})
-        save_state.assert_called_once_with(state)
+    def test_failed_run_is_not_marked_successful(self):
+        with patch.object(scheduler.subprocess, "Popen", return_value=FakeProcess([], 1)):
+            with patch.object(scheduler, "_save_state") as save:
+                self.assertTrue(self.clock._spawn("crawler", ["synthetic"], "marker", {}))
+        self.assertEqual(self.clock.state, {})
+        self.assertFalse(self.clock.running)
+        save.assert_not_called()
+
+    def test_successful_run_is_marked_only_after_exit(self):
+        child = FakeProcess([], None)
+        with patch.object(scheduler.subprocess, "Popen", return_value=child):
+            with patch.object(scheduler, "_save_state") as save:
+                self.clock._spawn("crawler", ["synthetic"], "marker", {})
+                self.assertEqual(self.clock.state, {})
+                save.assert_not_called()
+                child.returncode = 0
+                self.clock._reap_children()
+                self.assertEqual(self.clock.state, {"crawler": "marker"})
+                save.assert_called_once_with(self.clock.state)
 
 
 if __name__ == "__main__":

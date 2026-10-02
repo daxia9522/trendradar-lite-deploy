@@ -2,10 +2,11 @@
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from trendradar.ai.analyzer import AIAnalyzer
-from trendradar.ai.formatter import render_ai_analysis_html_rich
+from trendradar.report.ai import render_ai_analysis_html_rich
+from trendradar.report.markdown import render_markdown
 
 
 LEAD_SENTENCE = "**AI 资本投入趋于审慎，资金与产业关注点正在重新分布。**"
@@ -74,9 +75,45 @@ class AISectionContractTests(unittest.TestCase):
             "独立源速览",
         ]
         self.assertEqual([section.title for section in result.sections], expected)
-        html = render_ai_analysis_html_rich(result)
+        self.assertEqual([section.format_type for section in result.sections], ["prose"] * 4)
+        expected_contents = [
+            block.split("\n", 1)[1].strip()
+            for block in ("\n" + VALID_CURRENT_RESPONSE).split("\n## ")[1:]
+        ]
+        self.assertEqual([section.content for section in result.sections], expected_contents)
+        with patch("trendradar.report.ai.render_markdown", wraps=render_markdown) as core:
+            html = render_ai_analysis_html_rich(result)
+        self.assertEqual(core.call_args_list, [call(content) for content in expected_contents])
+        for title, content in zip(expected, expected_contents):
+            self.assertIn(f'<h2 class="ai-block-title">{title}</h2>', html)
+            self.assertIn(f'<div class="ai-block-content">{render_markdown(content)}</div>', html)
         positions = [html.index(title) for title in expected]
         self.assertEqual(positions, sorted(positions))
+
+    def test_section_format_type_does_not_rewrite_body_or_numbering(self):
+        content = (
+            " \n### 政策面\n**正文**\n### 市场面\n- 第一条\n* 第二条\n\n"
+            "说明\n\n- 第三条\n\n5. 第五项\n6、第六项\n\n"
+            "【独立标题】：\n<script>private()</script> `**字面星号**`\n "
+        )
+        expected = (
+            "<h3>政策面</h3><p><strong>正文</strong></p><h3>市场面</h3>"
+            "<ul><li>第一条</li><li>第二条</li></ul><p>说明</p><ul><li>第三条</li></ul>"
+            '<ol start="5"><li>第五项</li><li>第六项</li></ol>'
+            "<p>【独立标题】：<br>&lt;script&gt;private()&lt;/script&gt; <code>**字面星号**</code></p>"
+        )
+        rendered = []
+        for format_type in ("prose", "events", "bullets", "lead_points"):
+            with self.subTest(format_type=format_type):
+                result = SimpleNamespace(success=True, sections=[SimpleNamespace(
+                    title="共同标题", content=content, format_type=format_type,
+                )])
+                with patch("trendradar.report.ai.render_markdown", wraps=render_markdown) as core:
+                    html = render_ai_analysis_html_rich(result)
+                core.assert_called_once_with(content)
+                self.assertIn(f'<div class="ai-block-content">{expected}</div>', html)
+                rendered.append(html)
+        self.assertTrue(all(html == rendered[0] for html in rendered))
 
     def test_optional_section_may_be_omitted(self):
         # 独立源速览为 optional：样本缺该段仍应通过，只有 required 段强制。
@@ -166,7 +203,7 @@ class AISectionContractTests(unittest.TestCase):
         self.assertIn("### 1. 政策面变动", result.sections[0].content)
         html = render_ai_analysis_html_rich(result)
         self.assertIn("<li><strong>第一条主线。</strong> 具体分析。</li>", html)
-        self.assertIn('<div class="ai-subtitle">1. 政策面变动</div>', html)
+        self.assertIn('<h3>1. 政策面变动</h3>', html)
 
     def test_titles_can_change_without_python_field_mapping(self):
         contract = """# AI_SECTION: 今日核心态势|required|events

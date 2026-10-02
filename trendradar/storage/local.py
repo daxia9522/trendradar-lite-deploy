@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from trendradar.storage.base import StorageBackend, NewsData, RSSItem, RSSData
-from trendradar.storage.sqlite_mixin import SQLiteStorageMixin
+from trendradar.storage.sqlite_mixin import SQLiteStorageMixin, connect_sqlite
 from trendradar.utils.time import (
     DEFAULT_TIMEZONE,
     get_configured_time,
@@ -113,9 +113,12 @@ class LocalStorageBackend(SQLiteStorageMixin, StorageBackend):
         db_path = str(self._get_db_path(date, db_type))
 
         if db_path not in self._db_connections:
-            conn = sqlite3.connect(db_path)
-            conn.row_factory = sqlite3.Row
-            self._init_tables(conn, db_type)
+            conn = connect_sqlite(db_path, wal=True)
+            try:
+                self._init_tables(conn, db_type)
+            except Exception:
+                conn.close()
+                raise
             self._db_connections[db_path] = conn
 
         return self._db_connections[db_path]

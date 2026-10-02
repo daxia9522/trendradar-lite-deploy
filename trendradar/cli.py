@@ -15,7 +15,8 @@ import requests
 from trendradar.context import AppContext
 from trendradar import __version__
 from trendradar.core import load_config
-from trendradar.daily import NewsAnalyzer, _FORCE_RUN_ENV
+from trendradar.core.execution_policy import FORCE_RUN_ENV
+from trendradar.daily_flow.runner import DailyRunner
 
 
 def _parse_version(version_str: str) -> Tuple[int, int, int]:
@@ -403,20 +404,14 @@ def _create_test_html_file(ctx: AppContext) -> Optional[str]:
 
 
 def _run_test_notification(config: Dict) -> bool:
-    """发送测试通知到已配置渠道"""
+    """发送一封测试邮件，直接报告本次投递结果。"""
     from trendradar.notification import NotificationDispatcher
 
     ctx = AppContext(config)
 
     try:
-        # 检查是否配置了通知渠道
-        has_notification = bool(
-            config.get("EMAIL_FROM")
-            and config.get("EMAIL_PASSWORD")
-            and config.get("EMAIL_TO")
-        )
-        if not has_notification:
-            print("未检测到可用通知渠道，请先在 config.yaml 或环境变量中配置。")
+        if not all(config.get(key) for key in ("EMAIL_FROM", "EMAIL_PASSWORD", "EMAIL_TO")):
+            print("邮件配置不完整，请先在 config.yaml 或环境变量中配置。")
             return False
 
         dispatcher = NotificationDispatcher(
@@ -427,30 +422,27 @@ def _run_test_notification(config: Dict) -> bool:
         html_file_path = _create_test_html_file(ctx)
 
         print("=" * 60)
-        print("通知连通性测试")
+        print("邮件连通性测试")
         print("=" * 60)
 
-        results = dispatcher.dispatch_all(
+        result = dispatcher.send_report(
             report_type="通知连通性测试",
             html_file_path=html_file_path,
         )
 
-        if not results:
-            print("没有可测试的有效通知渠道（可能配置不完整）。")
+        if not result.configured:
+            print("邮件配置不完整，请先在 config.yaml 或环境变量中配置。")
             return False
 
         print("-" * 60)
-        success_count = 0
-        for channel, ok in results.items():
-            if ok:
-                success_count += 1
-                print(f"✅ {channel}: 测试成功")
-            else:
-                print(f"❌ {channel}: 测试失败")
-
-        print("-" * 60)
-        print(f"测试结果: {success_count}/{len(results)} 个渠道成功")
-        return success_count > 0
+        if result.partially_delivered:
+            print("⚠️ 邮件部分投递，不自动重发，请检查拒收原因。")
+            return False
+        if result.sent:
+            print("✅ 邮件测试成功")
+        else:
+            print("❌ 邮件测试失败")
+        return result.sent
     finally:
         ctx.cleanup()
 
@@ -468,14 +460,14 @@ def main() -> int:
   --force-run            手动强制执行 AI 分析和推送，忽略时间窗口与 once 去重
 诊断命令:
   --doctor               运行环境与配置体检
-  --test-notification    发送测试通知到已配置渠道
+  --test-notification    发送一封测试邮件
 
 示例:
   python -m trendradar                    # 正常运行
   python -m trendradar --force-run        # 手动强制运行并推送
   python -m trendradar --show-schedule    # 查看当前调度状态
   python -m trendradar --doctor           # 运行一键体检
-  python -m trendradar --test-notification # 测试通知渠道连通性
+  python -m trendradar --test-notification # 测试邮件连通性
 """
     )
     parser.add_argument(
@@ -496,7 +488,7 @@ def main() -> int:
     parser.add_argument(
         "--test-notification",
         action="store_true",
-        help="发送测试通知到已配置渠道"
+        help="发送一封测试邮件"
     )
 
     args = parser.parse_args()
@@ -504,7 +496,7 @@ def main() -> int:
     debug_mode = False
     try:
         if args.force_run:
-            os.environ[_FORCE_RUN_ENV] = "1"
+            os.environ[FORCE_RUN_ENV] = "1"
             print("[手动运行] 已启用强制模式：忽略分析/推送时间窗口与 once 去重")
 
         # 处理 doctor 命令（不依赖完整运行流程）
@@ -539,7 +531,7 @@ def main() -> int:
             need_update, remote_version = check_all_versions(version_url, configs_version_url)
 
         # 复用已加载的配置，避免重复加载
-        analyzer = NewsAnalyzer(config=config)
+        analyzer = DailyRunner(config=config)
 
         # 设置更新信息（复用已获取的远程版本，不再重复请求）
         if analyzer.is_github_actions and need_update and remote_version:

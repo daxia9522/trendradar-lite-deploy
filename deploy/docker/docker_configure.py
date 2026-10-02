@@ -410,15 +410,16 @@ def serve(application: DockerApplication, args) -> bool:
                     continue
                 if not field_policy(key).sensitive and key in form:
                     submitted[key] = form[key][0].strip()
-            # Credential-bearing URLs render redacted: blank submits keep the
-            # server-side draft, the explicit sentinel clears it.
-            for key in CREDENTIAL_URL_FIELDS:
+            # Redacted URLs/invalid switches keep their server-side draft on
+            # blank submits; only a replacement or explicit sentinel clears it.
+            for key in (*CREDENTIAL_URL_FIELDS, *shared.BOOLEAN_KEYS):
                 if key not in form:
                     continue
                 entered = form[key][0].strip()
                 if entered == shared.CLEAR_SENTINEL:
                     submitted[key] = ""
-                elif not entered and credential_url(key, current.get(key, "")):
+                elif not entered and (credential_url(key, current.get(key, ""))
+                                      or shared.boolean_field_never_renders(key, current.get(key, ""))):
                     submitted[key] = current[key]
             secret_keys = {key for key in set(current) | {key for key, *_ in shared._fields_for("docker")}
                            if application_key(key) and field_policy(key).sensitive}

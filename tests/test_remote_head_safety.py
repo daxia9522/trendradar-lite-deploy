@@ -1,4 +1,4 @@
-"""Remote HEAD safety regressions: in-memory S3 only, with socket I/O forbidden."""
+"""Remote HEAD/download safety: in-memory S3 only, with socket I/O forbidden."""
 
 import io
 import sqlite3
@@ -110,12 +110,12 @@ class RemoteHeadSafetyTests(unittest.TestCase):
         for marker in PRIVATE.split():
             self.assertNotIn(marker, self.output.getvalue())
 
-    def seed(self, s3, db_type):
+    def seed(self, s3, db_type, title="old"):
         # Build a genuine historical database entirely locally.
         with tempfile.TemporaryDirectory(dir=self.root) as directory:
             local = LocalStorageBackend(directory, enable_txt=False, timezone="UTC")
             try:
-                self.assertTrue(getattr(local, f"save_{db_type}_data")(sample_data(db_type, "old", "11:00")))
+                self.assertTrue(getattr(local, f"save_{db_type}_data")(sample_data(db_type, title, "11:00")))
             finally:
                 local.cleanup()
             s3.objects[f"{db_type}/{DATE}.db"] = (Path(directory) / db_type / f"{DATE}.db").read_bytes()
@@ -211,6 +211,211 @@ class RemoteHeadSafetyTests(unittest.TestCase):
                         backend._download_sqlite(DATE)
                 self.assertFalse(backend._get_local_db_path(DATE).exists())
                 s3.put_object.assert_not_called()
+
+    def test_download_second_chunk_failure_preserves_cache_and_retry_recovers(self):
+        for db_type in ("news", "rss"):
+            for existing in (False, True):
+                with self.subTest(db_type=db_type, existing=existing):
+                    backend, s3 = self.backend()
+                    self.seed(s3, db_type)
+                    key = f"{db_type}/{DATE}.db"
+                    original = s3.objects[key]
+                    path = backend._get_local_db_path(DATE, db_type)
+                    if existing:
+                        path.write_bytes(original)
+                    self.seed(s3, db_type, "downloaded")
+                    payload = s3.objects[key]
+
+                    def chunks():
+                        yield payload[:1024]
+                        raise OSError(PRIVATE)  # The second chunk fails after a partial write.
+
+                    failed_body = Mock()
+                    failed_body.iter_chunks.return_value = chunks()
+                    s3.get_object.side_effect = None
+                    s3.get_object.return_value = {"Body": failed_body}
+                    with self.assertRaises(OSError):
+                        if existing:
+                            backend._download_sqlite(DATE, db_type)
+                        else:
+                            backend._get_connection(DATE, db_type)
+                    self.assertEqual(path.exists(), existing)
+                    if existing:
+                        self.assertEqual(path.read_bytes(), original)
+                    self.assertEqual(list(path.parent.iterdir()), [path] if existing else [])
+                    self.assertEqual(backend._downloaded_files, [])
+                    self.assertEqual(backend._db_connections, {})
+                    self.assertEqual(backend._batch_dirty, set())
+                    failed_body.close.assert_called_once_with()
+
+                    retry_body = Mock()
+                    retry_body.iter_chunks.return_value = iter([payload[:1024], payload[1024:]])
+                    s3.get_object.return_value = {"Body": retry_body}
+                    if existing:
+                        self.assertEqual(backend._download_sqlite(DATE, db_type), path)
+                    conn = backend._get_connection(DATE, db_type)
+                    self.assertEqual(
+                        {row[0] for row in conn.execute(f"SELECT title FROM {db_type}_items")},
+                        {"downloaded"},
+                    )
+                    self.assertEqual(s3.get_object.call_count, 2)
+                    self.assertEqual(s3.head_object.call_count, 2)
+                    self.assertEqual(backend._downloaded_files, [path])
+                    self.assertFalse(list(path.parent.glob("*.part")))
+                    retry_body.close.assert_called_once_with()
+                    s3.put_object.assert_not_called()
+
+    def test_download_publishes_only_after_stream_and_validation_close(self):
+        for db_type in ("news", "rss"):
+            with self.subTest(db_type=db_type):
+                backend, s3 = self.backend()
+                self.seed(s3, db_type)
+                key = f"{db_type}/{DATE}.db"
+                original = s3.objects[key]
+                path = backend._get_local_db_path(DATE, db_type)
+                path.write_bytes(original)
+                self.seed(s3, db_type, "downloaded")
+                payload = s3.objects[key]
+
+                def chunks():
+                    for chunk in (payload[:1024], b"", payload[1024:]):
+                        self.assertEqual(path.read_bytes(), original)
+                        partials = list(path.parent.glob("*.part"))
+                        self.assertEqual(len(partials), 1)
+                        self.assertEqual(backend._downloaded_files, [])
+                        yield chunk
+
+                body = Mock()
+                body.iter_chunks.return_value = chunks()
+                body.close.side_effect = lambda: self.assertEqual(path.read_bytes(), original)
+                s3.get_object.side_effect = None
+                s3.get_object.return_value = {"Body": body}
+                real_connect = sqlite3.connect
+                connections = []
+
+                def connect(*args, **kwargs):
+                    conn = real_connect(*args, **kwargs)
+                    connections.append(conn)
+                    return conn
+
+                real_replace = Path.replace
+
+                def replace(source, target):
+                    self.assertEqual(source.parent, path.parent)
+                    self.assertEqual(target, path)
+                    self.assertEqual(path.read_bytes(), original)
+                    self.assertEqual(source.read_bytes(), payload)
+                    body.close.assert_called_once_with()
+                    self.assertEqual(len(connections), 1)
+                    with self.assertRaises(sqlite3.ProgrammingError):
+                        connections[0].execute("SELECT 1")
+                    return real_replace(source, target)
+
+                with patch.object(remote.sqlite3, "connect", side_effect=connect), \
+                     patch.object(Path, "replace", autospec=True, side_effect=replace) as publish:
+                    self.assertEqual(backend._download_sqlite(DATE, db_type), path)
+                    publish.assert_called_once()
+                self.assertEqual(path.read_bytes(), payload)
+                self.assertEqual(list(path.parent.iterdir()), [path])
+                self.assertEqual(backend._downloaded_files, [path])
+                body.iter_chunks.assert_called_once_with(chunk_size=1024*1024)
+                s3.put_object.assert_not_called()
+
+    def test_download_rejects_invalid_sqlite_without_publishing(self):
+        backend, s3 = self.backend()
+        self.seed(s3, "news")
+        valid = s3.objects[f"news/{DATE}.db"]
+        corrupt = bytearray(valid)
+        corrupt[36:40] = (1).to_bytes(4, "big")  # Incorrect freelist page count.
+        payloads = (b"", b"not a database", valid[:100], valid[:-1024], bytes(corrupt))
+        for payload in payloads:
+            for existing in (False, True):
+                with self.subTest(size=len(payload), existing=existing):
+                    backend, s3 = self.backend()
+                    path = backend._get_local_db_path(DATE)
+                    if existing:
+                        path.write_bytes(valid)
+                    s3.objects[f"news/{DATE}.db"] = payload
+                    body = Mock()
+                    body.iter_chunks.return_value = iter([payload])
+                    s3.get_object.side_effect = None
+                    s3.get_object.return_value = {"Body": body}
+                    with self.assertRaises(sqlite3.DatabaseError):
+                        backend._download_sqlite(DATE)
+                    self.assertEqual(path.exists(), existing)
+                    if existing:
+                        self.assertEqual(path.read_bytes(), valid)
+                    self.assertEqual(list(path.parent.iterdir()), [path] if existing else [])
+                    self.assertEqual(backend._downloaded_files, [])
+                    self.assertEqual(backend._db_connections, {})
+                    body.close.assert_called_once_with()
+                    s3.put_object.assert_not_called()
+
+    def test_download_disk_errors_clean_partial_and_preserve_existing_database(self):
+        real_temporary_file = tempfile.NamedTemporaryFile
+        for stage in ("create", "write", "flush", "replace"):
+            for existing in (False, True):
+                with self.subTest(stage=stage, existing=existing):
+                    backend, s3 = self.backend()
+                    self.seed(s3, "news")
+                    original = s3.objects[f"news/{DATE}.db"]
+                    path = backend._get_local_db_path(DATE)
+                    if existing:
+                        path.write_bytes(original)
+                    body = Mock()
+                    # A short chunk stays buffered until the file closes.
+                    body.iter_chunks.return_value = iter([original[:100] if stage == "flush" else original])
+                    s3.get_object.side_effect = None
+                    s3.get_object.return_value = {"Body": body}
+
+                    def temporary_file(*args, **kwargs):
+                        if stage == "create":
+                            raise OSError(PRIVATE)
+                        handle = real_temporary_file(*args, **kwargs)
+                        if stage == "flush":
+                            handle.file.raw.write = Mock(side_effect=OSError(PRIVATE))
+                            return handle
+                        write = handle.write
+
+                        def failed_write(chunk):
+                            write(chunk[:100])
+                            raise OSError(PRIVATE)
+
+                        handle.write = failed_write
+                        return handle
+
+                    target = (patch.object(Path, "replace", side_effect=OSError(PRIVATE))
+                              if stage == "replace" else
+                              patch.object(remote.tempfile, "NamedTemporaryFile", side_effect=temporary_file))
+                    with target, self.assertRaises(OSError):
+                        backend._download_sqlite(DATE)
+                    self.assertEqual(path.exists(), existing)
+                    if existing:
+                        self.assertEqual(path.read_bytes(), original)
+                    self.assertEqual(list(path.parent.iterdir()), [path] if existing else [])
+                    self.assertEqual(backend._downloaded_files, [])
+                    body.close.assert_called_once_with()
+                    s3.put_object.assert_not_called()
+
+    def test_download_body_close_failure_prevents_publication(self):
+        backend, s3 = self.backend()
+        self.seed(s3, "news")
+        original = s3.objects[f"news/{DATE}.db"]
+        path = backend._get_local_db_path(DATE)
+        path.write_bytes(original)
+        self.seed(s3, "news", "downloaded")
+        body = Mock()
+        body.iter_chunks.return_value = iter([s3.objects[f"news/{DATE}.db"]])
+        body.close.side_effect = OSError(PRIVATE)
+        s3.get_object.side_effect = None
+        s3.get_object.return_value = {"Body": body}
+        with self.assertRaises(OSError):
+            backend._download_sqlite(DATE)
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(list(path.parent.iterdir()), [path])
+        self.assertEqual(backend._downloaded_files, [])
+        body.close.assert_called_once_with()
+        s3.put_object.assert_not_called()
 
     def test_head_failure_never_opens_or_initializes_sqlite(self):
         for db_type in ("news", "rss"):

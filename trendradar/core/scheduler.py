@@ -107,7 +107,11 @@ class Scheduler:
             value = os.environ.get(env_key, "").strip()
             if value and period_key in timeline["periods"]:
                 timeline["periods"][period_key]["start"] = value
-                timeline["periods"][period_key]["end"] = value
+                # An environment override selects the minute within the
+                # configured delivery hour; it must not collapse the whole
+                # window to one minute.  Keep the YAML window's other fields
+                # (notably ``once``) untouched.
+                timeline["periods"][period_key]["end"] = value[:3] + "59"
 
         return timeline
 

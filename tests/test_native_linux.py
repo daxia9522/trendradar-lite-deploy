@@ -17,7 +17,7 @@ SPEC = importlib.util.spec_from_file_location("lifecycle_configure", ROOT / "dep
 configure = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(configure)
 from envfile import ConfigError, read_env, write_env
-from native_install import install_launcher, launcher_content, unit_path
+from native_install import install_launcher, launcher_content, migrate_quoted_unit_paths, unit_path
 
 
 class UnitPathTests(unittest.TestCase):
@@ -29,6 +29,21 @@ class UnitPathTests(unittest.TestCase):
         path = Path('/checkout with spaces/%n/$HOME/"quoted"/back\\slash')
         self.assertEqual(unit_path(path, executable=True),
                          '"/checkout with spaces/%%n/$$HOME/\\"quoted\\"/back\\\\slash"')
+
+    def test_legacy_path_migration_is_exact_and_preserves_custom_lines(self):
+        app = Path('/checkout with spaces/%n/$HOME/"quoted"/back\\slash')
+        env = Path('/custom config/%n/env')
+        def legacy(path):
+            return '"' + str(path).replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%') + '"'
+        text = ('[Unit]\r\nDescription=custom\r\n[Service]\r\n'
+                f'WorkingDirectory={legacy(app)}\r\nEnvironmentFile=-{legacy(env)}\r\n'
+                'TimeoutStartSec=900\r\nExecStart=/custom/runner\r\n')
+        expected = text.replace('WorkingDirectory=' + legacy(app), 'WorkingDirectory=' + unit_path(app))
+        expected = expected.replace('EnvironmentFile=-' + legacy(env), 'EnvironmentFile=-' + unit_path(env))
+        repaired = migrate_quoted_unit_paths(text, app, env)
+        self.assertEqual(repaired, expected)
+        self.assertEqual(migrate_quoted_unit_paths(repaired, app, env), repaired)
+        self.assertEqual(migrate_quoted_unit_paths(text, Path('/other'), Path('/other/env')), text)
 
     def test_control_characters_are_rejected_for_both_path_forms(self):
         for character in ("\n", "\r", "\0"):
@@ -330,6 +345,29 @@ if "--doctor" in sys.argv:
                 # An invalid optional EnvironmentFile can be silently ignored;
                 # verify's exit status alone cannot catch that regression.
                 self.assertIn("EnvironmentFile=-" + str(self.envpath).replace("%", "%%"), lines)
+
+    def test_reinstall_repairs_only_legacy_quotes_and_preserves_timer_schedule(self):
+        self.populated_env()
+        first = self.run_script("install", "--no-enable")
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        timer_bytes = {path: path.read_bytes() for path in self.units.glob("*.timer")}
+        expected = {}
+        for path in self.units.glob("*.service"):
+            text = path.read_text().replace("Type=oneshot", "Type=oneshot\nTimeoutStartSec=1234")
+            expected[path] = text
+            text = text.replace(f"WorkingDirectory={self.app}", f'WorkingDirectory="{self.app}"')
+            text = text.replace(f"EnvironmentFile=-{self.envpath}", f'EnvironmentFile=-"{self.envpath}"')
+            path.write_text(text)
+        self.log.unlink()
+        result = self.run_script("install", "--no-enable")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for path, text in expected.items():
+            self.assertEqual(path.read_text(), text)
+        for path, content in timer_bytes.items():
+            self.assertEqual(path.read_bytes(), content)
+        calls = self.calls()
+        self.assertTrue(any("daemon-reload" in call for call in calls), calls)
+        self.assertFalse(any("enable" in call or "start" in call for call in calls), calls)
 
     def test_status_doctor_reads_literal_env_without_shell_execution(self):
         values = self.populated_env()

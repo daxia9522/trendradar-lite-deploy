@@ -10,10 +10,11 @@
 
 from __future__ import annotations
 
-import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+from trendradar.storage.sqlite_mixin import connect_sqlite
 
 
 class HistoryReader:
@@ -24,7 +25,13 @@ class HistoryReader:
 
     def _db_path(self, date: datetime, db_type: str = "news") -> Optional[Path]:
         path = self.project_root / "output" / db_type / f"{date.strftime('%Y-%m-%d')}.db"
-        return path if path.exists() else None
+        # Only absence is a missing day. Path.exists() can suppress OS errors
+        # (including permission failures on newer Python versions).
+        try:
+            path.stat()
+        except FileNotFoundError:
+            return None
+        return path
 
     def read_all_titles_for_date(
         self,
@@ -39,7 +46,9 @@ class HistoryReader:
             (all_titles, id_to_name, all_timestamps)
 
         Raises:
-            FileNotFoundError: 对应日期 DB 不存在或为空
+            FileNotFoundError: DB 不存在、缺少对应条目表、无条目或筛选结果为空
+            sqlite3.Error: SQLite 打开/查询失败（保留原始类型及错误码）
+            OSError: 路径检查失败，如权限不足或 I/O 错误
         """
         if date is None:
             date = datetime.now()
@@ -66,18 +75,19 @@ class HistoryReader:
         all_timestamps: Dict = {}
         conn = None
         try:
-            conn = sqlite3.connect(str(db_path))
-            conn.row_factory = sqlite3.Row
+            # History is a reader of crawler output, never an initializer or
+            # writer.  mode=ro prevents missing/partial databases from being
+            # silently created and query_only guards accidental writes.
+            conn = connect_sqlite(db_path, readonly=True)
             cursor = conn.cursor()
             if db_type == "news":
                 return self._read_news(cursor, platform_ids, all_titles, id_to_name, all_timestamps)
             if db_type == "rss":
                 return self._read_rss(cursor, platform_ids, all_titles, id_to_name, all_timestamps)
             return None
-        except Exception as e:
-            print(f"Warning: 从 SQLite 读取失败 ({db_path.name}): {e}")
-            return None
         finally:
+            # Read failures must propagate, not be converted into an empty
+            # result: weekly collection only tolerates genuinely missing data.
             if conn is not None:
                 conn.close()
 

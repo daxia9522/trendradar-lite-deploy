@@ -15,6 +15,57 @@ from trendradar.storage.base import NewsItem, NewsData, RSSItem, RSSData
 from trendradar.utils.url import normalize_url
 
 
+# Keep all storage SQLite connections on the same bounded wait policy.  The
+# timeout is deliberately finite: a stuck writer must eventually surface an
+# error to the caller instead of hanging a scheduled run forever.
+SQLITE_BUSY_TIMEOUT_MS = 30_000
+
+
+def connect_sqlite(
+    path: Path | str,
+    *,
+    readonly: bool = False,
+    wal: bool = False,
+) -> sqlite3.Connection:
+    """Open a storage SQLite connection with explicit locking semantics.
+
+    ``wal`` is only used by the local writer.  Remote databases are uploaded
+    as a single main file, so they intentionally stay on the rollback journal
+    and never depend on an un-uploaded ``-wal`` sidecar.  Read-only callers
+    use SQLite's URI ``mode=ro`` and therefore cannot create or mutate a DB.
+    """
+    db_path = Path(path).resolve()
+    if readonly:
+        connect_target = f"{db_path.as_uri()}?mode=ro"
+        conn = sqlite3.connect(
+            connect_target,
+            uri=True,
+            timeout=SQLITE_BUSY_TIMEOUT_MS / 1000,
+        )
+    else:
+        conn = sqlite3.connect(
+            str(db_path),
+            timeout=SQLITE_BUSY_TIMEOUT_MS / 1000,
+        )
+
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+        if readonly:
+            conn.execute("PRAGMA query_only = ON")
+        else:
+            journal_mode = "WAL" if wal else "DELETE"
+            actual_mode = conn.execute(f"PRAGMA journal_mode = {journal_mode}").fetchone()[0]
+            if str(actual_mode).lower() != journal_mode.lower():
+                raise sqlite3.OperationalError(
+                    f"SQLite journal mode {actual_mode!r} != {journal_mode!r}"
+                )
+        return conn
+    except BaseException:
+        conn.close()
+        raise
+
+
 class SQLiteStorageMixin:
     """
     SQLite 存储操作 Mixin
@@ -34,6 +85,33 @@ class SQLiteStorageMixin:
     def _get_connection(self, date: Optional[str] = None, db_type: str = "news") -> sqlite3.Connection:
         """获取数据库连接"""
         pass
+
+    @staticmethod
+    def _build_news_item(
+        row: Any,
+        platform_name: str,
+        ranks: List[int],
+        rank_timeline: List[Dict[str, Any]],
+    ) -> NewsItem:
+        """Build a NewsItem from the common news query row shape.
+
+        Both aggregate and latest-crawl reads intentionally use this one
+        assembler so their defaults and field mapping cannot drift apart.
+        """
+        return NewsItem(
+            title=row[1],
+            source_id=row[2],
+            source_name=platform_name,
+            rank=row[4],
+            url=row[5] or "",
+            mobile_url=row[6] or "",
+            crawl_time=row[8],
+            ranks=ranks,
+            first_time=row[7],
+            last_time=row[8],
+            count=row[9],
+            rank_timeline=rank_timeline,
+        )
 
     @abstractmethod
     def _get_configured_time(self) -> datetime:
@@ -77,29 +155,33 @@ class SQLiteStorageMixin:
             conn: 数据库连接
             db_type: 数据库类型 ("news" 或 "rss")
         """
-        schema_path = self._get_schema_path(db_type)
+        schema_sql = self._get_schema_path(db_type).read_text(encoding="utf-8")
+        # Acquire the write lock before inspecting/migrating the schema so two
+        # starters cannot race to add the same column. Never commit caller data.
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            if db_type == "rss":
+                table_exists = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'rss_items'"
+                ).fetchone()
+                if table_exists:
+                    self._migrate_rss_schema(conn)
 
-        # 旧 RSS 数据库需要先补齐 guid 列，否则新版 schema 创建 guid 索引时会失败
-        if db_type == "rss":
-            table_exists = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'rss_items'"
-            ).fetchone()
-            if table_exists:
-                self._migrate_rss_schema(conn)
-
-        if schema_path.exists():
-            with open(schema_path, "r", encoding="utf-8") as f:
-                schema_sql = f.read()
-            conn.executescript(schema_sql)
-        else:
-            raise FileNotFoundError(f"Schema file not found: {schema_path}")
-
-        # 精简版：不再加载 AI 筛选 schema
-
-        if db_type == "rss":
-            self._migrate_rss_schema(conn)
-
-        conn.commit()
+            # executescript() implicitly commits a pending transaction. Use
+            # SQLite's own statement-completeness check, including triggers and
+            # quoted semicolons, to execute this schema within our transaction.
+            statement = []
+            for character in schema_sql:
+                statement.append(character)
+                if character == ";" and sqlite3.complete_statement("".join(statement)):
+                    conn.execute("".join(statement))
+                    statement.clear()
+            if "".join(statement).strip():
+                conn.execute("".join(statement))
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
 
     def _migrate_rss_schema(self, conn: sqlite3.Connection) -> None:
         """为已有 RSS 数据库补充 GUID 字段和唯一索引。"""
@@ -333,6 +415,13 @@ class SQLiteStorageMixin:
             return True, new_count, updated_count, title_changed_count, off_list_count
 
         except Exception as e:
+            # Preserve transaction atomicity when a non-item-level failure
+            # aborts the save (item-level errors are intentionally isolated
+            # above for compatibility with existing ingestion behavior).
+            try:
+                conn.rollback()
+            except (NameError, sqlite3.Error):
+                pass
             print(f"{log_prefix} 保存失败: {e}")
             return False, 0, 0, 0, 0
 
@@ -421,20 +510,9 @@ class SQLiteStorageMixin:
                 ranks = rank_history_map.get(news_id, [row[4]])
                 rank_timeline = rank_timeline_map.get(news_id, [])
 
-                items[platform_id].append(NewsItem(
-                    title=title,
-                    source_id=platform_id,
-                    source_name=platform_name,
-                    rank=row[4],
-                    url=row[5] or "",
-                    mobile_url=row[6] or "",
-                    crawl_time=row[8],  # last_crawl_time
-                    ranks=ranks,
-                    first_time=row[7],  # first_crawl_time
-                    last_time=row[8],   # last_crawl_time
-                    count=row[9],       # crawl_count
-                    rank_timeline=rank_timeline,
-                ))
+                items[platform_id].append(
+                    self._build_news_item(row, platform_name, ranks, rank_timeline)
+                )
 
             final_items = items
 
@@ -564,20 +642,9 @@ class SQLiteStorageMixin:
                 ranks = rank_history_map.get(news_id, [row[4]])
                 rank_timeline = rank_timeline_map.get(news_id, [])
 
-                items[platform_id].append(NewsItem(
-                    title=row[1],
-                    source_id=platform_id,
-                    source_name=platform_name,
-                    rank=row[4],
-                    url=row[5] or "",
-                    mobile_url=row[6] or "",
-                    crawl_time=row[8],  # last_crawl_time
-                    ranks=ranks,
-                    first_time=row[7],  # first_crawl_time
-                    last_time=row[8],   # last_crawl_time
-                    count=row[9],       # crawl_count
-                    rank_timeline=rank_timeline,
-                ))
+                items[platform_id].append(
+                    self._build_news_item(row, platform_name, ranks, rank_timeline)
+                )
 
             # 获取失败的来源（针对最新一次抓取）
             cursor.execute("""
@@ -792,6 +859,10 @@ class SQLiteStorageMixin:
             return True
 
         except Exception as e:
+            try:
+                conn.rollback()
+            except (NameError, sqlite3.Error):
+                pass
             print(f"[存储] 记录时间段执行失败: {e}")
             return False
 
@@ -990,6 +1061,10 @@ class SQLiteStorageMixin:
             return True, new_count, updated_count
 
         except Exception as e:
+            try:
+                conn.rollback()
+            except (NameError, sqlite3.Error):
+                pass
             print(f"{log_prefix} 保存 RSS 数据失败: {e}")
             return False, 0, 0
 

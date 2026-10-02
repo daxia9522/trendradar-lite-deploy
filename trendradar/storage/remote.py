@@ -13,6 +13,7 @@ import shutil
 import sys
 import tempfile
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -29,7 +30,7 @@ except ImportError:
     ClientError = Exception
 
 from trendradar.storage.base import StorageBackend, NewsData, RSSItem, RSSData
-from trendradar.storage.sqlite_mixin import SQLiteStorageMixin
+from trendradar.storage.sqlite_mixin import SQLiteStorageMixin, connect_sqlite
 from trendradar.utils.time import (
     DEFAULT_TIMEZONE,
     get_configured_time,
@@ -68,6 +69,32 @@ def _is_object_not_found(error: ClientError) -> bool:
     if status is not None and (type(status) is not int or status != 404):
         return False
     return code in ("404", "NoSuchKey", "Not Found") or (code in ("", None) and status == 404)
+
+
+def _validate_sqlite_file(path: Path) -> None:
+    """发布前校验 SQLite 文件，拒绝空响应、截断页面和损坏的数据库。"""
+    with path.open("rb") as file:
+        header = file.read(100)
+    if len(header) != 100 or header[:16] != b"SQLite format 3\x00":
+        raise ValueError("Invalid SQLite header")
+
+    page_size = int.from_bytes(header[16:18], "big")
+    if page_size == 1:
+        page_size = 65536
+    if not 512 <= page_size <= 65536 or page_size & (page_size - 1):
+        raise ValueError("Invalid SQLite page size")
+    if path.stat().st_size % page_size:
+        raise ValueError("Incomplete SQLite page")
+
+    # 校验已下载完毕的独立快照，不创建或依赖 WAL/SHM 旁路文件。
+    uri = f"{path.resolve().as_uri()}?mode=ro&immutable=1"
+    with closing(sqlite3.connect(uri, uri=True)) as connection:
+        page_count = connection.execute("PRAGMA page_count").fetchone()[0]
+        # 取模只能发现半页截断，仍须拒绝缺页和额外的整页内容。
+        if path.stat().st_size != page_size * page_count:
+            raise ValueError("SQLite file size does not match its page count")
+        if connection.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
+            raise ValueError("SQLite quick_check failed")
 
 
 class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
@@ -265,13 +292,36 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
             print("[远程存储] 文件不存在，将创建新数据库")
             return None
 
+        partial_path = None
         try:
             # 使用 get_object + iter_chunks 替代 download_file
             # iter_chunks 会自动处理 chunked transfer encoding
             response = self.s3_client.get_object(Bucket=self.bucket_name, Key=r2_key)
-            with open(local_path, 'wb') as f:
-                for chunk in response['Body'].iter_chunks(chunk_size=1024*1024):
-                    f.write(chunk)
+            with closing(response['Body']) as body:
+                # 同目录唯一临时文件，失败时不能截断或覆盖既存好库。
+                with tempfile.NamedTemporaryFile(
+                    mode='wb', dir=local_path.parent,
+                    prefix=f"{local_path.name}.", suffix=".part", delete=False,
+                ) as f:
+                    partial_path = Path(f.name)
+                    for chunk in body.iter_chunks(chunk_size=1024*1024):
+                        f.write(chunk)
+
+            # SQLite 会把零字节文件当作空库，先核对文件头再校验完整性。
+            with open(partial_path, 'rb') as f:
+                if f.read(16) != b"SQLite format 3\x00":
+                    raise sqlite3.DatabaseError("下载文件不是 SQLite 数据库")
+            # 校验独立的只读快照，不创建或依赖 WAL/SHM 等旁路文件。
+            uri = f"{partial_path.resolve().as_uri()}?mode=ro&immutable=1"
+            with closing(sqlite3.connect(uri, uri=True)) as conn:
+                # quick_check 可能接受末页空白被截断的文件，另外核对页面总长度。
+                page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+                page_count = conn.execute("PRAGMA page_count").fetchone()[0]
+                if (partial_path.stat().st_size != page_size * page_count
+                        or conn.execute("PRAGMA quick_check").fetchall() != [("ok",)]):
+                    raise sqlite3.DatabaseError("下载数据库完整性校验失败")
+
+            partial_path.replace(local_path)
             self._downloaded_files.append(local_path)
             print("[远程存储] 已下载数据库")
             return local_path
@@ -285,6 +335,9 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
         except Exception as e:
             print(f"[远程存储] 下载异常: {_error_summary(e)}")
             raise
+        finally:
+            if partial_path is not None:
+                partial_path.unlink(missing_ok=True)
 
     def begin_batch(self):
         """开启批量模式：延迟上传，避免频繁上传同一文件"""
@@ -338,6 +391,26 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
             return False
 
         try:
+            # Upload only a self-contained main database file.  Remote
+            # connections are opened in rollback-journal mode; reject a
+            # stray WAL sidecar rather than silently uploading a stale main
+            # file and losing committed rows.
+            connection = getattr(self, "_db_connections", {}).get(str(local_path))
+            if connection is not None:
+                connection.commit()
+                journal_mode = connection.execute(
+                    "PRAGMA journal_mode"
+                ).fetchone()[0]
+                if str(journal_mode).lower() != "delete":
+                    print(
+                        f"[远程存储] 拒绝上传非 rollback journal 数据库: {journal_mode}"
+                    )
+                    return False
+            wal_path = Path(f"{local_path}-wal")
+            if wal_path.exists():
+                print("[远程存储] 检测到未随主文件上传的 WAL，拒绝上传")
+                return False
+
             # 获取本地文件大小
             local_size = local_path.stat().st_size
             print(f"[远程存储] 准备上传数据库 ({local_size} bytes)")
@@ -392,13 +465,19 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
             # 确保目录存在
             local_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # 下载异常必须在 sqlite3.connect 前传播，不能把状态未知当作空库。
+            # 下载异常必须在打开 SQLite 连接前传播，不能把状态未知当作空库。
             if not local_path.exists():
                 self._download_sqlite(date, db_type)
 
-            conn = sqlite3.connect(db_path)
-            conn.row_factory = sqlite3.Row
-            self._init_tables(conn, db_type)
+            # The remote object is transferred as one SQLite main file.  Use
+            # rollback journaling so no untracked -wal sidecar is needed to
+            # reconstruct committed rows after upload/download.
+            conn = connect_sqlite(db_path, wal=False)
+            try:
+                self._init_tables(conn, db_type)
+            except Exception:
+                conn.close()
+                raise
             self._db_connections[db_path] = conn
 
         return self._db_connections[db_path]
@@ -786,7 +865,7 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
                     continue
 
                 remote_key = self._get_remote_db_key(date_str, db_type)
-                partial_path = local_db_path.with_suffix(".db.part")
+                partial_path = None
                 try:
                     # 保持逐对象尽力拉取；HEAD 故障记为失败，而不是远程不存在。
                     if not self._check_object_exists(remote_key):
@@ -794,15 +873,27 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
                         continue
                     local_db_path.parent.mkdir(parents=True, exist_ok=True)
                     response = self.s3_client.get_object(Bucket=self.bucket_name, Key=remote_key)
-                    with open(partial_path, 'wb') as f:
-                        for chunk in response['Body'].iter_chunks(chunk_size=1024*1024):
-                            f.write(chunk)
+                    with closing(response['Body']) as body:
+                        # 同目录唯一临时文件，失败清理不影响其他下载。
+                        with tempfile.NamedTemporaryFile(
+                            mode='wb', dir=local_db_path.parent,
+                            prefix=f".{local_db_path.name}.", suffix=".part", delete=False,
+                        ) as f:
+                            partial_path = Path(f.name)
+                            for chunk in body.iter_chunks(chunk_size=1024*1024):
+                                f.write(chunk)
+                    _validate_sqlite_file(partial_path)
                     partial_path.replace(local_db_path)
                     print("[远程存储] 已拉取数据库")
                     pulled_count += 1
                 except Exception as e:
-                    partial_path.unlink(missing_ok=True)
                     print(f"[远程存储] 拉取失败: {_error_summary(e)}")
+                finally:
+                    if partial_path is not None:
+                        try:
+                            partial_path.unlink(missing_ok=True)
+                        except OSError as e:
+                            print(f"[远程存储] 临时文件清理失败: {_error_summary(e)}")
 
         print(f"[远程存储] 拉取完成，共下载 {pulled_count} 个数据库文件")
         return pulled_count
