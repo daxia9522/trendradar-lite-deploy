@@ -447,40 +447,6 @@ output/
 └── meta/                     # 调度与执行状态
 ```
 
-## 开发与验证
-
-### 代码职责与个人邮件
-
-- `trendradar/daily_flow/`：`runner` 编排日报执行顺序与开关，`collection` 负责采集和落库，`inputs` 准备各模式输入，`rss` 处理 RSS 模式与时效，`models` 定义步骤间的数据边界。历史读取只返回新闻、来源、标题信息和新增标题，热榜关键词规则由报告准备阶段单独获取；历史阶段仍保留原有词表复核及失败处理，但不再向下游携带这三项词表数据；RSS 只向下游传递统计、新增统计和原始条目，新增条目计算与 `is_new` 标记仍留在 RSS 模块内。
-- `trendradar/report/`：`daily`、`weekly` 各自组织报告内容；`components` 提供唯一的 Header 和 AI 卡片，`shell` 提供唯一的文档外壳，`models.ReportMeta` 只传展示数据。Header 的元信息、关键词和 AI 卡片的可选标题由内容决定，不按日报/周报切换布局。日报新闻区与 AI 卡片仍遵守 `region_order`、新增区与独立区开关；周报使用同样的 Header 和 AI 卡片，不额外重复标题。周报现有的 `weekly_report/{collection,keywords,prompting,runtime}` 继续负责采集、关键词、提示词和运行环境。CLI 直接调用 `trendradar.daily_flow.runner.DailyRunner`，`AppContext` 直接调用 `trendradar.report.daily.render_daily_html`；周报保留 `weekly_report/weekly_ai_report_email.py` 公开脚本入口，由该主脚本直接调用 `trendradar.report.weekly.render_weekly_html`，不再保留旧呈现适配层。
-- `report/markdown.py` 是唯一安全 Markdown 渲染器：连续行以 `<br>` 连接、空行分段，支持三级标题、列表（保留显式起始数字）、引用、粗体、斜体和行内代码；原始 HTML 始终转义。日报 AI 正文直接交给相同的渲染入口，不转换旧式 `【标题】`，不按板块格式自动给标题或列表加编号；标题与编号遵循输入的标准 Markdown，不改变分析器契约。
-- 邮件 CSS 仅有 `styles/{base,header,ai,news}.css` 四份：日报内嵌 `base + header + ai + news`，周报内嵌前三份；`styles.py` 的 `load_stylesheets` 接收组件名序列，通过资源白名单和 `importlib.resources` 加载，不依赖工作目录或外部样式。Header 与 AI 卡片以原日报视觉为统一基准；每个组件自行维护深色和 640px 窄屏规则，新闻选择器限定在 `.news-region`，页面布局单独使用 `.report-layout`。设计值仅维护在所属 CSS 中，关键颜色保留邮件客户端所需的直接值，不另建 Python 主题常量。
-- 日报、周报及 CLI 统一调用 `send_report` 发送单封报告邮件，返回本次独立的 `EmailDeliveryResult`；仅支持邮件推送，没有多渠道分发接口或镜像状态、群发队列或营销批量逻辑。配置自己的个人邮箱即可；底层 SMTP 重试与部分投递后禁止整封重发的保护保持不变。
-
-### 供应链固定
-
-- 依赖：安装与 CI 均从 `requirements.lock`（精确版本+SHA-256，与官方 PyPI 逐一核对）哈希校验且仅收 wheel；改 `requirements.txt` 后用 `deploy/lock_dependencies.py` 重解、审阅、验证。哈希防供应链替换，不防包自身漏洞。
-- Actions：第三方 action 全部固定完整 commit SHA（官方 API 解析），更新时重新核对。
-- 镜像：发布工作流对双架构 index digest 生成 GitHub artifact attestation；消费者用 `gh attestation verify "oci://ghcr.io/<镜像@digest>" --repo daxia9522/trendradar-lite-deploy --signer-workflow daxia9522/trendradar-lite-deploy/.github/workflows/release-image.yml` 验证。现存 v26.9 早于签名流程，无追溯签名；`Dockerfile` 另固定了 Python 基础镜像 digest，更新前需到 registry 重新核验。
-
-仅部署使用可忽略本节；**修改代码后、push 之前**，本地先跑一遍与 CI 相同的自检，避免推上去才看到红叉：
-
-```bash
-python -m pip install --require-hashes -r requirements.lock
-python -m compileall -q trendradar weekly_report deploy tests   # 语法编译
-python -m unittest discover -s tests                            # 全量行为测试
-for script in install.sh deploy/linux/*.sh deploy/docker/*.sh; do
-  bash -n "$script" || exit 1                                  # 逐个脚本检查语法
-done
-docker compose config --quiet                                   # compose 配置校验
-docker build --tag trendradar-lite-deploy:ci .
-bash .github/scripts/container_smoke.sh trendradar-lite-deploy:ci # 禁网运行镜像入口
-```
-
-容器 CI 在构建后实际运行配置检查、doctor、日报／周报帮助入口和调度展示；不挂载业务数据，不注入宿主凭据，禁用网络。周报源码按采集筛选、关键词、提示词、呈现和运行环境分模块，原 `weekly_report/weekly_ai_report_email.py` 命令入口保持不变。
-
-测试全部使用 mock 与临时目录：不抓取真实新闻、不调用真实 AI、不发送真实邮件；原生菜单与安装器测试使用临时 HOME/XDG 和模拟 systemctl，不操作开发者的真实定时器。测试代码不打入镜像、不由安装器部署。
-
 ## 许可与致谢
 
 基于 [sansan0/TrendRadar](https://github.com/sansan0/TrendRadar) 精简、修改并完成三种部署适配；本仓库非上游官方发行版，新增与修改内容由本仓库维护者负责。遵循 [GPL-3.0](./LICENSE)。
