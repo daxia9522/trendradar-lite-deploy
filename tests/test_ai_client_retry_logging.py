@@ -6,13 +6,17 @@ completion、sleep 和网络连接均被替换；所有凭据与 URL 均为合�
 """
 
 import io
+import os
 import unittest
 from contextlib import redirect_stdout
 from unittest.mock import call, patch
 
-from litellm.exceptions import ServiceUnavailableError, Timeout
-
-from trendradar.ai.client import AIClient
+with patch.dict(os.environ, {"LITELLM_LOCAL_MODEL_COST_MAP": "True"}, clear=True), \
+        patch("socket.create_connection", side_effect=AssertionError("network during import")), \
+        patch("socket.socket.connect", side_effect=AssertionError("network during import")), \
+        patch("socket.socket.connect_ex", side_effect=AssertionError("network during import")):
+    from litellm.exceptions import ServiceUnavailableError, Timeout
+    from trendradar.ai.client import AIClient, RETRY_BACKOFF_SECONDS, TIMEOUT_RETRY_LIMIT
 
 
 PRIMARY_MODEL = "openai/test-primary"
@@ -39,6 +43,9 @@ class UnprintableError(Exception):
 
 class AIClientRetryLoggingTests(unittest.TestCase):
     def setUp(self):
+        env = patch.dict(os.environ, {"LITELLM_LOCAL_MODEL_COST_MAP": "True"}, clear=True)
+        env.start()
+        self.addCleanup(env.stop)
         self.messages = [{"role": "user", "content": "offline test prompt"}]
         self.response = {
             "choices": [{"message": {"content": "offline answer"}, "finish_reason": "stop"}]
@@ -51,7 +58,7 @@ class AIClientRetryLoggingTests(unittest.TestCase):
             "trendradar.ai.client.completion", return_value=self.response
         )
         self.sleep = self._patch("trendradar.ai.client.time.sleep")
-        # 拖动固定为0，使 sleep 断言拿到确定值；另有专测验证拖动区间。
+        # 抖动固定为0，使 sleep 断言拿到确定值；另有专测验证抖动区间。
         self._patch("trendradar.ai.client.random.uniform", return_value=0.0)
         self.network_guards = [
             self._patch(
@@ -79,6 +86,9 @@ class AIClientRetryLoggingTests(unittest.TestCase):
             "API_BASE": FAKE_API_BASE,
         }
         config.update(overrides)
+        models = config.get("FALLBACK_MODELS", [])
+        if models:
+            config["FALLBACK_API_BASE"] = "@".join([FAKE_API_BASE] * len(models))
         return AIClient(config)
 
     def _unavailable(self, model=PRIMARY_MODEL):
@@ -92,17 +102,21 @@ class AIClientRetryLoggingTests(unittest.TestCase):
             if line.startswith(FAILURE_PREFIX)
         ]
 
-    def _assert_calls(self, models, timeout=240):
+    def _assert_calls(self, models, timeout=120):
         self.assertEqual(
             self.completion.call_args_list,
             [
                 call(
                     model=model, messages=self.messages, timeout=timeout,
-                    api_key=FAKE_API_KEY, api_base=FAKE_API_BASE,
+                    api_key=FAKE_API_KEY, api_base=FAKE_API_BASE, max_retries=0, num_retries=0,
                 )
                 for model in models
             ],
         )
+
+    def test_retry_constants_match_shared_contract(self):
+        self.assertEqual(RETRY_BACKOFF_SECONDS, (5, 8))
+        self.assertEqual(TIMEOUT_RETRY_LIMIT, 1)
 
     def test_first_attempt_success_has_no_failure_log_or_sleep(self):
         client = self._client()
@@ -116,7 +130,7 @@ class AIClientRetryLoggingTests(unittest.TestCase):
         self.assertEqual(client.last_finish_reason, "stop")
         self.assertEqual(
             self.output.getvalue().splitlines(),
-            [f"[AI] 请求开始: model={PRIMARY_MODEL}, attempt=1, timeout=240s"],
+            [f"[AI] 请求开始: model={PRIMARY_MODEL}, attempt=1, timeout=120s"],
         )
 
     def test_503_retries_log_once_per_failure_then_succeed(self):
@@ -126,15 +140,15 @@ class AIClientRetryLoggingTests(unittest.TestCase):
         self.assertEqual(client.chat(self.messages), "offline answer")
 
         self._assert_calls([PRIMARY_MODEL] * 3)
-        self.assertEqual(self.sleep.call_args_list, [call(5), call(15)])
+        self.assertEqual(self.sleep.call_args_list, [call(5), call(8)])
         self.assertEqual(
             self.output.getvalue().splitlines(),
             [
-                f"[AI] 请求开始: model={PRIMARY_MODEL}, attempt=1, timeout=240s",
+                f"[AI] 请求开始: model={PRIMARY_MODEL}, attempt=1, timeout=120s",
                 "[AI] attempt 失败: ServiceUnavailableError(503)",
-                f"[AI] 请求开始: model={PRIMARY_MODEL}, attempt=2, timeout=240s",
+                f"[AI] 请求开始: model={PRIMARY_MODEL}, attempt=2, timeout=120s",
                 "[AI] attempt 失败: ServiceUnavailableError(503)",
-                f"[AI] 请求开始: model={PRIMARY_MODEL}, attempt=3, timeout=240s",
+                f"[AI] 请求开始: model={PRIMARY_MODEL}, attempt=3, timeout=120s",
             ],
         )
         self.assertEqual(client.last_model, PRIMARY_MODEL)
@@ -152,25 +166,27 @@ class AIClientRetryLoggingTests(unittest.TestCase):
     def test_fallback_runs_after_primary_backoff_exhaustion(self):
         client = self._client(FALLBACK_MODELS=[FALLBACK_MODEL], TIMEOUT=37)
         self.completion.side_effect = [
-            self._unavailable(), self._unavailable(), self._unavailable(), self._unavailable(),
-            self._unavailable(FALLBACK_MODEL), self.response,
+            self._unavailable(), self._unavailable(), self._unavailable(),
+            self._unavailable(FALLBACK_MODEL), self._unavailable(FALLBACK_MODEL), self.response,
         ]
 
         self.assertEqual(client.chat(self.messages), "offline answer")
 
-        # 5xx/429 拥塞类走 5/15/45 三档；档位耗尽后当次失败直接切备用；备用重新从5秒起。
-        self._assert_calls([PRIMARY_MODEL] * 4 + [FALLBACK_MODEL] * 2, timeout=37)
-        self.assertEqual(self.sleep.call_args_list, [call(5), call(15), call(45), call(5)])
+        # 5xx/429 拥塞类走 5/8 两档；默认预算耗尽后切备用；每个模型重新取得两档。
+        self._assert_calls([PRIMARY_MODEL] * 3 + [FALLBACK_MODEL] * 3, timeout=37)
+        self.assertEqual(self.sleep.call_args_list, [call(5), call(8), call(5), call(8)])
         self.assertEqual(
             self._failure_lines(), ["[AI] attempt 失败: ServiceUnavailableError(503)"] * 5
         )
         self.assertEqual(
-            self.output.getvalue().splitlines()[8:],
+            self.output.getvalue().splitlines()[6:],
             [
                 f"[AI] 模型 {PRIMARY_MODEL} 调用失败，尝试备用模型",
-                f"[AI] 请求开始: model={FALLBACK_MODEL}, attempt=1, timeout=37s",
+                f"[AI] 请求开始: model={FALLBACK_MODEL}, attempt=1, timeout=37s, candidate=fallback:1",
                 "[AI] attempt 失败: ServiceUnavailableError(503)",
-                f"[AI] 请求开始: model={FALLBACK_MODEL}, attempt=2, timeout=37s",
+                f"[AI] 请求开始: model={FALLBACK_MODEL}, attempt=2, timeout=37s, candidate=fallback:1",
+                "[AI] attempt 失败: ServiceUnavailableError(503)",
+                f"[AI] 请求开始: model={FALLBACK_MODEL}, attempt=3, timeout=37s, candidate=fallback:1",
             ],
         )
         self.assertEqual(client.last_model, FALLBACK_MODEL)
@@ -211,10 +227,10 @@ class AIClientRetryLoggingTests(unittest.TestCase):
         self.assertEqual(self._client(NUM_RETRIES=6).chat(self.messages), "offline answer")
 
         self._assert_calls([PRIMARY_MODEL] * 7)
-        # 先消耗 5/15/45 拥塞档，档位用完后回落到通用指数封顶8秒。
+        # 先消耗 5/8 拥塞档；显式放大预算时，既有通用指数算法继续从4秒升至封顶8秒。
         self.assertEqual(
             self.sleep.call_args_list,
-            [call(5), call(15), call(45), call(8), call(8), call(8)],
+            [call(5), call(8), call(4), call(8), call(8), call(8)],
         )
         self.assertEqual(
             self._failure_lines(), ["[AI] attempt 失败: ServiceUnavailableError(503)"] * 6
@@ -245,23 +261,42 @@ class AIClientRetryLoggingTests(unittest.TestCase):
         self.assertEqual(client.timeout, 91)
         self.assertEqual(client.num_retries, 6)
 
-    def test_timeout_cuts_off_at_two_attempts_per_model(self):
-        # 408 确定性慢：单模型最多两次，第三次机会直接给备用模型。
+    def test_timeout_switches_immediately_without_retry_or_sleep(self):
+        # 408 确定性慢：单模型只尝试一次，立即切换备用模型。
         client = self._client(FALLBACK_MODELS=[FALLBACK_MODEL])
         timeout_error = Timeout(message=PRIVATE_MESSAGE, model=PRIMARY_MODEL, llm_provider="openai")
-        self.completion.side_effect = [timeout_error, timeout_error, self.response]
+        self.completion.side_effect = [timeout_error, self.response]
 
         self.assertEqual(client.chat(self.messages), "offline answer")
 
-        self._assert_calls([PRIMARY_MODEL] * 2 + [FALLBACK_MODEL])
-        self.assertEqual(self.sleep.call_args_list, [call(1)])
+        self._assert_calls([PRIMARY_MODEL, FALLBACK_MODEL])
+        self.sleep.assert_not_called()
         self.assertEqual(
             self._failure_lines(),
-            ["[AI] attempt 失败: Timeout(408)", "[AI] attempt 失败: Timeout(408)"],
+            ["[AI] attempt 失败: Timeout(408)"],
         )
 
+    def test_http_408_and_named_timeout_each_switch_with_large_retry_budget(self):
+        named_timeout = type("Timeout", (Exception,), {})(PRIVATE_MESSAGE)
+        http_timeout = RuntimeError(PRIVATE_MESSAGE)
+        http_timeout.status_code = 408
+        for error in (http_timeout, named_timeout):
+            with self.subTest(error_type=type(error).__name__):
+                self.completion.reset_mock()
+                self.sleep.reset_mock()
+                self.output.seek(0)
+                self.output.truncate(0)
+                self.completion.side_effect = [error, self.response]
+                client = self._client(NUM_RETRIES=20, FALLBACK_MODELS=[FALLBACK_MODEL])
+
+                self.assertEqual(client.chat(self.messages), "offline answer")
+
+                self._assert_calls([PRIMARY_MODEL, FALLBACK_MODEL])
+                self.sleep.assert_not_called()
+                self.assertEqual(client.last_model, FALLBACK_MODEL)
+                self.assertEqual(len(self._failure_lines()), 1)
+
     def test_backoff_jitter_adds_at_most_one_second(self):
-        self.sleep.stop()
         self.completion.side_effect = [self._unavailable(), self.response]
         with patch("trendradar.ai.client.random.uniform", return_value=0.5) as uniform, \
                 patch("trendradar.ai.client.time.sleep") as real_sleep:
@@ -317,16 +352,19 @@ class AIClientRetryLoggingTests(unittest.TestCase):
         self.assertEqual(self._failure_lines(), ["[AI] attempt 失败: UnprintableError"])
         self.sleep.assert_not_called()
 
-    def test_litellm_timeout_retries_with_unchanged_timeout_and_status_log(self):
-        self.completion.side_effect = [
-            Timeout(message=PRIVATE_MESSAGE, model=PRIMARY_MODEL, llm_provider="openai"),
-            self.response,
-        ]
+    def test_litellm_timeout_reraises_without_retry_with_unchanged_timeout(self):
+        original = Timeout(message=PRIVATE_MESSAGE, model=PRIMARY_MODEL, llm_provider="openai")
+        self.completion.side_effect = original
+        client = self._client(TIMEOUT=45)
 
-        self.assertEqual(self._client(TIMEOUT=45).chat(self.messages), "offline answer")
+        with self.assertRaises(Timeout) as raised:
+            client.chat(self.messages)
 
-        self._assert_calls([PRIMARY_MODEL] * 2, timeout=45)
-        self.sleep.assert_called_once_with(1)
+        self.assertIs(raised.exception, original)
+        self._assert_calls([PRIMARY_MODEL], timeout=45)
+        self.sleep.assert_not_called()
+        self.assertIsNone(client.last_model)
+        self.assertIsNone(client.last_finish_reason)
         self.assertEqual(self._failure_lines(), ["[AI] attempt 失败: Timeout(408)"])
 
     def test_false_status_values_do_not_add_parentheses(self):

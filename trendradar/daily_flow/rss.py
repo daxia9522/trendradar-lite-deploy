@@ -8,144 +8,53 @@ from .models import RSSResult
 
 
 def prepare_rss_input(
-    rss_data,
+    capture: Dict,
     *,
     mode: str,
-    storage,
     config: Dict,
-    load_frequency_words: Callable,
+    keywords,
     convert_items: Callable,
     timezone: str,
     rank_threshold: int,
 ) -> RSSResult:
-    """
-    按报告模式处理 RSS 数据，返回与热榜相同格式的统计结构
-
-    三种模式：
-    - daily: 当日汇总，统计=当天所有条目，新增=本次新增条目
-    - current: 当前榜单，统计=当前榜单条目，新增=本次新增条目
-    - incremental: 增量模式，统计=新增条目，新增=无
-
-    Args:
-        rss_data: 当前抓取的 RSSData 对象
-
-    Returns:
-        RSSResult(stats, new_stats, raw_items)：
-        - stats: RSS 关键词统计列表（与热榜 stats 格式一致）
-        - new_stats: RSS 新增关键词统计列表（与热榜 stats 格式一致）
-        - raw_items: 原始 RSS 条目列表（用于独立展示区）
-        本次新增条目留在本模块内部，用于新增统计和 is_new 标记。
-    """
+    """Prepare current/daily pools and interval novelty from the SAME capture."""
     from trendradar.core.analyzer import count_rss_frequency
+    from trendradar.storage.base import RSSItem
+    from .capture import aliases
 
-    # 从 display.regions.rss 统一控制 RSS 分析和展示
-    rss_display_enabled = config.get("DISPLAY", {}).get("REGIONS", {}).get("RSS", True)
+    def convert(rows):
+        grouped = {}
+        for row in rows:
+            grouped.setdefault(row["feed_id"], []).append(RSSItem.from_dict(row))
+        converted = convert_items(grouped, capture["rss_names"])
+        new_keys = set().union(*(aliases("rss", item) for item in capture["new_rss"]))
+        for item in converted:
+            item["is_new"] = bool(aliases("rss", item) & new_keys)
+        return converted
 
-    # 加载关键词配置
-    try:
-        word_groups, filter_words, global_filters = load_frequency_words()
-    except FileNotFoundError:
-        word_groups, filter_words, global_filters = [], [], []
+    today = capture["captured_at"][:10]
+    today_source = next((day for day in capture["sources"]["rss"] if day["date"] == today), {})
+    raw_rows = today_source.get("items", [])
+    if mode == "current":
+        raw_rows = [item for item in raw_rows if item["last_time"] == today_source.get("latest_time")]
+    new_items = convert(capture["new_rss"])
+    raw_items = new_items if mode == "incremental" else convert(raw_rows)
+    if not config.get("DISPLAY", {}).get("REGIONS", {}).get("RSS", True):
+        return RSSResult(None, None, raw_items)
 
-    max_news_per_keyword = config.get("MAX_NEWS_PER_KEYWORD", 0)
-    sort_by_position_first = config.get("SORT_BY_POSITION_FIRST", False)
+    def count(items, quiet=False):
+        return count_rss_frequency(
+            rss_items=items, word_groups=keywords.word_groups,
+            filter_words=keywords.filter_words, global_filters=keywords.global_filters,
+            new_items=new_items, max_news_per_keyword=config.get("MAX_NEWS_PER_KEYWORD", 0),
+            sort_by_position_first=config.get("SORT_BY_POSITION_FIRST", False),
+            timezone=timezone, rank_threshold=rank_threshold, quiet=quiet,
+        )[0]
 
-    rss_stats = None
-    rss_new_stats = None
-    raw_rss_items = None  # 原始 RSS 条目列表（用于独立展示区）
-    new_items_list = None
-
-    # 1. 首先获取原始条目（用于独立展示区，不受 display.regions.rss 影响）
-    # 根据模式获取原始条目
-    if mode == "incremental":
-        new_items_dict = storage.detect_new_rss_items(rss_data)
-        if new_items_dict:
-            raw_rss_items = convert_items(new_items_dict, rss_data.id_to_name)
-    elif mode == "current":
-        latest_data = storage.get_latest_rss_data(rss_data.date)
-        if latest_data:
-            raw_rss_items = convert_items(latest_data.items, latest_data.id_to_name)
-    else:  # daily
-        all_data = storage.get_rss_data(rss_data.date)
-        if all_data:
-            raw_rss_items = convert_items(all_data.items, all_data.id_to_name)
-
-    # 2. 获取新增条目（用于统计和 AI 输入的新增标记）
-    new_items_dict = storage.detect_new_rss_items(rss_data)
-    if new_items_dict:
-        new_items_list = convert_items(new_items_dict, rss_data.id_to_name)
-        if new_items_list:
-            print(f"[RSS] 检测到 {len(new_items_list)} 条新增")
-
-    # 如果 RSS 展示未启用，跳过关键词分析，只返回原始条目用于独立展示区
-    if not rss_display_enabled:
-        return RSSResult(None, None, raw_rss_items)
-
-    # 3. 根据模式获取统计条目
-    if mode == "incremental":
-        # 增量模式：统计条目就是新增条目
-        if not new_items_list:
-            print("[RSS] 增量模式：没有新增 RSS 条目")
-            return RSSResult(None, None, raw_rss_items)
-
-        rss_stats, total = count_rss_frequency(
-            rss_items=new_items_list,
-            word_groups=word_groups,
-            filter_words=filter_words,
-            global_filters=global_filters,
-            new_items=new_items_list,  # 增量模式所有都是新增
-            max_news_per_keyword=max_news_per_keyword,
-            sort_by_position_first=sort_by_position_first,
-            timezone=timezone,
-            rank_threshold=rank_threshold,
-            quiet=False,
-        )
-        if not rss_stats:
-            print("[RSS] 增量模式：关键词匹配后没有内容")
-            # 即使关键词匹配为空，也返回原始条目用于独立展示区
-            return RSSResult(None, None, raw_rss_items)
-
-    else:
-        mode_label = (
-            "当前榜单模式" if mode == "current" else "当日汇总模式"
-        )
-        if not raw_rss_items:
-            print(f"[RSS] {mode_label}：没有 RSS 数据")
-            return RSSResult(None, None, None)
-
-        rss_stats, total = count_rss_frequency(
-            rss_items=raw_rss_items,
-            word_groups=word_groups,
-            filter_words=filter_words,
-            global_filters=global_filters,
-            new_items=new_items_list,  # 标记新增
-            max_news_per_keyword=max_news_per_keyword,
-            sort_by_position_first=sort_by_position_first,
-            timezone=timezone,
-            rank_threshold=rank_threshold,
-            quiet=False,
-        )
-        if not rss_stats:
-            print(f"[RSS] {mode_label}：关键词匹配后没有内容")
-            # 即使关键词匹配为空，也返回原始条目用于独立展示区
-            return RSSResult(None, None, raw_rss_items)
-
-        # 生成新增统计
-        if new_items_list:
-            rss_new_stats, _ = count_rss_frequency(
-                rss_items=new_items_list,
-                word_groups=word_groups,
-                filter_words=filter_words,
-                global_filters=global_filters,
-                new_items=new_items_list,
-                max_news_per_keyword=max_news_per_keyword,
-                sort_by_position_first=sort_by_position_first,
-                timezone=timezone,
-                rank_threshold=rank_threshold,
-                quiet=True,
-            )
-
-    return RSSResult(rss_stats, rss_new_stats, raw_rss_items)
+    # An empty current pool must not discard off-list interval novelty.
+    stats = count(raw_items) if raw_items else []
+    new_stats = count(new_items, quiet=True) if new_items and mode != "incremental" else []
+    return RSSResult(stats, new_stats, raw_items)
 
 
 def convert_rss_items_to_list(
@@ -210,6 +119,7 @@ def convert_rss_items_to_list(
                 "feed_id": feed_id,
                 "feed_name": id_to_name.get(feed_id, feed_id),
                 "url": item.url,
+                "guid": item.guid,
                 "published_at": item.published_at,
                 "summary": item.summary,
                 "author": item.author,

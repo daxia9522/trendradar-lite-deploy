@@ -68,6 +68,7 @@ class StorageManager:
 
         self._backend: Optional[StorageBackend] = None
         self._remote_backend: Optional[StorageBackend] = None
+        self._publication_store = None
 
     @staticmethod
     def is_github_actions() -> bool:
@@ -173,6 +174,51 @@ class StorageManager:
 
         return self._backend
 
+    def get_publication_store(self):
+        """Lazily share the backend's durable publication ledger, never a fallback.
+
+        The news backend historically permits remote-to-local fallback. That is
+        unsafe for publication claims, so remote selection is enforced here even
+        if a previous get_backend() call already fell back to local news storage.
+        """
+        from trendradar.storage.publication import (
+            LocalPublicationStore, PublicationError, RemotePublicationStore,
+        )
+
+        if self._publication_store is not None:
+            return self._publication_store
+
+        remote_required = self._resolve_backend_type() == "remote"
+        if self._backend is None and remote_required:
+            # Do not use the legacy fallback helper: its diagnostics can include
+            # provider error text and its failure permits local initialization.
+            try:
+                from trendradar.storage.remote import RemoteStorageBackend
+
+                self._backend = RemoteStorageBackend(
+                    bucket_name=self.remote_config.get("bucket_name") or os.environ.get("S3_BUCKET_NAME", ""),
+                    access_key_id=self.remote_config.get("access_key_id") or os.environ.get("S3_ACCESS_KEY_ID", ""),
+                    secret_access_key=self.remote_config.get("secret_access_key") or os.environ.get("S3_SECRET_ACCESS_KEY", ""),
+                    endpoint_url=self.remote_config.get("endpoint_url") or os.environ.get("S3_ENDPOINT_URL", ""),
+                    region=self.remote_config.get("region") or os.environ.get("S3_REGION", ""),
+                    enable_txt=self.enable_txt,
+                    enable_html=self.enable_html,
+                    timezone=self.timezone,
+                )
+            except Exception:
+                raise PublicationError("Cannot initialize required remote publication backend") from None
+
+        backend = self.get_backend()
+        if remote_required and backend.backend_name != "remote":
+            raise PublicationError("Remote publication cannot use a local fallback backend")
+        if backend.backend_name == "remote":
+            self._publication_store = RemotePublicationStore(backend.s3_client, backend.bucket_name)
+        elif backend.backend_name == "local":
+            self._publication_store = LocalPublicationStore(backend.data_dir)
+        else:
+            raise PublicationError("Unsupported publication storage backend")
+        return self._publication_store
+
     def pull_from_remote(self) -> int:
         """
         从远程拉取数据到本地
@@ -244,6 +290,9 @@ class StorageManager:
 
     def cleanup(self) -> None:
         """清理资源"""
+        if self._publication_store is not None:
+            self._publication_store.close()
+            self._publication_store = None
         if self._backend:
             self._backend.cleanup()
         if self._remote_backend:

@@ -58,10 +58,10 @@ resolve_setup_image() {
 build_selected_image() {
   local image
   image=$(resolve_setup_image) || return
-  # A digest identifies registry content; Docker cannot build into that reference.
-  # Only an explicit --build switches it to a writable local tag. Persist the
-  # selection after configuration succeeds, never when a draft is cancelled.
-  if [[ $image == *@* ]]; then
+  # Digests cannot be build targets; keep local builds separate from published
+  # latest too. Preserve other explicit tags. Save the choice only after valid
+  # configuration, never when a build fails or a draft is cancelled.
+  if [[ $image == *@* || $image == ghcr.io/daxia9522/trendradar-lite-deploy:latest ]]; then
     image=trendradar-lite-deploy:local
   fi
   export TREND_RADAR_IMAGE=$image TRENDRADAR_BUILD_IMAGE=$image

@@ -30,7 +30,7 @@ if (root / ".env").exists():
     matches = re.findall(r'^TREND_RADAR_IMAGE="([^"\\n]+)"$', (root / ".env").read_text(), re.M)
     if matches:
         saved_image = matches[-1]
-image = os.environ.get("TREND_RADAR_IMAGE") or saved_image or os.environ.get("FAKE_COMPOSE_IMAGE", "test/trendradar:local")
+image = os.environ.get("TREND_RADAR_IMAGE") or saved_image or os.environ.get("FAKE_COMPOSE_IMAGE", "ghcr.io/daxia9522/trendradar-lite-deploy:latest")
 with open(os.environ["FAKE_LOG"], "a") as stream:
     stream.write(json.dumps(args) + "\\n")
 if args[:2] == ["image", "inspect"]:
@@ -90,6 +90,8 @@ class DockerInstallTests(unittest.TestCase):
         self.root = base / "clone with spaces"
         self.root.mkdir()
         shutil.copytree(ROOT / "deploy", self.root / "deploy", ignore=shutil.ignore_patterns("__pycache__"))
+        (self.root / "trendradar").mkdir()
+        shutil.copy2(ROOT / "trendradar" / "ai_config.py", self.root / "trendradar" / "ai_config.py")
         shutil.copy2(ROOT / ".env.example", self.root / ".env.example")
         shutil.copy2(ROOT / "compose.yaml", self.root / "compose.yaml")
         self.home = base / "home"
@@ -409,6 +411,77 @@ class DockerInstallTests(unittest.TestCase):
         self.assertFalse(self.path.exists())
         self.assertFalse(any("up" in call for call in self.calls()))
 
+    def test_default_update_pulls_latest_on_every_explicit_update(self):
+        write_env(self.path, VALID)
+        before = self.path.read_bytes()
+        for _ in range(2):
+            self.log.write_text("")
+            result = self.run_script(script="update.sh")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(sum(call == ["compose", "pull", "trendradar"] for call in self.calls()), 1)
+            inspect = next(call for call in self.calls() if call[:2] == ["image", "inspect"])
+            self.assertEqual(inspect[-1], "ghcr.io/daxia9522/trendradar-lite-deploy:latest")
+            self.assertFalse(any("build" in call for call in self.calls()))
+            self.assertTrue(any("up" in call for call in self.calls()))
+            self.assertEqual(self.path.read_bytes(), before)
+            self.assertNotIn("TREND_RADAR_IMAGE", read_env(self.root / ".env"))
+
+    def test_explicit_install_pull_uses_latest_without_building(self):
+        write_env(self.path, VALID)
+        result = self.run_script("--pull", "--no-start")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(sum(call == ["compose", "pull", "trendradar"] for call in self.calls()), 1)
+        inspect = next(call for call in self.calls() if call[:2] == ["image", "inspect"])
+        self.assertEqual(inspect[-1], "ghcr.io/daxia9522/trendradar-lite-deploy:latest")
+        self.assertFalse(any("build" in call or "up" in call for call in self.calls()))
+
+    def test_update_preserves_explicit_image_override(self):
+        write_env(self.path, VALID)
+        for image in ("test/app@sha256:" + "a" * 64, "test/app:v1"):
+            with self.subTest(image=image):
+                write_env(self.root / ".env", {"TREND_RADAR_IMAGE": image, "SETUP_PORT": "9999"}, "docker")
+                self.log.write_text("")
+                result = self.run_script(script="update.sh")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                inspect = next(call for call in self.calls() if call[:2] == ["image", "inspect"])
+                self.assertEqual(inspect[-1], image)
+                deployment = read_env(self.root / ".env")
+                self.assertEqual(deployment["TREND_RADAR_IMAGE"], image)
+                self.assertEqual(deployment["SETUP_PORT"], "9999")
+
+    def test_default_latest_install_build_uses_local_tag(self):
+        write_env(self.path, VALID)
+        result = self.run_script("--build", "--no-start")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(read_env(self.root / ".env")["TREND_RADAR_IMAGE"], "trendradar-lite-deploy:local")
+        inspect = next(call for call in self.calls() if call[:2] == ["image", "inspect"])
+        self.assertEqual(inspect[-1], "trendradar-lite-deploy:local")
+        self.assertTrue(any("build" in call for call in self.calls()))
+        self.assertFalse(any("pull" in call or "up" in call for call in self.calls()))
+
+    def test_default_latest_update_build_uses_local_tag(self):
+        write_env(self.path, VALID)
+        result = self.run_script("--build", script="update.sh")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(read_env(self.root / ".env")["TREND_RADAR_IMAGE"], "trendradar-lite-deploy:local")
+        inspect = next(call for call in self.calls() if call[:2] == ["image", "inspect"])
+        self.assertEqual(inspect[-1], "trendradar-lite-deploy:local")
+        self.assertTrue(any("up" in call for call in self.calls()))
+        self.assertFalse(any("pull" in call for call in self.calls()))
+
+    def test_cancel_after_latest_build_does_not_save_image_or_start(self):
+        result = self.run_script("--build", "--terminal", input="q\ny\n")
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertFalse((self.root / ".env").exists())
+        self.assertFalse(self.path.exists())
+        self.assertFalse(any("persist-identity" in call or "up" in call for call in self.calls()))
+
+    def test_failed_latest_build_does_not_save_image_or_start(self):
+        result = self.run_script("--build", FAKE_BUILD_EXIT="41")
+        self.assertEqual(result.returncode, 41, result.stdout + result.stderr)
+        self.assertFalse((self.root / ".env").exists())
+        self.assertFalse(any("run" in call or "up" in call for call in self.calls()))
+
     def test_digest_build_switches_to_local_tag_and_persists_only_after_success(self):
         write_env(self.path, VALID)
         before = self.path.read_bytes()
@@ -438,9 +511,11 @@ class DockerInstallTests(unittest.TestCase):
 
     def test_explicit_build_tag_is_retained(self):
         write_env(self.path, VALID)
-        result = self.run_script("--build", "--no-start", TREND_RADAR_IMAGE="custom/project:local")
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(read_env(self.root / ".env")["TREND_RADAR_IMAGE"], "custom/project:local")
+        for image in ("custom/project:local", "custom/project:latest"):
+            with self.subTest(image=image):
+                result = self.run_script("--build", "--no-start", TREND_RADAR_IMAGE=image)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(read_env(self.root / ".env")["TREND_RADAR_IMAGE"], image)
 
     def test_cancel_after_digest_build_does_not_save_image_or_identity(self):
         pin = "test/app@sha256:" + "a" * 64

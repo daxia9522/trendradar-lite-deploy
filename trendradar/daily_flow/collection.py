@@ -6,7 +6,7 @@ from typing import Callable, Dict, List, Optional
 from trendradar.storage import convert_crawl_results_to_news_data
 from trendradar.utils.time import DEFAULT_TIMEZONE
 
-from .models import CrawlResult, RSSResult
+from .models import CrawlResult, RSSCollection
 
 
 def crawl_hotlist(
@@ -53,6 +53,8 @@ def crawl_hotlist(
     # 保存到存储后端（SQLite）
     if storage.save_news_data(news_data):
         print(f"数据已保存到存储后端: {storage.backend_name}")
+    else:
+        raise RuntimeError("Hotlist persistence failed; report capture stopped")
 
     # 保存 TXT 快照（如果启用）
     txt_file = storage.save_txt_snapshot(news_data)
@@ -111,49 +113,24 @@ def crawl_rss(
     get_feeds: Callable[[], List[Dict]],
     create_fetcher: Callable,
     save_rss_data: Callable,
-    prepare_input: Callable,
-) -> RSSResult:
-    """
-    执行 RSS 数据抓取
-
-    Returns:
-        RSSResult(stats, new_stats, raw_items)：
-        - stats: 统计条目列表（按模式处理，用于统计区块）
-        - new_stats: 新增统计列表（用于新增区块）
-        - raw_items: 原始 RSS 条目列表（用于独立展示区）
-        如果未启用或失败返回 RSSResult()。
-    """
+) -> RSSCollection:
+    """Collect/persist RSS only; views and novelty come from frozen capture."""
     if not enabled:
-        return RSSResult()
-
+        return RSSCollection()
     rss_feeds = get_feeds()
     if not rss_feeds:
         print("[RSS] 未配置任何 RSS 源")
-        return RSSResult()
-
+        return RSSCollection()
     try:
         fetcher = create_fetcher(rss_feeds)
         if not fetcher.feeds:
-            print("[RSS] 没有启用的 RSS 源")
-            return RSSResult()
-
-        # 抓取数据
+            return RSSCollection()
         rss_data = fetcher.fetch_all()
-
-        # 保存到存储后端
-        if save_rss_data(rss_data):
-            print(f"[RSS] 数据已保存到存储后端")
-
-            # 处理 RSS 数据（按模式过滤）并返回用于合并推送
-            return prepare_input(rss_data)
-        else:
-            print(f"[RSS] 数据保存失败")
-            return RSSResult()
-
-    except ImportError as e:
-        print(f"[RSS] 缺少依赖: {e}")
-        print("[RSS] 请安装 feedparser: pip install feedparser")
-        return RSSResult()
-    except Exception as e:
-        print(f"[RSS] 抓取失败: {e}")
-        return RSSResult()
+        if not save_rss_data(rss_data):
+            print("[RSS] 数据保存失败，保留上次发布的 RSS 覆盖边界")
+            return RSSCollection()
+        print("[RSS] 数据已保存到存储后端")
+        return RSSCollection(not rss_data.failed_ids, tuple(rss_data.failed_ids))
+    except Exception as exc:
+        print(f"[RSS] 采集不可用，保留原覆盖边界（{type(exc).__name__}）")
+        return RSSCollection()

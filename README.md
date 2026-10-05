@@ -1,6 +1,6 @@
 # TrendRadar Lite Deploy
 
-> 源码版本 v26.10.02 ｜ [Releases](https://github.com/daxia9522/trendradar-lite-deploy/releases) ｜ 镜像 `ghcr.io/daxia9522/trendradar-lite-deploy`
+> 源码版本 v26.10.05 ｜ [Releases](https://github.com/daxia9522/trendradar-lite-deploy/releases) ｜ 镜像 `ghcr.io/daxia9522/trendradar-lite-deploy`
 
 聚合 11 平台热榜与 RSS → 关键词筛选 → AI 事件分析 → HTML 日报/周报邮件推送。
 
@@ -43,20 +43,82 @@ trendradar-docker
 | `config/frequency_words.txt` | 筛选关键词 |
 | `config/ai_analysis_prompt.txt` | AI 分析提示词 |
 
-敏感信息通过环境变量注入，勿提交 Git。**原生 Linux 由菜单维护 `~/.config/trendradar-lite/env`；Docker 由菜单维护项目目录下的 `runtime/env`（目录整体只读挂载，文件不进入镜像与 Git）**；两者都不是仓库根目录的 `.env`。首次安装直接运行相应安装器，**不需要先复制 `.env.example`**：模板只作为菜单草稿默认值。Docker 根 `.env` 用于镜像、UID/GID、配置页端口等部署参数；已有旧 `.env` 中的应用参数在确认保存后迁移，旧内容与私有备份保留供核对。
+本地部署的密钥保存在环境文件中；GitHub Actions 使用仓库 Secrets。不要把密钥写入 YAML 或提交到 Git。原生 Linux 使用 `~/.config/trendradar-lite/env`，Docker 使用 `runtime/env`；Docker 根目录的 `.env` 仅用于镜像和部署参数。首次安装直接运行安装器，无需复制 `.env.example`。
 
 ### AI
 
-应用布尔环境变量（`DEBUG`、`SORT_BY_POSITION_FIRST`、`SCHEDULE_ENABLED`、`AI_ANALYSIS_ENABLED`、`STORAGE_TXT_ENABLED`、`STORAGE_HTML_ENABLED`、`PULL_ENABLED`）接受 `true/false/1/0`（忽略大小写和首尾空白）；未设置、空字符串或仅含空白时沿用 YAML。Docker 外部 `runtime/env`、原生环境文件与配置菜单采用同一规则，其他非空值会明确报错，不再把拼写错误静默当作关闭。`R2_BACKUP_ENABLED` 使用相同布尔字面量，但留空表示关闭备份，不读取 YAML；`DOCKER_CONTAINER=true` 是 Docker 固定身份，不属于应用开关。
+开关类变量填 `true/false`，也接受 `1/0`（不区分大小写，首尾空格会忽略）；留空时使用默认配置，其他值会报错。`R2_BACKUP_ENABLED` 留空表示关闭备份；`DOCKER_CONTAINER` 由 Docker 自动设置，无需手动填写。
 
 | 变量 | 必填 | 说明 |
 |---|---|---|
 | `AI_API_KEY` | **必填**（启用 AI 时） | 中转站或官方 Key |
 | `AI_MODEL` | **必填**（启用 AI 时） | LiteLLM `provider/model` 格式，如 `gemini/gemini-3.5-flash`、`openai/实际模型名` |
 | `AI_API_BASE` | 中转站必填；官方留空 | 中转根地址**原样使用**，项目不自动追加 `/v1` |
-| `AI_FALLBACK_MODELS` | 可选 | 逗号分隔备用模型；首项同时作周报关键词便宜模型 |
+| `AI_FALLBACK_MODELS` | 可选 | **英文逗号**分隔备用模型；首项同时作周报关键词便宜模型 |
+| `AI_FALLBACK_API_BASE` | 可选，新列表模式 | **`@` 分隔**各备用地址，与模型按位置对应，保留空位 |
+| `AI_FALLBACK_API_KEY` | 可选，新列表模式 | **`@` 分隔**各备用 Key；整列作为一个秘密，仅通过 env / Secrets 输入 |
 | `AI_ANALYSIS_ENABLED` | 可选，默认 `false` | 是否启用日报 AI 分析 |
-| `AI_TIMEOUT` | 可选，默认 `120` | AI 单次请求超时（秒） |
+| `AI_TIMEOUT` | 可选，默认 `120` | 日报、周报正文及周报关键词共用的单次请求超时（秒），不是整条模型链的总时限 |
+
+#### 备用列表规则
+
+<details>
+<summary>展开查看备用列表规则与配置示例</summary>
+
+只增加地址、Key 两列，不需要 `AI_FALLBACK_1_*` 等编号变量。主模型仍由 `AI_MODEL` / `AI_API_BASE` / `AI_API_KEY` 独立配置，**不占备用列表的一项**。
+
+- **唯一解析规则**：所有备用都按位置绑定；两个鉴权列都空时只是 N 个空槽，不进入另一种模式。任一非空地址/Key 列都必须恰好 N 项。模型严格按英文逗号切分、空模型报错、重复模型保留原槽位。
+- **逐项对应**：模型列按英文逗号切分，URL / Key 列按 `@` 切分。`@url` 是 `[空,url]`，`url@` 是 `[url,空]`，`@` 是 `[空,空]`，`url@@url` 保留中间空项。不能过滤开头、结尾或连续分隔符产生的空位。
+- **严格数量**：最终备用模型数为 N，每个有内容的地址 / Key 列必须恰好 N 项。环境变量中的模型列表有内容时覆盖 YAML，三列均按这一最终顺序对齐；无备用模型却填新列、连续 / 首尾逗号产生空模型、非法 `provider/model`、列数不足或超出都报错，不能截断、补齐部分列或向左移位。校验不能识别人工把两把合法 Key 顺序写反，填写时仍须逐槽核对。
+- **空 URL 槽**：表示该 provider 的**官方默认地址**，不是继承主接口的自定义中转。主备想用同一中转时，在备用槽明确填写相同 URL。`openai/` 空 URL 也是官方默认，不代表任意兼容中转；第三方地址请显式填写。URL 原样使用、不自动追加 `/v1`，必须为合法 HTTP(S)，不能含内嵌 `user:password` 凭据；Gemini/OpenAI 默认地址由客户端显式固定，不受 SDK 的地址环境变量覆盖；其他 provider 需显式填写地址。
+- **空 Key 槽**：仅在**同 provider 且同有效主端点**时继承主 Key。两侧均为同 provider 的官方默认地址可继承；两个显式地址作保守规范化比较。默认地址与手填地址不能可靠判定相同时必须显式填 Key。同 provider 但不同 URL 也必须分别配置 Key，并隔离 `headers` / `extra_headers` 等鉴权信息；不能只看模型前缀。不会从另一个备用继承 Key，也不按模型名去重，同名模型可以指向不同端点。
+- **保留分隔符**：URL、Key 的**单个值内任何 `@` 都不支持**，本版没有转义语法，也不要擅自编码或改写 Key。模型列只按逗号分隔，`openai/@cf/...` 这类模型名不受影响。
+- **错误范围**：列数或空模型会阻止按猜测运行；单个备用缺独立 Key 或 URL 不合法会标记该槽不可用，诊断不显示 Key / URL 原文。关键词始终选择原始备用 1；该槽不可用时沿既有规则降级，不会偷偷换到备用 2。未配备用时关键词使用主模型。
+
+**示例一：两个官方 Gemini 共用主 Key**
+
+以下均为示例模型和占位 Key，使用前按服务商实际支持替换。备用地址、Key 留空，表示使用官方端点并继承主 Key：
+
+```dotenv
+AI_MODEL=gemini/gemini-3.5-flash
+AI_API_BASE=
+AI_API_KEY=synthetic-gemini-key
+AI_FALLBACK_MODELS=gemini/gemini-3.5-flash-lite
+AI_FALLBACK_API_BASE=
+AI_FALLBACK_API_KEY=
+```
+
+若再加一个独立中转备用，只需调整三列；前导 `@` 保留第一备用 Gemini 的空槽：
+
+```dotenv
+AI_FALLBACK_MODELS=gemini/gemini-3.5-flash-lite,openai/relay-model
+AI_FALLBACK_API_BASE=@https://relay.example.invalid/v1
+AI_FALLBACK_API_KEY=@synthetic-relay-key
+```
+
+**示例二：多个 OpenAI-compatible 接口各用独立地址 / Key**
+
+即使都使用 `openai/`，不同端点仍需分别填写地址和 Key：
+
+```dotenv
+AI_MODEL=openai/primary-model
+AI_API_BASE=https://primary.example.invalid/v1
+AI_API_KEY=synthetic-primary-key
+AI_FALLBACK_MODELS=openai/fallback-model-a,openai/fallback-model-b
+AI_FALLBACK_API_BASE=https://backup-a.example.invalid/v1@https://backup-b.example.invalid/v1
+AI_FALLBACK_API_KEY=synthetic-backup-a-key@synthetic-backup-b-key
+```
+
+日报和周报正文共用这条有序模型链；周报补充关键词使用第一备用，未配置备用时使用主模型。
+
+**填写与密钥保存**
+
+- 原生、Docker 菜单及环境文件遵循同一规则；菜单直接回车保留整列，清空第一槽并保留第二槽可填 `@后续值`。Key 输入和预览不回显。
+- `AI_FALLBACK_API_KEY` 整列只放 env / Actions 同名 Secret，不写 YAML、不提交 Git；暂无 `AI_FALLBACK_API_KEY_FILE`。
+- 主 Key 可用 `AI_API_KEY_FILE`：仅限权限 `0400/0600`、路径无符号链接的普通文件，直接环境变量 Key 优先。Docker 中该文件须在容器内可读；Actions 直接用同名 Secret。
+- 旧预构建镜像须先升级到包含此功能的版本，修改环境文件不会更新镜像代码。
+
+</details>
 
 ### 邮件
 
@@ -89,9 +151,9 @@ cd trendradar-lite-deploy
 ./deploy/linux/status.sh         # 按需查看状态并执行本地配置体检
 ```
 
-安装器创建每小时采集、日推和周报的 systemd user timer，环境文件保存于 `~/.config/trendradar-lite/env`（权限 `600`）。设置了 `XDG_CONFIG_HOME` 时，配置和 user units 位于该目录。采集、推送与周报统一使用配置的时区，默认 `Asia/Shanghai`。首次安装默认启用定时器，之后会按计划运行；`--no-enable` 只安装而不启用。菜单和安装器不会额外执行采集/AI/发信测试。
+安装器会创建并启用 systemd 用户定时器；运行配置保存在 `~/.config/trendradar-lite/env`（权限 `600`），默认时区为 `Asia/Shanghai`。使用 `--no-enable` 可只安装、不启用定时器。设置 `XDG_CONFIG_HOME` 时，配置和 unit 文件会保存到该目录。安装或配置不会发送测试邮件，也不会调用 AI。
 
-重新运行安装器时，会修正旧生成器写入 `WorkingDirectory` / `EnvironmentFile` 的外层引号；只迁移匹配当前安装路径的已知旧格式，保留自定义服务选项和现有 timer 时间。仅更新源码不会改动已安装的 unit。
+重新运行安装器会修正已知旧格式并保留自定义 unit 设置和现有定时计划；仅更新源码不会改变已安装的服务配置。
 
 ### 一个命令打开菜单
 
@@ -119,7 +181,7 @@ q. 放弃修改并退出
 
 - 回车保留当前值；`:cancel` 取消当前字段编辑；可选字段用 `:clear` 清空。
 - 密码和 API Key 输入不回显，菜单和变更预览只显示是否设置，不能查看秘密原文。
-- 邮件分组包含发件人、授权码、收件人和 SMTP；AI 分组包含开关、模型、接口、密钥及备用模型。
+- 邮件分组包含发件人、授权码、收件人和 SMTP；AI 分组包含开关、主模型/接口/密钥及备用模型、地址列表、Key 列表。
 - 时间分组包含每小时采集分钟、早/午/晚推送、全天汇总、周报星期与时间、时区。
 - 高级配置包含 AI 请求超时、热榜数据接口及备用接口；通常保留默认值即可。
 - R2/S3 备份分组默认关闭；可设置夜间时间、回看天数及桶/端点/密钥，复用 Actions 的 `S3_*` 参数。仅对本地数据库部署启用，详见[可选夜间备份](#可选夜间-r2s3-备份)。
@@ -137,6 +199,34 @@ q. 放弃修改并退出
 仍可使用 `nano ~/.config/trendradar-lite/env` 修改普通环境参数。
 
 ### 常用维护
+
+关闭采集、日报和周报定时任务（用安装时的同一用户执行，不加 `sudo`；保留配置与数据）：
+
+```bash
+systemctl --user disable --now trendradar-lite.timer trendradar-weekly.timer
+```
+
+重新启用并启动定时任务：
+
+```bash
+systemctl --user enable --now trendradar-lite.timer trendradar-weekly.timer
+```
+
+关闭 timer 不会中断已经运行的任务；日报和周报 timer 默认 `Persistent=true`，恢复时可能立即触发错过的任务。
+
+若已安装并开启 R2/S3 定时备份，需单独关闭：
+
+```bash
+systemctl --user disable --now trendradar-r2-backup.timer
+```
+
+恢复已安装的备份 timer（配置中仍需保持 `R2_BACKUP_ENABLED=true`）：
+
+```bash
+systemctl --user enable --now trendradar-r2-backup.timer
+```
+
+其他维护命令（按需选择，不要整段执行）：
 
 ```bash
 trendradar                              # 打开配置菜单（任意目录）
@@ -164,6 +254,30 @@ cd ~/trendradar-lite-deploy
 2. 在 `Settings → Secrets and variables → Actions` 配置下表 Secrets（AI 变量按[共同配置](#共同配置)一节）；
 3. 手动运行 `Get Hot News`、`Weekly AI Report` 各一次完成首验（会真实调用 AI 和发送邮件）；
 4. 外部定时器按需要的推送时刻 dispatch。
+
+### AI Secrets（日报 / 周报共用）
+
+两条业务 workflow 均在各自的运行步骤中，从**同名 Actions Secrets** 注入以下变量，沿用既有 Secrets 约定，不改用 Actions Variables：
+
+| Secret | 用途 |
+|---|---|
+| `AI_MODEL` | 主模型，如 `gemini/gemini-3.5-flash` |
+| `AI_API_KEY` | 主接口 Key（Gemini 方案用官方 Key） |
+| `AI_API_BASE` | 主接口地址；Gemini 官方留空 |
+| `AI_FALLBACK_MODELS` | 英文逗号分隔，按槽位顺序填写；有内容时覆盖 YAML 备用链 |
+| `AI_FALLBACK_API_BASE` | `@` 分隔的备用地址列，原样保留开头、结尾与连续空位 |
+| `AI_FALLBACK_API_KEY` | `@` 分隔的备用 Key 列，整列保存在这一个 Secret 中 |
+| `AI_TIMEOUT` | 日报与周报共用，当前约定 `120`；不设/留空沿用 YAML |
+
+日报另按需配置 `AI_ANALYSIS_ENABLED=true`；周报正文不由这个日报开关控制。未创建的 Secret 在 Actions 中注入为空字符串；两个鉴权列都空时同样按 N 个空项处理，随后逐项校验；`@` 表示两个空槽，不是模式开关。旧 `AI_OPENAI_*` 不再使用，不读取旧 `_FILE`，也不产生新旧冲突。两条 workflow 直接通过步骤 `env` 注入，不拼接 shell 命令、不拆分或过滤 Secret 字符串；列数和鉴权继承遵循上面的共同规则。只在仓库设置页面填写真实 Key，勿写入 YAML、示例、运行命令或日志。
+
+可先执行无网络、无 AI、无邮件的映射与加载验证（已安装项目依赖时）：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 LITELLM_LOCAL_MODEL_COST_MAP=True python3 -m unittest discover -s tests -p 'test_actions_ai_env.py' -v
+```
+
+此验证清空外部环境、阻断网络 / AI completion / SMTP，只解析 workflow、加载合成配置并检查候选绑定和关键词派生，不运行业务命令。实际 `workflow_dispatch` 以及周报 `--dry-run` **都不是离线 AI 测试**（后者仅禁止发信），真实首验需另行授权。
 
 ### 华为云函数调用模板
 
@@ -290,9 +404,7 @@ def handler(event, context):
 
 </details>
 
-Actions 固定 `STORAGE_BACKEND=remote`，每日数据库写入 R2/S3，周报运行前自动从 R2/S3 拉取最近 7 天数据。推送窗口（07/12/18/22 点）的判定始终按 `config/timeline.yaml` 的北京时间进行，与 runner 所在时区无关——外部定时器只需按你希望触发的**北京时刻**（如每小时 :05）dispatch 即可。
-
-**队列自愈**：并发组 `queue: single` + `cancel-in-progress`（新触发自动替换排队中的旧 run）、`timeout-minutes` 执行兜底、内置 guard（排队超 30 分钟/6 小时后才开跑的 run 自动跳过，防错峰乱发信；手动 re-run 始终放行）。
+Actions 的日报和周报都由手动或外部 `workflow_dispatch` 触发，不受 `timeline.yaml` 时间窗限制；请按需要发送的时刻触发，避免重复运行造成重复邮件。排队过久的任务会自动跳过（日报 30 分钟、周报 6 小时），手动重跑除外。
 
 ## 方式三：Docker Compose
 
@@ -322,68 +434,67 @@ docker compose ps trendradar      # 状态应为 healthy
 docker compose logs --tail=50 trendradar
 ```
 
-源码版本为 **v26.10.02**；默认预构建镜像暂仍固定在已验证的 **v26.10** digest。新版镜像需在 Actions 的 **Release Container Image** 工作流中选择 `main` 手动运行，生成后再切换镜像引用；仅更新源码不会更换已固定的镜像。
+默认使用 `ghcr.io/daxia9522/trendradar-lite-deploy:latest`，首次安装会拉取并校验镜像；已有部署通过下方更新命令获取新版。`latest` 代表最近成功发布的镜像，不等于尚未发布的本地源码。
 
-安装器首次默认拉取 GHCR 预构建镜像并校验兼容标签；默认固定 v26.10 多架构 digest，不跟随 `latest`。本地验证或测试版用 `install.sh --build`：digest 会自动改用本地构建标签 `trendradar-lite-deploy:local` 并在保存后记住；取消或构建失败不改变已保存选择。切换预构建版本：先在根 `.env` 把 `TREND_RADAR_IMAGE` 改为已验证的新 digest 再运行 update。取消配置不会启动服务；旧 `.env` 只在菜单确认后迁移。
+### 镜像更新与源码构建
+
+在仓库目录按需选择：
+
+```bash
+./deploy/docker/update.sh            # 默认拉取 latest 并重建容器，保留配置与数据
+./deploy/docker/update.sh --build    # 从当前本地源码构建并重建容器，不拉取预构建应用镜像
+```
+
+- **旧部署切换 latest**：将根 `.env` 中的 `TREND_RADAR_IMAGE` 改为 `ghcr.io/daxia9522/trendradar-lite-deploy:latest`，或删除该项，再运行更新命令。同名 shell 环境变量优先级更高，也需检查。
+- 首次从源码安装用 `./deploy/docker/install.sh --build`。从官方 `latest` 或固定 digest 构建时，自动改用并保存 `trendradar-lite-deploy:local`；自定义标签保留。切回预构建镜像时，按上一条重置镜像选择。
+- `latest` 随成功的镜像发布更新：推送版本标签，或在 Actions 的 **Release Container Image** 工作流选择 `main` 手动运行；普通源码推送不会发布镜像。
 
 ### 修改配置（无需重建镜像或容器）
 
-任意目录执行（安装器创建的用户级入口，PATH 未含 `~/.local/bin` 时用完整路径）：
+任意目录执行（PATH 未含 `~/.local/bin` 时用完整路径）：
 
 ```bash
 trendradar-docker
 ```
 
-或在项目目录 `./deploy/docker/install.sh --configure`。两条路径都只使用本地已有镜像运行一次短暂配置容器，**不拉取/构建/更新镜像，不启动或重建常驻服务，不调用任何任务**。也可以直接 `nano runtime/env` 编辑普通参数；下一次任务自动读取新值，删除的变量回退默认而不会沿用容器创建时的旧值。
+或在仓库目录运行 `./deploy/docker/install.sh --configure`。配置保存在 `runtime/env`，也可直接编辑，下次任务读取；**保存配置不会拉取/构建镜像，也不会启动或重建常驻容器**。
 
-镜像与程序升级是独立动作：
-
-```bash
-./deploy/docker/update.sh            # 拉取当前选定镜像并重建容器，不自动改版本/digest
-./deploy/docker/update.sh --build    # 显式构建源码；digest 自动切换为本地标签，成功后保存
-```
-
-升级固定镜像前先在根 `.env` 验证并更新 `TREND_RADAR_IMAGE` 为目标 digest；仅运行 update 不会解除固定。旧 `.env` 显式设了 `latest` 时覆盖值仍优先，需自行改。
-
-旧部署尚无 `runtime/env` 时，安装和升级都会先打开菜单：旧 `.env` 只是草稿，补齐必填项并确认后才迁移。需要强制终端/网页模式时可追加 `--terminal` / `--web`；升级成功也会安装 `trendradar-docker` 入口。取消不保存应用配置、部署身份或迁移备份，也不启动服务，但不会撤销此前明确执行的镜像拉取/构建。
-
-网页校验或保存失败时，新输入的密码只保留在服务器端草稿；再次提交留空会保留该草稿，不会偷偷恢复旧密码。页面会区分“已保存”“待保存”“待清空”，密码内容不回显。选择取消或结束本次配置进程会丢弃草稿；仅关闭浏览器标签不会结束配置进程。
+缺少 `runtime/env` 的旧部署，会在安装或更新时打开菜单，确认后才迁移旧 `.env`。可追加 `--terminal` / `--web` 选择界面；取消不保存配置或启动服务，但不会撤销已完成的拉取/构建。网页请用“取消”结束配置，仅关闭标签页不会退出配置进程。
 
 ### 调度与数据
 
-本地 SQLite 使用 WAL 和 30 秒锁等待，减少读写互相阻塞；这不是无限重试，也不替代任务去重。远端模式仍使用可独立上传的单文件日志模式，备份通过 SQLite 快照接口读取已提交数据，不直接复制活跃 WAL 数据库的主文件。
+Docker 按 `runtime/env` 中的 `TZ` 调度，默认 `Asia/Shanghai`。常用时间配置及默认值：
 
-容器内置轻量调度器，按 `runtime/env` 的 `TZ` 调度，默认 `Asia/Shanghai`（北京时间）。启动时可执行当前分钟到期的任务，不追补更早时段；热修改时间或从无效配置恢复时，不补跑当分钟。日报、周报和备份各自最多运行一个子进程，周报不会阻塞后续采集；同类任务未结束时不再重入，错过的历史分钟不排队补跑。夏令时重叠窗口仍按执行记录去重。下表为 `.env.example` 的默认配置，清空 `CRAWLER_MINUTE` 也回退到 `5`：
-
-| 变量 | 默认值 | 说明 |
+| 变量 | 默认值 | 用途 |
 |---|---|---|
-| `CRAWLER_MINUTE` | `5` | 每小时采集的分钟数 |
-| `MORNING_PUSH_TIME` | `07:00` | 早间推送 |
-| `NOON_PUSH_TIME` | `12:00` | 午间推送 |
-| `EVENING_PUSH_TIME` | `18:00` | 傍晚推送 |
+| `CRAWLER_MINUTE` | `5` | 每小时采集分钟 |
+| `MORNING_PUSH_TIME` / `NOON_PUSH_TIME` / `EVENING_PUSH_TIME` | `07:00` / `12:00` / `18:00` | 早间、午间、傍晚推送 |
 | `DAILY_SUMMARY_TIME` | `22:00` | 全天汇总 |
-| `WEEKLY_WEEKDAY` / `WEEKLY_HOUR` / `WEEKLY_MINUTE` | `6` / `12` / `30` | 周报（周日 12:30，Python 约定周日=6） |
+| `WEEKLY_WEEKDAY` / `WEEKLY_HOUR` / `WEEKLY_MINUTE` | `6` / `12` / `30` | 周报时间（周日 12:30；周日编号为 6） |
 
-定时器决定何时启动，timeline 决定是否允许分析和推送。四档推送时间覆盖窗口的起点，终点为同小时 `:59`：例如 `07:30` 对应 `07:30–07:59`，不会在 `07:05` 提前推送。**部署配置的四档必须位于不同小时**；即使分钟不同，`07:00` 与 `07:30` 也会造成窗口重叠，配置菜单、原生调度和 Docker 运行配置会明确拒绝，不自动截断窗口或改成 `last_wins`。初次配置和 Docker 的未填写项参与校验时使用上表默认时间，因此只将午间改为 `07:30` 也会与默认早间窗口冲突。已安装的原生调度修改按 YAML/env 推定后的有效时间校验，显式清空时间仍会拒绝；仅保存邮件/AI 不强制规范化旧调度。未覆盖的 YAML 自定义窗口保持原样，其实际范围冲突仍由 Scheduler 按 YAML 的冲突策略校验。窗口内仍遵循 `once`，已成功记录的分析／推送不会因再次采集而重复；窗口本身不保证断电后的补发，也不是跨进程的严格去重锁。
+推送时刻是窗口起点，窗口持续到该小时 `:59`；四档推送必须设在不同小时，否则配置会被拒绝。成功的分析／推送在各自窗口内只执行一次；错过的任务不会补跑。修改配置后，调度器按新配置运行。
 
-`output/` 存于 Docker volume；`config/` 宿主只读挂载。服务容器以宿主机用户 UID/GID 运行（安装时记录在根 `.env` 的 `TRENDRADAR_UID/GID`），`runtime/` 目录 `700`、`env` 文件 `600`，密钥不进镜像也不通过容器创建时的环境快照注入。`setup` 配置容器只写挂载项目目录，用于原子替换 `runtime/env` 和保存私有备份，**不挂载业务数据卷**。单独的 `volume-init` 临时容器只在明确安装/升级时初始化数据卷归属，且没有网络和项目目录挂载。常驻服务只读挂载 `runtime/` 目录（而非单文件），保证菜单原子保存后容器可见新内容。
+数据保存在 Docker 持久卷 `trendradar-output`；运行配置在宿主机 `runtime/env`。普通卸载保留数据，`--purge-data` 会删除数据卷和运行配置；需要异地备份时见[夜间 R2/S3 备份](#可选夜间-r2s3-备份)。
 
-三个服务都启用 `no-new-privileges` 并移除全部 capabilities；root 配置容器只补回保存配置必需的 `CHOWN/DAC_OVERRIDE/FOWNER`，`volume-init` 只补 `CHOWN/DAC_READ_SEARCH`，常驻服务无补回。能力配置需目标 Docker 环境实测。
-
-手动诊断与临时任务统一走镜像入口（自动读最新配置）：
+查看配置和下一次调度：
 
 ```bash
 docker compose exec trendradar python deploy/docker/entrypoint.py doctor
 docker compose exec trendradar python deploy/docker/entrypoint.py show-schedule
-docker compose exec trendradar python deploy/docker/entrypoint.py force-run   # ⚠️ 真实链路：AI+邮件
 ```
 
-卸载三选一（后两种**不可恢复**）：
+### 定时任务启停
+
+在仓库目录执行。停止容器即关闭全部内置定时任务（含已开启的备份），保留配置和数据，但会终止容器内正在执行的任务：
 
 ```bash
-./deploy/docker/uninstall.sh               # 停容器/网络，留数据、runtime/env、镜像
-./deploy/docker/uninstall.sh --purge-data  # 另删数据卷、runtime/env 与 .env
-./deploy/docker/uninstall.sh --purge-all   # 另尝试删除本次选定镜像，不强制删除在用镜像
+docker compose stop trendradar
+```
+
+恢复已停止的容器及定时调度：
+
+```bash
+docker compose start trendradar
 ```
 
 ---
@@ -398,9 +509,9 @@ docker compose exec trendradar python deploy/docker/entrypoint.py force-run   # 
 | `R2_BACKUP_TIME` | `23:40` | 按 `TZ`/`TIMEZONE` 每日执行 |
 | `R2_BACKUP_LOOKBACK_DAYS` | `2` | 当天+昨天；首次补齐历史可调大 |
 
-开启需 `STORAGE_BACKEND=local` 和已有的四个 `S3_*` 必填项。两端共用 `deploy/r2_backup.py`：原生用独立备份 timer（菜单开关即启停，人工暂停不会被重装恢复），Docker 用容器内调度器。v26.10 预构建镜像已包含此功能；使用旧固定镜像时须先切换到已核验的 v26.10 digest，再执行 update；只有选择源码构建时才需显式 `--build`。
+开启需 `STORAGE_BACKEND=local` 和已有的四个 `S3_*` 必填项。两端共用 `deploy/r2_backup.py`：原生用独立备份 timer（菜单开关即启停，人工暂停不会被重装恢复），Docker 用容器内调度器。旧镜像尚不支持备份时，按[镜像更新与源码构建](#镜像更新与源码构建)升级后再配置。
 
-备份对象与 Actions 远程存储同一布局（`news/`、`rss/` 按日文件），因此同一桶持续同步后切 Actions 不用搬数据库。**同日期整库覆盖，切换前必须：停旧端 → 最后一次同步 → 再启新端。**
+备份对象与 Actions 远程存储同一布局（`news/`、`rss/` 按日文件），因此同一桶持续同步后切 Actions 不用搬采集数据库。**同日期整库覆盖，切换前必须：停旧端 → 最后一次同步 → 再启新端。** 此备份不包含发布账本和待补投邮件；仅迁移采集数据库会重新建立发布基线，不能当作完整的投递状态迁移。
 
 ```bash
 python3 deploy/native_install.py backup-status                    # 原生：开关/计划/timer状态
@@ -408,9 +519,33 @@ python3 deploy/native_install.py backup-status                    # 原生：开
 docker compose exec trendradar python deploy/docker/entrypoint.py backup --dry-run  # Docker：列举待传，不上传
 ```
 
+## 新增内容与发布状态
+
+- **本次新增热点、RSS 新增更新**统一相对上次已发布报告统计，包含期间采到、后来退榜的内容；每小时采集不会提前消耗新增。主报告的 `current/daily` 范围不变，统一的 `is_new` 继续参与 AI 的新增加分。
+- 新闻和 RSS 的输入、覆盖边界在 AI 分析前冻结；发送耗时不会把后续采集误算为已覆盖。首次接入来源时采用最近 24 小时的初始化范围，不把旧定时窗口记录当作成功推送凭据。
+- 任一收件人被 SMTP 明确接受、且回执持久化后，本期即视为**已发布**，不等于所有人都已收到。明确暂时失败者在后续有效推送执行中补投原邮件，不重跑 AI、不重发给已接受者；永久拒收或结果未知保留待核对。
+- 本地发布状态在数据目录的 `meta/publication-v1.sqlite3`；Actions 在 R2/S3 的 `meta/publication-v1/`。包含私有报告和收件人信息，请随数据妥善保留；远端必须支持条件写入，不会静默退回本地状态。
+- 发布清单保持有界；精确去重身份、历史报告及回执存入不可变分片/归档，不会因时间到期删除身份。总存储仍会增长；未解决报告达到容量上限时先停止新生成/发信，不丢弃问题记录。
+- 新闻/RSS 分别初始化和推进覆盖边界。某类来源超过 32 天读取范围或读取失败，只标记该类缺口，不拖住健康来源；部分成功采到并已发布的内容仍会消费新增身份，未读范围不冒充已覆盖。
+
+查看状态（不采集、不调用 AI、不发邮件；默认隐藏收件人）：
+
+```bash
+.venv/bin/python -m trendradar.publication_cli --backend local status
+.venv/bin/python -m trendradar.publication_cli --backend local receipts REPORT_ID --limit 20
+# Docker：
+docker compose exec trendradar python -m trendradar.publication_cli --backend local status
+```
+
+自定义本地数据目录可在子命令前加 `--data-dir 路径`；远端用 `--backend remote`，并通过环境提供现有 `S3_*` 配置。`status` 用 `--offset/--limit` 分页，`receipts` 用返回的 `next_cursor` 配合 `--cursor` 读取后续页；二者默认不展示邮箱，包含已归档历史，且不会隐式执行恢复。
+
+异常恢复入口为 `release-generation` / `resolve-unknown`，用 `--help` 查看参数：必须先核实原执行进程已停止，提供最新状态版本和非敏感证据引用；这些命令只更新状态，不发送邮件。提交中断且未核实的尝试会阻止新的 SMTP 提交，但不停止小时采集；已有持久化 SMTP 回执会在后续正常恢复时重放，不重复发信。**邮箱未到账不等于 SMTP 未接受，不能据此把未知结果改成可重投。**
+
+来源历史确实无法补齐时，可在停止相关采集/生成进程、核实缺口并取得最新 `status` 版本后使用 `readopt-source news|rss --version VERSION --evidence 非敏感工单引用 --confirm --stopped`（同样通过 `python -m trendradar.publication_cli` 调用）。这会明确重新采用最近 24 小时，保留全部已发布身份、原边界审计和报告发布序号；**它是承认缺口，不是补回历史**。日常无需运行此命令。
+
 ## 手动运行
 
-按所在环境选择对应命令。⚠️ `--force-run` 会绕过推送窗口与 once 去重，**真实调用 AI 并立即发送邮件**；验证链路请优先在非推送窗口执行普通命令。
+按所在环境选择对应命令。⚠️ `--force-run` 会绕过推送窗口与 once 去重，**真实调用 AI 并立即发送邮件**；不会绕过未解决投递的安全检查。验证链路请优先在非推送窗口执行普通命令。
 
 **原生 Linux / 源码目录**（在仓库目录内，用安装器创建的 venv）：
 

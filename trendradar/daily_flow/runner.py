@@ -2,8 +2,9 @@
 """Daily application runner: order, action gates and resource lifetime."""
 
 import os
+import json
+from copy import deepcopy
 import webbrowser
-from functools import partial
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -18,7 +19,9 @@ from trendradar.crawler import DataFetcher
 from trendradar.utils.time import DEFAULT_TIMEZONE, calculate_days_old, is_within_days
 
 from . import collection, inputs, rss
-from .models import CrawlResult, KeywordRules, ModeInput, PreparedReportInput, ReportArtifacts, RSSResult
+from .capture import capture_sources
+from .publication import PublicationCoordinator
+from .models import CrawlResult, KeywordRules, PreparedReportInput, PublicationPlan, ReportArtifacts, RSSResult, RSSCollection
 
 
 class DailyRunner:
@@ -132,25 +135,10 @@ class DailyRunner:
             and cfg.get("EMAIL_TO")
         )
 
-    def _has_valid_content(
-        self, stats: List[Dict], new_titles: Optional[Dict] = None
-    ) -> bool:
-        """检查是否有有效的新闻内容"""
-        if self.report_mode == "incremental":
-            # 增量模式：只要有匹配的新闻就推送
-            # count_word_frequency 已经确保只处理新增的新闻（包括当天第一次爬取的情况）
-            has_matched_news = any(stat["count"] > 0 for stat in stats)
-            return has_matched_news
-        elif self.report_mode == "current":
-            # current模式：只要stats有内容就说明有匹配的新闻
-            return any(stat["count"] > 0 for stat in stats)
-        else:
-            # 当日汇总模式下，检查是否有匹配的频率词新闻或新增新闻
-            has_matched_news = any(stat["count"] > 0 for stat in stats)
-            has_new_news = bool(
-                new_titles and any(len(titles) > 0 for titles in new_titles.values())
-            )
-            return has_matched_news or has_new_news
+    def _has_valid_content(self, stats, new_titles=None) -> bool:
+        """Both main and already keyword-filtered interval sections can send."""
+        return any(stat.get("count", 0) > 0 for stat in stats or []) or bool(
+            new_titles and any(new_titles.values()))
 
     def _manual_force_run(self) -> bool:
         """Read the current environment's explicit manual-run markers."""
@@ -269,87 +257,76 @@ class DailyRunner:
             return AIAnalysisResult(success=False, error=f"{error_type}: {error_msg}")
 
     def _send_notification_if_needed(
-        self,
-        stats: List[Dict],
-        report_type: str,
-        new_titles: Optional[Dict] = None,
-        html_file_path: Optional[str] = None,
-        rss_items: Optional[List[Dict]] = None,
-        schedule: ResolvedSchedule = None,
+        self, prepared, artifacts, frozen_input, report_id, schedule,
     ) -> bool:
-        """判断是否需要发送，并投递已生成的邮件 HTML。"""
-        has_notification = self._has_notification_configured()
-        cfg = self.ctx.config
+        """Persist one immutable MIME snapshot, claim SMTP, commit its receipt."""
+        coordinator = self._publication_coordinator()
+        hotlist, keywords = prepared.hotlist, prepared.keywords
+        matched_new = {source: {title: item for title, item in titles.items()
+                               if self.ctx.matches_word_groups(title, *keywords)}
+                       for source, titles in hotlist.new_titles.items()}
+        has_content = (self._has_valid_content(artifacts.stats, matched_new)
+                       or any(s.get("count", 0) for s in prepared.rss.stats or [])
+                       or any(s.get("count", 0) for s in prepared.rss.new_stats or []))
+        if not has_content or not artifacts.html_file:
+            coordinator.finish_without_email(report_id, "empty" if not has_content else "no_html")
+            print("[发布] 无有效内容或未生成 HTML；释放生成窗口，不推进发布覆盖")
+            return False
+        dispatcher = self.ctx.create_notification_dispatcher()
+        email = dispatcher.prepare_report(
+            report_type=self._get_mode_strategy()["report_type"],
+            html_file_path=artifacts.html_file,
+            period_name=schedule.period_name if schedule else None,
+        )
+        if email is None:
+            coordinator.finish_without_email(report_id, "not_configured")
+            return False
+        coordinator.prepare(report_id, email, frozen_input)
+        receipt = coordinator.deliver(report_id, dispatcher)
+        # Kept for scheduler observability only. The durable publication window,
+        # not period_executions, controls generation and recipient retries.
+        if receipt is not None and receipt.accepted and schedule.once_push and schedule.period_key:
+            self.ctx.create_scheduler().record_execution(
+                schedule.period_key, "push", frozen_input["captured_at"][:10])
+        return receipt.sent if receipt is not None else False
 
-        # 检查是否有有效内容（热榜或RSS）
-        has_news_content = self._has_valid_content(stats, new_titles)
-        has_rss_content = bool(rss_items and len(rss_items) > 0)
-        has_any_content = has_news_content or has_rss_content
+    def _publication_coordinator(self):
+        if getattr(self, "_publication", None) is None:
+            self._publication = PublicationCoordinator(
+                self.storage_manager.get_publication_store(), self.ctx.get_time)
+        return self._publication
 
-        # 计算热榜匹配条数
-        news_count = sum(len(stat.get("titles", [])) for stat in stats) if stats else 0
-        rss_count = sum(stat.get("count", 0) for stat in rss_items) if rss_items else 0
+    def _publication_window(self, schedule):
+        now = self.ctx.get_time()
+        period = schedule.period_key or "scheduled"
+        if not schedule.once_push:
+            period += ":" + now.strftime("%H-%M")
+        return now.date().isoformat() + ":" + period
 
-        if (
-            cfg["ENABLE_NOTIFICATION"]
-            and has_notification
-            and has_any_content
-        ):
-            # 输出推送内容统计
-            content_parts = []
-            if news_count > 0:
-                content_parts.append(f"热榜 {news_count} 条")
-            if rss_count > 0:
-                content_parts.append(f"RSS {rss_count} 条")
-            total_count = news_count + rss_count
-            print(f"[推送] 准备发送：{' + '.join(content_parts)}，合计 {total_count} 条")
-
-            if not self._action_allowed(schedule, "push"):
-                return False
-
-            # 邮件 HTML 已在分析流水线中生成，这里仅发送明确文件路径。
-            # 发件人/主题优先使用时段名：早间速览/午间速览/傍晚速览/全天汇总
-            dispatcher = self.ctx.create_notification_dispatcher()
-            result = dispatcher.send_report(
-                report_type=report_type,
-                html_file_path=html_file_path,
-                period_name=(schedule.period_name if schedule else None),
-            )
-
-            if not result.configured:
-                print("未配置任何通知渠道，跳过通知发送")
-                return False
-
-            # 部分接受也占用一次推送窗口，防止下轮整批补发；仍返回未全成功。
-            if result.sent or result.partially_delivered:
-                if schedule.once_push and schedule.period_key:
-                    scheduler = self.ctx.create_scheduler()
-                    date_str = self.ctx.format_date()
-                    scheduler.record_execution(schedule.period_key, "push", date_str)
-
-            return result.sent
-
-        elif cfg["ENABLE_NOTIFICATION"] and not has_notification:
-            print("⚠️ 警告：通知功能已启用但未配置任何通知渠道，将跳过通知发送")
-        elif not cfg["ENABLE_NOTIFICATION"]:
-            print(f"跳过{report_type}通知：通知功能已禁用")
-        elif (
-            cfg["ENABLE_NOTIFICATION"]
-            and has_notification
-            and not has_any_content
-        ):
-            mode_strategy = self._get_mode_strategy()
-            if self.report_mode == "incremental":
-                if not has_rss_content:
-                    print("跳过通知：增量模式下未检测到匹配的新闻和RSS")
-                else:
-                    print("跳过通知：增量模式下新闻未匹配到关键词")
-            else:
-                print(
-                    f"跳过通知：{mode_strategy['mode_name']}下未检测到匹配的新闻"
-                )
-
-        return False
+    def _begin_publication(self, schedule, *, collection_succeeded=True):
+        """Plan independent work; an occupied publication never disables collection."""
+        collect_allowed = bool(schedule.collect and self.ctx.config["ENABLE_CRAWLER"])
+        eligible = (self.ctx.config.get("ENABLE_NOTIFICATION", False)
+                    and self._has_notification_configured()
+                    and (schedule.push or self._manual_force_run()))
+        if not eligible:
+            if not collect_allowed:
+                return PublicationPlan(False, False)
+            if not collection_succeeded:
+                return PublicationPlan(True, False)
+            existing = self._publication_coordinator().window_report(self._publication_window(schedule))
+            return PublicationPlan(True, existing is None)
+        coordinator = self._publication_coordinator()
+        coordinator.recover_interrupted()
+        pending = tuple(coordinator.retryable_reports())
+        attention = coordinator.attention_counts()
+        if any(attention.values()):
+            print(f"[发布] 待核对报告：生成未完成 {attention['GENERATING']}，投递异常 {attention['ATTENTION']}")
+        if not collect_allowed or not collection_succeeded:
+            return PublicationPlan(collect_allowed, False, pending)
+        report_id = coordinator.claim_generation(
+            self._publication_window(schedule), force=self._manual_force_run())
+        return PublicationPlan(True, report_id is not None, pending, report_id)
 
     def _initialize_and_check_config(self) -> bool:
         """通用初始化和配置检查"""
@@ -357,8 +334,7 @@ class DailyRunner:
         print(f"当前北京时间: {now.strftime('%Y-%m-%d %H:%M:%S')}")
 
         if not self.ctx.config["ENABLE_CRAWLER"]:
-            print("爬虫功能已禁用（ENABLE_CRAWLER=False），程序退出")
-            return False
+            print("爬虫功能已禁用（ENABLE_CRAWLER=False）；仅允许既有快照补投")
 
         has_notification = self._has_notification_configured()
         if not self.ctx.config["ENABLE_NOTIFICATION"]:
@@ -398,19 +374,16 @@ class DailyRunner:
             timezone=self.ctx.config.get("TIMEZONE", DEFAULT_TIMEZONE),
         )
 
-    def _crawl_rss_data(self) -> RSSResult:
+    def _crawl_rss_data(self) -> RSSCollection:
         return collection.crawl_rss(
             enabled=self.ctx.rss_enabled, get_feeds=lambda: self.ctx.rss_feeds,
             create_fetcher=self._create_rss_fetcher,
             save_rss_data=lambda data: self.storage_manager.save_rss_data(data),
-            prepare_input=self._process_rss_data_by_mode,
         )
 
-    def _process_rss_data_by_mode(self, rss_data) -> RSSResult:
+    def _process_rss_data_by_mode(self, capture, keywords) -> RSSResult:
         return rss.prepare_rss_input(
-            rss_data, mode=self.report_mode, storage=self.storage_manager,
-            config=self.ctx.config,
-            load_frequency_words=partial(self.ctx.load_frequency_words, self.frequency_file),
+            capture, mode=self.report_mode, config=self.ctx.config, keywords=keywords,
             convert_items=self._convert_rss_items_to_list,
             timezone=self.ctx.timezone, rank_threshold=self.rank_threshold,
         )
@@ -425,26 +398,7 @@ class DailyRunner:
             within_days=within_days, days_old=days_old,
         )
 
-    def _load_analysis_data(self, quiet: bool = False):
-        # Defer context access to the loader's original exception boundary.
-        return inputs.load_analysis_data(
-            lambda: self.ctx.platform_ids,
-            read_today_titles=lambda *args, **kw: self.ctx.read_today_titles(*args, **kw),
-            detect_new_titles=lambda *args, **kw: self.ctx.detect_new_titles(*args, **kw),
-            load_frequency_words=lambda: self.ctx.load_frequency_words(self.frequency_file),
-            quiet=quiet,
-        )
-
     _prepare_current_title_info = staticmethod(inputs.prepare_current_title_info)
-
-    def _select_mode_data(
-        self, results: Dict, id_to_name: Dict, new_titles: Dict, time_info: str,
-    ) -> ModeInput:
-        return inputs.select_mode_data(
-            self.report_mode, results, id_to_name, new_titles, time_info,
-            load_history=self._load_analysis_data,
-            prepare_current_info=self._prepare_current_title_info,
-        )
 
     def _prepare_standalone_data(
         self, results: Dict, id_to_name: Dict,
@@ -456,20 +410,29 @@ class DailyRunner:
             title_info=title_info, rss_items=rss_items,
         )
 
-    def prepare_report(self, crawl: CrawlResult, rss_result: RSSResult) -> PreparedReportInput:
-        """Prepare each mode's hotlist and raw standalone views before analysis."""
-        new_titles = self.ctx.detect_new_titles(self.ctx.platform_ids)
-        time_info = self.ctx.format_time()
-        keywords = KeywordRules(*self.ctx.load_frequency_words(self.frequency_file))
-        hotlist = self._select_mode_data(
-            crawl.results, crawl.id_to_name, new_titles, time_info,
+    def prepare_report(self, crawl: CrawlResult, rss_collection: RSSCollection) -> PreparedReportInput:
+        """Capture once before AI; all main/new views share the same boundary."""
+        coordinator = self._publication_coordinator()
+        feed_ids = [feed["id"] for feed in self.ctx.rss_feeds
+                    if feed.get("enabled", True)] if self.ctx.rss_enabled else []
+        enabled = (["news"] if self.ctx.platform_ids else []) + (["rss"] if feed_ids else [])
+        captured = capture_sources(
+            self.ctx.create_publication_source_reader(), coordinator.capture_baseline(enabled_kinds=enabled),
+            self.ctx.get_time(), platform_ids=self.ctx.platform_ids, feed_ids=feed_ids,
+            rss_available=rss_collection.available, news_available=not bool(crawl.failed_ids),
+            identity_lookup=coordinator.known_identities,
         )
+        frozen = captured.to_dict()
+        keywords = KeywordRules(*deepcopy(self.ctx.load_frequency_words(self.frequency_file)))
+        hotlist = inputs.prepare_captured_hotlist(frozen, self.report_mode)
+        rss_result = self._process_rss_data_by_mode(frozen, keywords)
         standalone = self._prepare_standalone_data(
             hotlist.results, hotlist.id_to_name, hotlist.title_info, rss_result.raw_items,
         )
         return PreparedReportInput(
             mode=self.report_mode, hotlist=hotlist, keywords=keywords,
             rss=rss_result, failed_ids=crawl.failed_ids, standalone=standalone,
+            capture=captured,
         )
 
     def analyze_report(
@@ -491,7 +454,9 @@ class DailyRunner:
         # Standalone remains a separate input; raw RSS never enlarges this pool.
         ai_result = None
         ai_config = self.ctx.config.get("AI_ANALYSIS", {})
-        if ai_config.get("ENABLED", False) and (stats or rss_result.stats):
+        if ai_config.get("ENABLED", False) and any(
+            stat.get("count", 0) for stat in (stats or []) + (rss_result.stats or [])
+        ):
             report_type = self._get_mode_strategy()["report_type"]
             ai_result = self._run_ai_analysis(
                 stats, rss_result.stats, prepared.mode, report_type, hotlist.id_to_name,
@@ -505,53 +470,72 @@ class DailyRunner:
                 id_to_name=hotlist.id_to_name, mode=prepared.mode,
                 rss_items=rss_result.stats, rss_new_items=rss_result.new_stats,
                 ai_analysis=ai_result, standalone_data=prepared.standalone,
-                frequency_file=self.frequency_file,
+                frequency_file=self.frequency_file, keyword_rules=keywords,
+                captured_at=prepared.capture.to_dict()["captured_at"],
             )
         return ReportArtifacts(stats, html_file)
 
     def execute_report(
-        self, crawl: CrawlResult, rss_result: RSSResult, schedule: ResolvedSchedule = None,
+        self, crawl: CrawlResult, rss_result: RSSCollection, schedule: ResolvedSchedule = None,
+        *, report_id=None,
     ) -> Optional[str]:
-        """Prepare the scheduled report, analyze/render it, then send and display."""
-        mode_strategy = self._get_mode_strategy()
+        """Analyze one frozen input; only an owned report claim can publish."""
         prepared = self.prepare_report(crawl, rss_result)
+        frozen_input = prepared.capture.to_dict()
+        frozen_input["report_view"] = json.loads(json.dumps({
+            "mode": prepared.mode, "hotlist": prepared.hotlist._asdict(),
+            "keywords": prepared.keywords._asdict(), "rss": prepared.rss._asdict(),
+            "standalone": prepared.standalone, "failed_ids": prepared.failed_ids,
+        }, ensure_ascii=False))
         artifacts = self.analyze_report(prepared, schedule)
         html_file = artifacts.html_file
         if html_file:
             print(f"邮箱HTML报告已生成: {html_file}")
-            print(f"最新邮箱报告已更新: output/html/latest/{self.report_mode}.html")
-
-        if mode_strategy["should_send_notification"]:
-            self._send_notification_if_needed(
-                artifacts.stats, mode_strategy["report_type"],
-                new_titles=prepared.hotlist.new_titles, html_file_path=html_file,
-                rss_items=rss_result.stats, schedule=schedule,
-            )
-
+        if report_id is not None:
+            self._send_notification_if_needed(prepared, artifacts, frozen_input, report_id, schedule)
         if self._should_open_browser() and html_file:
-            file_url = "file://" + str(Path(html_file).resolve())
-            print(f"正在打开邮箱HTML报告: {file_url}")
-            webbrowser.open(file_url)
-        elif self.is_docker_container and html_file:
-            print(f"邮箱HTML报告已生成（Docker环境）: {html_file}")
+            webbrowser.open("file://" + str(Path(html_file).resolve()))
         return html_file
 
     def run(self) -> None:
-        """Resolve → hotlist → RSS → prepare/AI/HTML/email → cleanup."""
+        """Scheduled collection is independent of report windows and retry work."""
+        report_id = None
         try:
             if not self._initialize_and_check_config():
                 return
             schedule = self._resolve_schedule()
-            if not schedule.collect:
-                print("[调度] 当前时间段不执行数据采集，跳过分析流水线")
+            # This is scheduled collection, never collection caused by a retry.
+            # Complete it even when a report already owns the window or the
+            # publication store/SMTP subsequently needs operator attention.
+            collect_allowed = bool(schedule.collect and self.ctx.config["ENABLE_CRAWLER"])
+            crawl, rss_result, collection_error = None, None, None
+            if collect_allowed:
+                try:
+                    crawl = self._crawl_data()
+                    rss_result = self._crawl_rss_data()
+                except Exception as exc:
+                    collection_error = exc
+            plan = self._begin_publication(schedule, collection_succeeded=collection_error is None)
+            report_id = plan.report_id
+            if plan.retry_existing_reports:
+                dispatcher = self.ctx.create_notification_dispatcher()
+                for pending_id in plan.retry_existing_reports:
+                    self._publication_coordinator().deliver(pending_id, dispatcher)
+            if collection_error is not None:
+                raise collection_error
+            if not plan.generate_new_report:
+                print("[发布] 不生成新报告；计划采集与既有快照补投分别执行")
                 return
-            crawl = self._crawl_data()
-            rss_result = self._crawl_rss_data()
-            self.execute_report(crawl, rss_result, schedule)
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            print(f"分析流程执行出错: {e}")
+            self.execute_report(crawl, rss_result, schedule, report_id=report_id)
+        except Exception as exc:
+            if report_id is not None:
+                try:
+                    # Only pre-snapshot generation is releasable. PREPARED,
+                    # SENDING and unknown outcomes retain their original claim.
+                    self._publication_coordinator().fail_generation(report_id)
+                except Exception as recovery_exc:
+                    print(f"[发布] 生成窗口需人工核对（{type(recovery_exc).__name__}）")
+            print(f"分析流程停止（{type(exc).__name__}）；发布状态保留供核对")
             raise
         finally:
             self.ctx.cleanup()

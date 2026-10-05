@@ -45,6 +45,50 @@ class NativePresentationTests(unittest.TestCase):
         self.assertIn("周日", configure.display_value("WEEKLY_WEEKDAY", "6"))
         self.assertEqual(configure.display_value("AI_TIMEOUT", ""), "<使用程序配置>")
 
+    def test_openai_fallback_key_is_secret_even_without_a_menu_field(self):
+        key = "AI_FALLBACK_API_KEY"
+        old, new = "synthetic-old-fallback-key", "synthetic-new-fallback-key"
+        self.assertNotIn(new, configure.display_value(key, new))
+        for before, after, operation in (("", new, "将新增"), (old, new, "将替换"), (old, "", "将清空")):
+            with self.subTest(operation=operation):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    configure.print_changes({key: before}, {key: after})
+                self.assertIn(operation, output.getvalue())
+                self.assertNotIn(old, output.getvalue())
+                self.assertNotIn(new, output.getvalue())
+
+    def test_openai_fallback_base_uses_existing_url_redaction_rules(self):
+        key = "AI_FALLBACK_API_BASE"
+        for value in ("https://synthetic-user@relay.example.invalid/v1",
+                      "https://relay.example.invalid/v1?token=synthetic-query"):
+            with self.subTest(value=value):
+                self.assertTrue(configure.url_field_never_renders(key, value))
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    configure.print_changes({key: ""}, {key: value})
+                self.assertNotIn(value, output.getvalue())
+                self.assertNotIn("synthetic-", output.getvalue())
+        self.assertEqual(configure.validate_field(key, "https://relay.example.invalid/v1"), [])
+        self.assertTrue(configure.validate_field(key, "ftp://relay.example.invalid/v1"))
+
+    def test_only_new_list_fields_are_exposed(self):
+        self.assertTrue(set(configure.FALLBACK_LIST_FIELDS).issubset(configure.MENU_SECTIONS["2"][1]))
+        self.assertFalse(any(key.startswith("AI_OPENAI_") for key in configure.FIELD_MAP))
+        for phrase in ("英文逗号", "@", "保留空位", "单值内不能包含 @", "不支持转义", "留空保持", ":clear"):
+            self.assertIn(phrase, configure.FALLBACK_LIST_HELP)
+
+    def test_entire_fallback_key_column_is_hidden_in_preview(self):
+        key = "AI_FALLBACK_API_KEY"
+        before, after = "@synthetic-old-column@", "synthetic-new-first@@synthetic-new-last"
+        self.assertIn(key, configure.SECRET_FIELDS)
+        self.assertEqual(configure.display_value(key, after), "<已设置，隐藏>")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            configure.print_changes({key: before}, {key: after})
+        self.assertIn("将替换", output.getvalue())
+        self.assertNotIn("synthetic-", output.getvalue())
+
     def test_url_validation_and_masking_never_echo_secret_input(self):
         for key in ("AI_API_BASE", "PLATFORMS_API_URL", "PLATFORMS_API_FALLBACK_URLS"):
             for value in ("https://[bad?token=secretvalue", "ftp://example.com?token=secretvalue", "https://example.com:99999?token=secretvalue"):

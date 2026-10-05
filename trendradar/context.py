@@ -171,6 +171,11 @@ class AppContext:
 
     # === 数据处理 ===
 
+    def create_publication_source_reader(self):
+        """Strict source capture, unlike legacy convenience error-to-empty reads."""
+        from trendradar.daily_flow.capture import DailySourceReader
+        return DailySourceReader(self.get_storage_manager().get_backend())
+
     def read_today_titles(
         self, platform_ids: Optional[List[str]] = None, quiet: bool = False
     ) -> Tuple[Dict, Dict, Dict]:
@@ -236,7 +241,9 @@ class AppContext:
             weight_config=self.weight_config,
             max_news_per_keyword=max_news_per_keyword,
             sort_by_position_first=self.config.get("SORT_BY_POSITION_FIRST", False),
-            is_first_crawl_func=self.is_first_crawl,
+            # Daily novelty is publication-relative; never reread mutable
+            # crawl history or turn midnight into an implicit novelty reset.
+            is_first_crawl_func=lambda: False,
             convert_time_func=self.convert_time_display,
             quiet=quiet,
         )
@@ -255,6 +262,8 @@ class AppContext:
         ai_analysis: Optional[Any] = None,
         standalone_data: Optional[Dict] = None,
         frequency_file: Optional[str] = None,
+        keyword_rules: Optional[Tuple] = None,
+        captured_at: Optional[str] = None,
     ) -> str:
         """生成HTML报告"""
         return generate_html_report(
@@ -265,11 +274,13 @@ class AppContext:
             mode=mode,
             rank_threshold=self.rank_threshold,
             output_dir="output",
-            date_folder=self.format_date(),
-            time_filename=self.format_time(),
-            render_email_html_func=lambda *args, **kwargs: self.render_email_html(*args, rss_items=rss_items, rss_new_items=rss_new_items, ai_analysis=ai_analysis, standalone_data=standalone_data, **kwargs),
+            date_folder=captured_at[:10] if captured_at else self.format_date(),
+            time_filename=(datetime.fromisoformat(captured_at).strftime('%H-%M-%S-%f')
+                           if captured_at else self.format_time()),
+            render_email_html_func=lambda *args, **kwargs: self.render_email_html(*args, rss_items=rss_items, rss_new_items=rss_new_items, ai_analysis=ai_analysis, standalone_data=standalone_data, captured_at=captured_at, **kwargs),
             matches_word_groups_func=self.matches_word_groups,
-            load_frequency_words_func=lambda: self.load_frequency_words(frequency_file),
+            load_frequency_words_func=(lambda: keyword_rules) if keyword_rules is not None
+            else lambda: self.load_frequency_words(frequency_file),
         )
 
     def render_email_html(
@@ -280,6 +291,7 @@ class AppContext:
         rss_new_items: Optional[List[Dict]] = None,
         ai_analysis: Optional[Any] = None,
         standalone_data: Optional[Dict] = None,
+        captured_at: Optional[str] = None,
     ) -> str:
         """渲染邮箱专用 HTML 内容"""
         # Header「分析模型」展示本次实际调用成功的模型，而非仅配置主模型
@@ -290,7 +302,8 @@ class AppContext:
                 analysis_model = analysis_model[:1].upper() + analysis_model[1:]
             else:
                 analysis_model = "分析失败"
-        generated_at = self.get_time().strftime("%Y-%m-%d %H:%M:%S")
+        generated_at = (datetime.fromisoformat(captured_at) if captured_at
+                        else self.get_time()).strftime("%Y-%m-%d %H:%M:%S")
         return render_daily_html(
             report_data=report_data,
             mode=mode,

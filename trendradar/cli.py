@@ -289,9 +289,12 @@ def _run_doctor(config_path: Optional[str] = None) -> bool:
         if ai_analysis_enabled:
             try:
                 from trendradar.ai.client import AIClient
-                valid, message = AIClient(config.get("AI", {})).validate_config()
+                ai_client = AIClient(config.get("AI", {}))
+                valid, message = ai_client.validate_config()
                 if valid:
                     _record_doctor_result(results, "pass", "AI配置", f"模型: {config.get('AI', {}).get('MODEL', '')}")
+                    for warning in ai_client.configuration_warnings():
+                        _record_doctor_result(results, "warn", "AI备用配置", warning)
                 else:
                     _record_doctor_result(results, "fail", "AI配置", message)
             except Exception as e:
@@ -435,6 +438,9 @@ def _run_test_notification(config: Dict) -> bool:
             return False
 
         print("-" * 60)
+        if result.unknown:
+            print("⚠️ SMTP 提交结果未知，不自动重发；请先核对服务商投递记录。")
+            return False
         if result.partially_delivered:
             print("⚠️ 邮件部分投递，不自动重发，请检查拒收原因。")
             return False

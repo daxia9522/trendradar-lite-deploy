@@ -14,6 +14,7 @@ from typing import Dict, Any, List, Optional
 
 import yaml
 
+from trendradar.ai_config import merge_ai_settings
 from trendradar.utils.time import DEFAULT_TIMEZONE
 
 
@@ -129,13 +130,6 @@ def _read_secret_file(secret_path: str) -> str:
             os.close(descriptor)
 
 
-def _get_env_model_list(key: str) -> Optional[List[str]]:
-    """从环境变量读取模型列表（逗号/空白分隔）。未设置返回 None，便于回退 yaml/默认。"""
-    raw = _get_env_str(key)
-    if not raw:
-        return None
-    models = [p for p in re.split(r"[,\s]+", raw) if p]
-    return models or None
 
 
 def _load_app_config(config_data: Dict) -> Dict:
@@ -353,36 +347,10 @@ def _load_display_config(config_data: Dict) -> Dict:
 
 
 def _load_ai_config(config_data: Dict) -> Dict:
-    """加载 AI 模型配置（LiteLLM provider/model 格式）。
-
-    环境变量仅限：AI_MODEL / AI_API_KEY 或 AI_API_KEY_FILE / AI_API_BASE /
-    AI_FALLBACK_MODELS / AI_TIMEOUT。
-    temperature / max_tokens 实测被当前中转站忽略，已不再传递；
-    超时与重试次数未配置时由 AIClient 默认值接管（单一来源）。
-    """
-    ai_config = config_data.get("ai", {})
-
-    # AI_FALLBACK_MODELS 有值则覆盖 config.yaml ai.fallback_models（逗号/空白分隔）
-    fallback_env = _get_env_model_list("AI_FALLBACK_MODELS")
-
-    config: Dict[str, Any] = {
-        "MODEL": _get_env_str("AI_MODEL") or ai_config.get("model", ""),
-        "API_KEY": _get_env_secret("AI_API_KEY", "AI_API_KEY_FILE") or ai_config.get("api_key", ""),
-        "API_BASE": _get_env_str("AI_API_BASE") or ai_config.get("api_base", ""),
-        "FALLBACK_MODELS": (
-            fallback_env
-            if fallback_env is not None
-            else ai_config.get("fallback_models", [])
-        ),
-        "EXTRA_PARAMS": ai_config.get("extra_params", {}),
-    }
-
-    timeout = _get_env_int_or_none("AI_TIMEOUT")
-    if timeout is None:
-        timeout = ai_config.get("timeout")
-    if timeout is not None:
-        config["TIMEOUT"] = int(timeout)
-
+    """Resolve env/YAML once; only this I/O layer may read the main secret file."""
+    ai = config_data.get("ai") or {}
+    config = merge_ai_settings(ai, os.environ)
+    config["API_KEY"] = _get_env_secret("AI_API_KEY", "AI_API_KEY_FILE") or ai.get("api_key", "")
     return config
 
 

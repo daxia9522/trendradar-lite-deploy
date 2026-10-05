@@ -1,45 +1,23 @@
 """Daily input selection; pure view preparation and explicit history readers."""
 
-from typing import Callable, Dict, List, Optional
+from typing import Dict, List, Optional
 
 from .models import ModeInput
 
 
-def load_analysis_data(
-    get_platform_ids: Callable[[], List[str]],
-    *,
-    read_today_titles: Callable,
-    detect_new_titles: Callable,
-    load_frequency_words: Callable,
-    quiet: bool = False,
-) -> Optional[ModeInput]:
-    """统一的数据加载和预处理，使用当前监控平台列表过滤历史数据"""
-    try:
-        # 获取当前配置的监控平台ID列表
-        current_platform_ids = get_platform_ids()
-        if not quiet:
-            print(f"当前监控平台: {current_platform_ids}")
-
-        all_results, id_to_name, title_info = read_today_titles(
-            current_platform_ids, quiet=quiet
-        )
-
-        if not all_results:
-            print("没有找到当天的数据")
-            return None
-
-        total_titles = sum(len(titles) for titles in all_results.values())
-        if not quiet:
-            print(f"读取到 {total_titles} 个标题（已按当前监控平台过滤）")
-
-        new_titles = detect_new_titles(current_platform_ids, quiet=quiet)
-        # This reread also validates the three-part keyword contract inside the
-        # history error boundary. Retain its failures/side effects, not its payload.
-        _word_groups, _filter_words, _global_filters = load_frequency_words()
-        return ModeInput(all_results, id_to_name, title_info, new_titles)
-    except Exception as e:
-        print(f"数据加载失败: {e}")
-        return None
+def prepare_captured_hotlist(capture: Dict, mode: str) -> ModeInput:
+    """Keep today's main pool; interval items only extend the new section."""
+    today = capture["captured_at"][:10]
+    day = next((d for d in capture["sources"]["news"] if d["date"] == today), {})
+    results, title_info = {}, {}
+    for item in day.get("items", []):
+        source, title = item["source_id"], item["title"]
+        results.setdefault(source, {})[title] = item
+        title_info.setdefault(source, {})[title] = item
+    new_titles = capture["new_news"]
+    if mode == "incremental":
+        results = new_titles
+    return ModeInput(results, capture["news_names"], title_info, new_titles)
 
 
 def prepare_current_title_info(results: Dict, time_info: str) -> Dict:
@@ -210,32 +188,3 @@ def prepare_standalone_data(
         return None
 
     return standalone_data
-
-
-def select_mode_data(
-    mode: str,
-    results: Dict,
-    id_to_name: Dict,
-    new_titles: Dict,
-    time_info: str,
-    *,
-    load_history: Callable,
-    prepare_current_info: Callable = prepare_current_title_info,
-) -> ModeInput:
-    """Select current-crawl or historical data for the effective report mode."""
-    if mode in {"current", "daily"}:
-        analysis_data = load_history()
-        if analysis_data:
-            if mode == "current":
-                print(
-                    "current模式：使用过滤后的历史数据，包含平台："
-                    f"{list(analysis_data.results.keys())}"
-                )
-            return analysis_data
-
-        if mode == "current":
-            print("❌ 严重错误：无法读取刚保存的数据文件")
-            raise RuntimeError("数据一致性检查失败：保存后立即读取失败")
-
-    title_info = prepare_current_info(results, time_info)
-    return ModeInput(results, id_to_name, title_info, new_titles)

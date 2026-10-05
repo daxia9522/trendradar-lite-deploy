@@ -1,87 +1,74 @@
 # coding=utf-8
-"""发送一封报告邮件；SMTP 协议与重试仍由 send_to_email 负责。"""
-
+"""Prepare immutable report emails, then submit explicit envelope attempts."""
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Sequence
 
-from .senders import send_to_email
-
-
-@dataclass(frozen=True)
-class EmailDeliveryResult:
-    """一次发送的独立结果；部分接受不算成功，也不能整封自动重发。"""
-
-    configured: bool
-    sent: bool
-    partially_delivered: bool
-
-    def __bool__(self) -> bool:
-        raise TypeError("请显式检查 configured、sent 或 partially_delivered")
+from .models import EmailDeliveryResult, PreparedEmail
+from .senders import prepare_email, send_prepared_email
 
 
 class NotificationDispatcher:
-    """报告邮件入口，保留历史类名供日报上下文使用。"""
+    """Shared email entry point; no mutable delivery state or hidden retry loop."""
 
-    def __init__(
-        self,
-        config: Dict[str, Any],
-        get_time_func: Callable,
-    ):
+    def __init__(self, config: Dict[str, Any], get_time_func: Callable):
         self.config = config
         self.get_time_func = get_time_func
 
-    def send_report(
-        self,
-        report_type: str,
-        html_file_path: Optional[str] = None,
-        *,
-        period_name: Optional[str] = None,
-        subject_override: Optional[str] = None,
-        sender_name_override: Optional[str] = None,
-    ) -> EmailDeliveryResult:
-        """使用当前配置发送一封邮件，不维护收件人队列或上层重试。"""
-        missing = [
-            key for key in ("EMAIL_FROM", "EMAIL_PASSWORD", "EMAIL_TO")
-            if not self.config.get(key)
-        ]
-        smtp_server = self.config.get("EMAIL_SMTP_SERVER") or None
-        smtp_port = self.config.get("EMAIL_SMTP_PORT") or None
-        if missing:
-            print(f"[邮件] 缺少邮件配置: {', '.join(missing)}")
-            return EmailDeliveryResult(configured=False, sent=False, partially_delivered=False)
+    def _configured(self) -> bool:
+        return all(self.config.get(key) for key in ("EMAIL_FROM", "EMAIL_PASSWORD", "EMAIL_TO"))
 
+    def prepare_report(
+        self, report_type: str, html_file_path: Optional[str], *,
+        period_name: Optional[str] = None, subject_override: Optional[str] = None,
+        sender_name_override: Optional[str] = None,
+    ) -> Optional[PreparedEmail]:
+        """Freeze actual MIME bytes without connecting to SMTP or retaining secrets."""
+        if not self._configured():
+            missing = [key for key in ("EMAIL_FROM", "EMAIL_PASSWORD", "EMAIL_TO") if not self.config.get(key)]
+            print(f"[邮件] 缺少邮件配置: {', '.join(missing)}")
+            return None
         if not html_file_path:
             print("[邮件] 缺少 HTML 文件路径，跳过")
-            return EmailDeliveryResult(configured=True, sent=False, partially_delivered=False)
+            return None
         now = self.get_time_func()
         label = (period_name or report_type or "").strip() or "热点分析"
-        sender_label = sender_name_override or label
-        subject = subject_override or (
-            f"{label} · {now.strftime('%m月%d日 %H:%M')}"
-        )
-        partially_delivered = False
+        try:
+            return prepare_email(
+                self.config["EMAIL_FROM"], self.config["EMAIL_TO"], report_type, html_file_path,
+                get_time_func=lambda: now,
+                subject_override=subject_override or f"{label} · {now.strftime('%m月%d日 %H:%M')}",
+                sender_name_override=sender_name_override or label,
+            )
+        except Exception as exc:
+            print(f"[邮件] 报告准备失败（{type(exc).__name__}）")
+            return None
 
-        def mark_partial_delivery() -> None:
-            nonlocal partially_delivered
-            partially_delivered = True
+    def send_prepared(
+        self, prepared: PreparedEmail, *, recipients: Optional[Sequence[str]] = None,
+    ) -> EmailDeliveryResult:
+        """Submit one attempt using current transport credentials and frozen payload.
 
-        sent = send_to_email(
-            from_email=self.config["EMAIL_FROM"],
-            password=self.config["EMAIL_PASSWORD"],
-            to_email=self.config["EMAIL_TO"],
-            report_type=report_type,
-            html_file_path=html_file_path,
-            custom_smtp_server=smtp_server,
-            custom_smtp_port=int(smtp_port) if smtp_port else None,
-            get_time_func=self.get_time_func,
-            subject_override=subject,
-            sender_name_override=sender_label,
-            on_partial_delivery=mark_partial_delivery,
+        The configured sender/recipient list is intentionally not reapplied: a
+        pending report has its own authorized original envelope. The caller must
+        durably claim the attempt and then persist its returned receipt.
+        """
+        return send_prepared_email(
+            prepared, recipients=recipients, password=self.config.get("EMAIL_PASSWORD", ""),
+            custom_smtp_server=self.config.get("EMAIL_SMTP_SERVER") or None,
+            custom_smtp_port=self.config.get("EMAIL_SMTP_PORT") or None,
         )
-        return EmailDeliveryResult(
-            configured=True,
-            sent=sent and not partially_delivered,
-            partially_delivered=partially_delivered,
+
+    def send_report(
+        self, report_type: str, html_file_path: Optional[str] = None, *,
+        period_name: Optional[str] = None, subject_override: Optional[str] = None,
+        sender_name_override: Optional[str] = None,
+    ) -> EmailDeliveryResult:
+        """Prepare+send convenience for non-daily consumers; no implicit retry."""
+        prepared = self.prepare_report(
+            report_type, html_file_path, period_name=period_name,
+            subject_override=subject_override, sender_name_override=sender_name_override,
         )
+        if prepared is None:
+            return EmailDeliveryResult(configured=self._configured())
+        return self.send_prepared(prepared)

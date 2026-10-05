@@ -80,8 +80,14 @@ ai:
   # 运行时由环境变量 / GitHub Secrets 注入；此处保持空占位，便于切换中转站或 Gemini 官方
   # AI_MODEL=provider/model（中转示例 openai/gpt-5.6-luna；Gemini 官方 gemini/gemini-2.5-flash）
   # AI_API_BASE=中转根地址（原样使用，不自动加 /v1）；走 Gemini 官方时留空
-  # AI_FALLBACK_MODELS=可选备用，逗号分隔；首项同时作周报关键词便宜模型
+  # AI_FALLBACK_MODELS=可选备用，英文逗号分隔；空模型报错；首项作周报关键词便宜模型
+  # AI_FALLBACK_API_BASE / AI_FALLBACK_API_KEY=按 @ 分隔，与 N 个备用严格对应并保留空位
+  # 统一按槽位解析；整列空按 N 个空项，不去重，不按是否填鉴权切换模式
+  # 空 URL 槽=provider 官方默认；空 Key 仅在同 provider、同有效主端点时继承主 Key
+  # 同 provider 不同 URL 仍需独立 Key / headers；同名模型不去重；URL/Key 单值不支持 @
   # AI_API_KEY=密钥（切勿写入本文件）
+  # AI_FALLBACK_API_KEY 整列只用 env/Secrets，不写 YAML，暂无新的 _FILE 支持
+  # AI_TIMEOUT=日报/周报共用的单次请求超时（秒）；未设置/空值沿用下方 120
   model: ""
   api_base: ""
   timeout: 120

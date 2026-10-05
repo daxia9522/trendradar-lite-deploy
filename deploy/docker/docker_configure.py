@@ -25,19 +25,19 @@ from deploy.docker.runtime_config import RuntimeConfigError, is_application_key,
 DOCKER_MARKER = b"# TrendRadar env format: docker\n"
 MIGRATION_ERROR = "旧 .env 含不支持的 Compose 插值或转义；未迁移。请先将应用参数改为明确字面量（美元符号用 $$ 或单引号），再重试。"
 def application_key(key: str) -> bool:
-    return key != "AI_API_KEY_FILE" and is_application_key(key)
+    return key not in shared.NATIVE_ONLY_FIELDS and is_application_key(key)
 
 
-def validate(values: dict[str, str], *, require_mail: bool = True) -> list[str]:
+def validate(values: dict[str, str], *, require_mail: bool = True, config_path: Path | None = None) -> list[str]:
     checked = dict(values)
     checked.setdefault("TZ", values.get("TIMEZONE") or "Asia/Shanghai")
-    errors = shared.validate(checked, "docker") if require_mail else []
+    errors = shared.validate(checked, "docker", config_path=config_path) if require_mail else []
     try:
         validate_runtime_values(values)
     except RuntimeConfigError as error:
         errors.append(str(error))
     return errors
-SECTIONS = {choice: (title, [key for key in keys if key != "AI_API_KEY_FILE"])
+SECTIONS = {choice: (title, [key for key in keys if key not in shared.NATIVE_ONLY_FIELDS])
             for choice, (title, keys) in shared.MENU_SECTIONS.items()}
 
 
@@ -51,7 +51,7 @@ class FieldPolicy(NamedTuple):
 # Prefix-supported future fields remain sensitive until classified here.
 PUBLIC_FIELDS = frozenset({
     "EMAIL_FROM", "EMAIL_TO", "EMAIL_SMTP_SERVER", "EMAIL_SMTP_PORT",
-    "AI_ANALYSIS_ENABLED", "AI_MODEL", "AI_API_BASE", "AI_FALLBACK_MODELS", "AI_TIMEOUT",
+    "AI_ANALYSIS_ENABLED", "AI_MODEL", "AI_API_BASE", "AI_FALLBACK_API_BASE", "AI_FALLBACK_MODELS", "AI_TIMEOUT",
     "PLATFORMS_API_URL", "PLATFORMS_API_FALLBACK_URLS", "TZ", "TIMEZONE",
     "CRAWLER_MINUTE", "MORNING_PUSH_TIME", "NOON_PUSH_TIME", "EVENING_PUSH_TIME",
     "DAILY_SUMMARY_TIME", "WEEKLY_WEEKDAY", "WEEKLY_HOUR", "WEEKLY_MINUTE", "WEEKLY_TIME",
@@ -64,7 +64,7 @@ PUBLIC_FIELDS = frozenset({
 })
 FIELD_POLICIES = {key: FieldPolicy(shared.FIELD_MAP[key][1] if key in shared.FIELD_MAP else key,
                                   sensitive=key not in PUBLIC_FIELDS)
-                  for key in PUBLIC_FIELDS | (set(shared.FIELD_MAP) - {"AI_API_KEY_FILE"}) |
+                  for key in PUBLIC_FIELDS | (set(shared.FIELD_MAP) - shared.NATIVE_ONLY_FIELDS) |
                   {"S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"}}
 
 
@@ -79,7 +79,7 @@ def credential_url(key: str, value: str) -> bool:
     # S3 fragments are forbidden when enabled, but an old disabled draft may
     # contain them. Hide them too, before validation and during error rendering.
     return key in CREDENTIAL_URL_FIELDS and (
-        shared.carries_credentials(value) or (key == "S3_ENDPOINT_URL" and "#" in value))
+        shared.url_field_never_renders(key, value) or (key == "S3_ENDPOINT_URL" and "#" in value))
 
 
 def display_value(key: str, value: str) -> str:
@@ -129,8 +129,9 @@ def edit_field(key: str, values: dict[str, str]) -> None:
     # Required secrets may be cleared as a draft, but full validation prevents
     # saving until required credentials are supplied again.
     while True:
+        hint = shared.FIELD_MAP[key][3] + "；" if key in shared.FALLBACK_LIST_FIELDS else ""
         entered = shared.getpass.getpass(f"{field_policy(key).label} [{display_value(key, values.get(key, ''))}]"
-                                        "（回车保留，:cancel 取消，:clear 清空）: ")
+                                        f"（{hint}回车保留，:cancel 取消，:clear 清空）: ")
         if entered in ("", ":cancel"):
             return
         value = "" if entered == ":clear" else entered
@@ -228,6 +229,7 @@ class DockerApplication:
     def __init__(self, output: Path, *, legacy: Path | None = None, defaults: Path | None = None):
         self.identity = target_identity()
         self.output = Path(output)
+        self.app_dir = Path(defaults).parent if defaults is not None else self.output.parent.parent
         self.legacy_document = None
         # Existing docker-marked documents retain their explicit old representation.
         original = snapshot(self.output)
@@ -247,7 +249,7 @@ class DockerApplication:
                 self.values.update({key: value for key, value in read_env(defaults).items() if application_key(key)})
 
     def save(self, values: dict[str, str]) -> str:
-        errors = validate(values)
+        errors = validate(values, config_path=shared.effective_config_path(values, self.app_dir))
         if errors:
             raise ConfigError("\n".join(errors))
         validate_document(self.document, values)
@@ -275,6 +277,9 @@ def configure_terminal(application: DockerApplication) -> bool:
             title, keys = SECTIONS[choice]
             while True:
                 print(f"\n[{title}]", flush=True)
+                if choice == "2":
+                    print(shared.FALLBACK_LIST_HELP, flush=True)
+                    print(shared.FALLBACK_AUTH_HELP, flush=True)
                 for index, key in enumerate(keys, 1):
                     current = shared._native_value(key, values)
                     pending = " [待保存]" if current != shared._native_value(key, before) else ""
@@ -294,7 +299,7 @@ def configure_terminal(application: DockerApplication) -> bool:
             print("已取消，未保存修改；安装不会继续启动服务。", flush=True)
             return False
         elif choice == "s":
-            errors = validate(values)
+            errors = validate(values, config_path=shared.effective_config_path(values, application.app_dir))
             if errors:
                 print("\n".join(errors), flush=True)
                 continue
@@ -330,8 +335,6 @@ def render(values, errors=None, saved=False, *, before=None, secret_edits=None) 
                   f'<label><span>周报时间</span><input name="WEEKLY_TIME" type="time" value="{weekly}"></label>', page)
     page = re.sub(r'<label><span>周报分钟</span>.*?</label>', '', page)
     page = page.replace("保存配置并继续安装", "保存配置")
-    controls = '<button name="_action" value="preview">查看待保存变更</button><button name="_action" value="cancel" formnovalidate>取消并退出</button>'
-    page = page.replace('</form>', controls + '</form>')
     rendered_keys = {key for key, *_ in shared._fields_for("docker")}
     secret_keys = {key for key in rendered_keys | set(values) if field_policy(key).sensitive and application_key(key)}
     extra = []
@@ -412,20 +415,21 @@ def serve(application: DockerApplication, args) -> bool:
                     submitted[key] = form[key][0].strip()
             # Redacted URLs/invalid switches keep their server-side draft on
             # blank submits; only a replacement or explicit sentinel clears it.
-            for key in (*CREDENTIAL_URL_FIELDS, *shared.BOOLEAN_KEYS):
-                if key not in form:
+            for key in (*CREDENTIAL_URL_FIELDS, *shared.BOOLEAN_KEYS, *shared.FALLBACK_FORM_FIELDS):
+                if key not in form or key in shared.NATIVE_ONLY_FIELDS:
                     continue
                 entered = form[key][0].strip()
                 if entered == shared.CLEAR_SENTINEL:
                     submitted[key] = ""
-                elif not entered and (credential_url(key, current.get(key, ""))
+                elif not entered and (key in shared.FALLBACK_FORM_FIELDS
+                                      or credential_url(key, current.get(key, ""))
                                       or shared.boolean_field_never_renders(key, current.get(key, ""))):
-                    submitted[key] = current[key]
+                    submitted[key] = current.get(key, "")
             secret_keys = {key for key in set(current) | {key for key, *_ in shared._fields_for("docker")}
                            if application_key(key) and field_policy(key).sensitive}
             for key in secret_keys:
                 value = form.get(key, [""])[0]
-                if form.get(f"_clear_{key}") == ["yes"]:
+                if value == shared.CLEAR_SENTINEL or form.get(f"_clear_{key}") == ["yes"]:
                     submitted[key] = ""
                     secret_edits[key] = "clear"
                 elif value:
@@ -440,7 +444,7 @@ def serve(application: DockerApplication, args) -> bool:
             # any validation/save branch so a blank retry never restores an old
             # credential. It is never written to disk without a valid save.
             current = submitted
-            errors.extend(validate(submitted))
+            errors.extend(validate(submitted, config_path=shared.effective_config_path(submitted, application.app_dir)))
             if errors:
                 self.send_page(render(current, errors, before=before, secret_edits=secret_edits), 400)
                 return

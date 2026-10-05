@@ -353,15 +353,7 @@ def extract_headline_keywords(
     if not titles:
         return rule_fallback[:topn], "rule_only_empty_titles"
 
-    keyword_client = build_keyword_client(
-        {
-            "MODEL": client.model,
-            "API_KEY": client.api_key,
-            "API_BASE": client.api_base,
-            "TIMEOUT": client.timeout,
-            "FALLBACK_MODELS": list(client.fallback_models),
-        }
-    )
+    keyword_client = build_keyword_client(client)
     messages = build_keyword_prompt(start_date, end_date, report_text)
     last_error = ""
     for attempt in range(2):
@@ -385,12 +377,13 @@ def extract_headline_keywords(
                 )
                 src = "ai_lite" if attempt == 0 else "ai_lite_retry"
                 return cleaned[:topn], src
-            preview = re.sub(r"\s+", " ", (raw or "").strip())[:80]
-            last_error = f"valid_labels={len(cleaned)} raw={preview!r}"
+            # Invalid provider output can also echo request details; log counts only.
+            last_error = f"valid_labels={len(cleaned)}"
             print(f"[关键词] lite 无效输出 attempt={attempt + 1}: {last_error}")
         except Exception as e:
-            last_error = str(e)
-            print(f"[关键词] lite 抽取失败 attempt={attempt + 1}: {e}")
+            # Retain only the category for both the attempt and final fallback log.
+            last_error = type(e).__name__
+            print(f"[关键词] lite 抽取失败 attempt={attempt + 1}: {last_error}")
 
     print(f"[关键词] 回退规则实体 Top{topn}（{last_error}）")
     return rule_fallback[:topn], "rule_only"

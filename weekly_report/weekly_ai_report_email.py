@@ -102,8 +102,9 @@ def main() -> int:
             last_report_err = "empty_response"
             print(f"[周报正文] 空响应 attempt={attempt + 1}")
         except Exception as exc:
-            last_report_err = str(exc)
-            print(f"[周报正文] 调用失败 attempt={attempt + 1}: {exc}")
+            # AIClient re-raises the provider error; never format its body here.
+            last_report_err = type(exc).__name__
+            print(f"[周报正文] 调用失败 attempt={attempt + 1}: {last_report_err}")
     if not raw_report:
         print(f"周报正文生成失败: {last_report_err or 'unknown'}")
         return 5
@@ -206,6 +207,12 @@ def main() -> int:
     )
     if not result.configured:
         return 3
+    if result.unknown:
+        # The deployed scheduler treats code 6 as terminal, not success. Reuse
+        # that no-resend disposition: restarting the whole weekly task could
+        # duplicate a DATA submission whose response was lost.
+        print("[邮件] SMTP 提交结果未知，不自动重发；请核对服务商投递记录。")
+        return PARTIAL_EMAIL_EXIT_CODE
     if result.partially_delivered:
         return PARTIAL_EMAIL_EXIT_CODE
     return 0 if result.sent else 4

@@ -635,7 +635,7 @@ def count_rss_frequency(
                 time_display = format_iso_time_friendly(published_at, timezone, include_date=True) if published_at else ""
 
                 # 判断是否为新增
-                is_new = url in new_urls if url else False
+                is_new = item.get("is_new", url in new_urls if url else False)
 
                 # 获取排名（基于发布时间顺序）
                 rank = url_to_rank.get(url, 99) if url else 99

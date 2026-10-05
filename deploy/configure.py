@@ -7,12 +7,15 @@ import argparse
 import getpass
 import hmac
 import html
+import importlib.util
 import os
 import re
 import secrets
 import sys
 import threading
 import urllib.parse
+from collections.abc import Mapping
+from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -22,14 +25,29 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from envfile import ConfigError, EnvDocument, read_env, write_env
 from backup_settings import BackupConfigError, DEFAULT_BACKUP_TIME, DEFAULT_LOOKBACK_DAYS, load_backup_settings
 from delivery_windows import DELIVERY_DEFAULTS, DeliveryWindowError, delivery_times
+from ai_settings import effective_config_path, load_ai_defaults
 
 
-SECRET_FIELDS = {"EMAIL_PASSWORD", "AI_API_KEY", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"}
+SECRET_FIELDS = {"EMAIL_PASSWORD", "AI_API_KEY", "AI_FALLBACK_API_KEY", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"}
 APP_BOOLEAN_KEYS = ("DEBUG", "SORT_BY_POSITION_FIRST", "SCHEDULE_ENABLED", "AI_ANALYSIS_ENABLED",
                     "STORAGE_TXT_ENABLED", "STORAGE_HTML_ENABLED", "PULL_ENABLED")
 BOOLEAN_KEYS = (*APP_BOOLEAN_KEYS, "R2_BACKUP_ENABLED")
 BACKUP_DEFAULTS = {"R2_BACKUP_ENABLED": "false", "R2_BACKUP_TIME": DEFAULT_BACKUP_TIME,
                    "R2_BACKUP_LOOKBACK_DAYS": str(DEFAULT_LOOKBACK_DAYS)}
+NATIVE_ONLY_FIELDS = frozenset({"AI_API_KEY_FILE"})
+FALLBACK_LIST_FIELDS = ("AI_FALLBACK_API_BASE", "AI_FALLBACK_API_KEY")
+FALLBACK_FORM_FIELDS = ("AI_FALLBACK_MODELS", *FALLBACK_LIST_FIELDS)
+FALLBACK_LIST_HELP = (
+    "备用模型用英文逗号分隔；地址和 Key 用 @ 分隔，按相同顺序一一对应。"
+    "开头、末尾和连续 @ 保留空位，例如 @地址 表示第一槽为空。"
+    "@ 是保留分隔符，单值内不能包含 @，不支持转义。"
+    "输入框留空保持已有整列，:clear 清空整列；要清空第一槽，请提交 @后续值。"
+)
+FALLBACK_AUTH_HELP = (
+    "新列表中的空地址表示该 provider 的官方默认端点，不继承主接口的自定义地址；"
+    "空 Key 仅在与主模型同 provider、同端点时继承主 Key，否则运行时跳过该备用。"
+    "两列均未填也按全空槽处理；共享自定义中转必须在对应地址槽明确填写。"
+)
 FIELDS = [
     ("EMAIL_FROM", "发件邮箱", True, "news@example.com"),
     ("EMAIL_PASSWORD", "邮箱密码或授权码", True, ""),
@@ -41,7 +59,9 @@ FIELDS = [
     ("AI_API_KEY", "AI API Key", False, ""),
     ("AI_API_KEY_FILE", "AI API Key 文件", False, "native Linux 可填写服务器上的密钥文件路径"),
     ("AI_API_BASE", "AI API 地址", False, "OpenAI 兼容接口可填写"),
-    ("AI_FALLBACK_MODELS", "备用模型", False, "用逗号分隔"),
+    ("AI_FALLBACK_MODELS", "备用模型列表", False, "英文逗号分隔，按顺序对应地址/Key；留空保持，:clear 清空"),
+    ("AI_FALLBACK_API_BASE", "备用 API 地址列表", False, "@ 分隔并保留空位；空槽为官方默认地址；单值内不能含 @，不支持转义"),
+    ("AI_FALLBACK_API_KEY", "备用 API Key 列表", False, "整列不回显；@ 分隔并保留空位；单值内不能含 @，不支持转义"),
     ("AI_TIMEOUT", "AI 超时秒数", False, "正整数"),
     ("PLATFORMS_API_URL", "采集主接口", False, "HTTP(S) URL"),
     ("PLATFORMS_API_FALLBACK_URLS", "采集备用接口", False, "多个 HTTP(S) URL 用逗号分隔"),
@@ -69,8 +89,30 @@ FIELDS = [
 def _fields_for(deployment: str) -> list[tuple[str, str, bool, str]]:
     """Return fields supported by the selected deployment target."""
     if deployment == "docker":
-        return [field for field in FIELDS if field[0] != "AI_API_KEY_FILE"]
+        return [field for field in FIELDS if field[0] not in NATIVE_ONLY_FIELDS]
     return FIELDS
+
+
+@lru_cache(maxsize=1)
+def _fallback_validator():
+    """Load only the fixed stdlib helper, never trendradar's package imports."""
+    path = Path(__file__).resolve().parents[1] / "trendradar" / "ai_config.py"
+    spec = importlib.util.spec_from_file_location("_trendradar_menu_ai_config", path)
+    if spec is None or spec.loader is None:
+        raise ConfigError("AI 备用配置校验模块不可用，未保存配置")
+    module = importlib.util.module_from_spec(spec)
+    # Dataclasses in the helper may resolve their defining module by name.
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    except (ImportError, OSError):
+        sys.modules.pop(spec.name, None)
+        raise ConfigError("AI 备用配置校验模块不可用，未保存配置") from None
+    return module.validate_fallback_settings
+
+
+def validate_fallback_settings(values: Mapping[str, str], ai_defaults=None) -> list[str]:
+    return _fallback_validator()(values, ai_defaults)
 
 
 def render(
@@ -82,7 +124,7 @@ def render(
     sections = {"邮件推送": [], "AI 分析": [], "执行时间": [], "高级配置": [], "R2/S3 备份": []}
     for key, label, required, hint in _fields_for(deployment):
         value = "" if key in SECRET_FIELDS else values.get(key, BACKUP_DEFAULTS.get(key, ""))
-        placeholder = "已保存，留空保持不变" if key in SECRET_FIELDS and values.get(key) else hint
+        placeholder = "已保存，留空保持不变，:clear 清空" if key in SECRET_FIELDS and values.get(key) else hint
         input_type = "password" if key in SECRET_FIELDS else "time" if key.endswith("_PUSH_TIME") or key in ("DAILY_SUMMARY_TIME", "R2_BACKUP_TIME") else "text"
         if url_field_never_renders(key, value):
             # The raw value stays server-side only; blank submits keep the draft.
@@ -119,17 +161,25 @@ button{{font:inherit;padding:11px 16px;background:#1769aa;color:white;border:0;b
 .ok{{padding:12px;background:#e3f6e8;color:#176b35;margin:14px 0}} .error{{padding:12px;background:#fde8e8;color:#a11;margin:14px 0}}
 </style><main><h1>TrendRadar Lite 配置</h1>
 <p>邮件配置为必填，SMTP 服务器和端口可留空自动识别。AI 分析可选，密码和密钥不会回显。</p>
-{notice}{error}<form method="post">{section_html}<button type="submit">保存配置并继续安装</button></form></main></html>"""
+<p>{FALLBACK_LIST_HELP}</p><p>{FALLBACK_AUTH_HELP}</p>
+{notice}{error}<form method="post">{section_html}<button type="submit">保存配置并继续安装</button>
+<button name="_action" value="preview">查看待保存变更</button>
+<button name="_action" value="cancel" formnovalidate>取消并退出</button></form></main></html>"""
 
 
-def validate(values: dict[str, str], deployment: str = "linux", *, check_delivery_windows: bool = True) -> list[str]:
+def validate(values: dict[str, str], deployment: str = "linux", *, check_delivery_windows: bool = True,
+             config_path: Path | None = None) -> list[str]:
     fields = _fields_for(deployment)
+    try:
+        ai_defaults = load_ai_defaults(config_path)
+    except ConfigError as error:
+        return [str(error)]
     errors = [f"请填写：{label}" for key, label, required, _hint in fields if required and not values.get(key)]
     if values.get("AI_ANALYSIS_ENABLED", "").strip().lower() in ("true", "1"):
         has_key = values.get("AI_API_KEY") or (
             deployment != "docker" and values.get("AI_API_KEY_FILE")
         )
-        if not values.get("AI_MODEL") or not has_key:
+        if not (values.get("AI_MODEL") or ai_defaults.get("model")) or not has_key:
             key_hint = "AI_API_KEY" if deployment == "docker" else "AI_API_KEY 或 AI_API_KEY_FILE"
             errors.append(f"启用 AI 分析时必须填写 AI_MODEL，以及 {key_hint}")
     if bool(values.get("EMAIL_SMTP_SERVER")) != bool(values.get("EMAIL_SMTP_PORT")):
@@ -138,6 +188,8 @@ def validate(values: dict[str, str], deployment: str = "linux", *, check_deliver
         if key not in APP_BOOLEAN_KEYS:
             errors.extend(validate_field(key, values.get(key, "")))
     errors.extend(validate_app_booleans(values))
+    fallback_errors = validate_fallback_settings(values, ai_defaults) if config_path is not None else validate_fallback_settings(values)
+    errors.extend(error for error in fallback_errors if error not in errors)
     if check_delivery_windows:
         try:
             delivery_times(values)
@@ -169,6 +221,14 @@ def validate_field(key: str, value: str) -> list[str]:
         return [f"{key} 不能包含换行或 NUL"]
     if not value:
         return []
+    if key == "AI_FALLBACK_API_BASE":
+        # Field editing has no complete draft yet. Inert models align with every
+        # slot so the shared helper checks URL syntax; validate() checks the real
+        # model count and positional binding before any save.
+        return validate_fallback_settings({
+            "AI_FALLBACK_MODELS": ",".join("openai/configure-validation" for _ in value.split("@")),
+            key: value,
+        })
     ranges = {
         "EMAIL_SMTP_PORT": (1, 65535),
         "CRAWLER_MINUTE": (0, 59),
@@ -284,7 +344,13 @@ def _prompt_field(
         note = hint
     label_text = f"{label}{' *' if required else ''}"
     prompt = f"  {label_text}" + (f"（{note}）" if note else "") + ": "
-    entered = (getpass.getpass(prompt) if is_secret else input(prompt)).strip()
+    entered = getpass.getpass(prompt) if is_secret else input(prompt)
+    if key != "AI_FALLBACK_API_KEY":
+        entered = entered.strip()
+    if entered == CLEAR_SENTINEL:
+        return ""
+    if entered == ":cancel":
+        return current.get(key, "")
     # The legacy sequential wizard previously got EnvDocument's local default.
     # An empty newly exposed field must not replace that default with "".
     fallback = current.get(key, "") or ("local" if key == "STORAGE_BACKEND" else "")
@@ -298,6 +364,8 @@ def configure_docker_terminal(output: Path, deployment: str = "docker") -> None:
     fields = _fields_for(deployment)
     print("TrendRadar Lite 终端配置向导", flush=True)
     print("邮件为必填（标 *），SMTP 可留空自动识别；AI 可选。直接回车沿用已保存的值。", flush=True)
+    print(FALLBACK_LIST_HELP, flush=True)
+    print(FALLBACK_AUTH_HELP, flush=True)
     while True:
         submitted = dict(current)
         last_section = ""
@@ -307,7 +375,8 @@ def configure_docker_terminal(output: Path, deployment: str = "docker") -> None:
                 print(f"\n[{section}]", flush=True)
                 last_section = section
             submitted[key] = _prompt_field(key, label, required, hint, current)
-        errors = validate(submitted, deployment=deployment)
+        errors = validate(submitted, deployment=deployment,
+                          config_path=effective_config_path(submitted, Path(__file__).resolve().parents[1]))
         if not errors:
             document.save(submitted)
             print("\n配置已保存，安装将继续。", flush=True)
@@ -321,7 +390,7 @@ def configure_docker_terminal(output: Path, deployment: str = "docker") -> None:
 
 MENU_SECTIONS = {
     "1": ("邮件推送", [field[0] for field in FIELDS if field[0].startswith("EMAIL_")]),
-    "2": ("AI 模型与接口", ["AI_ANALYSIS_ENABLED", "AI_MODEL", "AI_API_KEY", "AI_API_KEY_FILE", "AI_API_BASE", "AI_FALLBACK_MODELS"]),
+    "2": ("AI 模型与接口", ["AI_ANALYSIS_ENABLED", "AI_MODEL", "AI_API_KEY", "AI_API_KEY_FILE", "AI_API_BASE", "AI_FALLBACK_MODELS", *FALLBACK_LIST_FIELDS]),
     "3": ("采集与推送时间", ["CRAWLER_MINUTE", *TIME_FIELDS, "WEEKLY_WEEKDAY", "WEEKLY_TIME", "TZ"]),
     "4": ("高级配置", ["AI_TIMEOUT", "PLATFORMS_API_URL", "PLATFORMS_API_FALLBACK_URLS"]),
     "6": ("R2/S3 晚间备份（可选）", ["R2_BACKUP_ENABLED", "R2_BACKUP_TIME", "R2_BACKUP_LOOKBACK_DAYS",
@@ -344,6 +413,8 @@ def display_value(key: str, value: str) -> str:
         return "已启用" if normalized in ("true", "1") else "已停用"
     if key == "WEEKLY_WEEKDAY" and value in tuple(str(day) for day in range(7)):
         return f"周{'一二三四五六日'[int(value)]}（{value}）"
+    if key == "AI_FALLBACK_API_BASE" and url_field_never_renders(key, value):
+        return "<已设置，含敏感或无效 URL，隐藏>"
     if "URL" in key or key == "AI_API_BASE":
         # URLs may embed bearer credentials in their authority or query.
         try:
@@ -357,7 +428,7 @@ def display_value(key: str, value: str) -> str:
     return value or "<未设置>"
 
 
-CREDENTIAL_URL_FIELDS = ("AI_API_BASE", "PLATFORMS_API_URL", "PLATFORMS_API_FALLBACK_URLS", "S3_ENDPOINT_URL")
+CREDENTIAL_URL_FIELDS = ("AI_API_BASE", "AI_FALLBACK_API_BASE", "PLATFORMS_API_URL", "PLATFORMS_API_FALLBACK_URLS", "S3_ENDPOINT_URL")
 CLEAR_SENTINEL = ":clear"
 
 
@@ -378,6 +449,13 @@ def carries_credentials(value: str) -> bool:
 
 def url_field_never_renders(key: str, value: str) -> bool:
     """Public URL inputs may carry bearer credentials; never echo those back."""
+    if key == "AI_FALLBACK_API_BASE":
+        # A userinfo '@' looks like a separator. Hide the whole column if even
+        # one resulting slot is malformed, rather than exposing its fragments.
+        if validate_field(key, value):
+            return True
+        return any(carries_credentials(part) or bool(urllib.parse.urlsplit(part.strip()).fragment)
+                   for part in value.split("@") if part.strip())
     return key in CREDENTIAL_URL_FIELDS and carries_credentials(value)
 
 
@@ -391,17 +469,21 @@ def changes_between(before: dict[str, str], after: dict[str, str]) -> dict[str, 
             if before.get(key, "") != after.get(key, "")}
 
 
-def print_changes(before: dict[str, str], after: dict[str, str]) -> None:
-    diff = changes_between(before, after)
-    print("\n[待保存变更]", flush=True)
-    if not diff:
-        print("没有待保存变更。", flush=True)
-    for key in sorted(diff):
+def change_lines(before: dict[str, str], after: dict[str, str]) -> list[str]:
+    lines = []
+    for key, value in sorted(changes_between(before, after).items()):
         if key in SECRET_FIELDS:
-            operation = "将清空" if not diff[key] else "将替换" if before.get(key) else "将新增"
-            print(f"  {key}: {operation}（内容隐藏）", flush=True)
+            operation = "将清空" if not value else "将替换" if before.get(key) else "将新增"
+            shown = f"{operation}（内容隐藏）"
         else:
-            print(f"  {key}: {display_value(key, before.get(key, ''))} → {display_value(key, diff[key])}", flush=True)
+            shown = f"{display_value(key, before.get(key, ''))} → {display_value(key, value)}"
+        lines.append(f"{key}: {shown}")
+    return lines
+
+
+def print_changes(before: dict[str, str], after: dict[str, str]) -> None:
+    print("\n[待保存变更]", flush=True)
+    print("\n".join(f"  {line}" for line in change_lines(before, after)) or "没有待保存变更。", flush=True)
 
 
 def _native_value(key: str, values: dict[str, str]) -> str:
@@ -480,6 +562,9 @@ def configure_terminal(output: Path, deployment: str = "linux", *, application=N
                     print(line, flush=True)
             while True:
                 print(f"\n[{title}]", flush=True)
+                if choice == "2":
+                    print(FALLBACK_LIST_HELP, flush=True)
+                    print(FALLBACK_AUTH_HELP, flush=True)
                 if choice == "3":
                     print("n 将检测到的时间补全为明确配置（保存时需确认规范化）；0 返回", flush=True)
                 for index, key in enumerate(keys, 1):
@@ -527,7 +612,9 @@ def configure_terminal(output: Path, deployment: str = "linux", *, application=N
             # NativeSchedule.prepare validates resolved YAML/env times before
             # any writes; stock defaults here would misclassify custom YAML.
             # An unrelated mail/AI save must not normalize a legacy schedule.
-            errors = validate(check_values, check_delivery_windows=False)
+            root = getattr(app, "app_dir", Path(__file__).resolve().parents[1])
+            errors = validate(check_values, check_delivery_windows=False,
+                              config_path=effective_config_path(check_values, root))
             if errors:
                 print("\n".join(errors), flush=True)
                 continue
@@ -626,12 +713,13 @@ def serve(
     ssh_port: int,
     deployment: str,
     application=None,
-) -> None:
+) -> bool:
     document = application.document if application else EnvDocument(output, deployment)
     current = dict(document.values)
     if application and document.original is None:
         current.update(read_env(application.app_dir / ".env.example"))
     done = threading.Event()
+    saved = False
     guard = RequestGuard(host)
 
     class Handler(BaseHTTPRequestHandler):
@@ -661,6 +749,7 @@ def serve(
             self.send_page(self.page(current))
 
         def do_POST(self) -> None:
+            nonlocal current, saved
             if not guard.trusted(self.headers):
                 self.send_page(REJECTED_PAGE, 403)
                 return
@@ -672,11 +761,25 @@ def serve(
             if not guard.token_matches(form):
                 self.send_page(REJECTED_PAGE, 403)
                 return
+            action = form.get("_action", ["save"])[0]
+            if action == "cancel":
+                self.send_page("已取消，未保存修改；安装不会继续启动服务。")
+                done.set()
+                return
             submitted = dict(current)
             submitted.update({
-                key: form.get(key, [""])[0] if key in SECRET_FIELDS else form.get(key, [""])[0].strip()
-                for key, *_rest in _fields_for(deployment)
+                key: form[key][0] if key in SECRET_FIELDS else form[key][0].strip()
+                for key, *_rest in _fields_for(deployment) if key in form
             })
+            # New optional fallback fields use explicit clearing, never a blank
+            # input (including the native path, which the menu does not read).
+            for key in FALLBACK_FORM_FIELDS:
+                if key not in submitted or key not in form or (deployment == "docker" and key in NATIVE_ONLY_FIELDS):
+                    continue
+                if submitted[key] == CLEAR_SENTINEL:
+                    submitted[key] = ""
+                elif not submitted[key]:
+                    submitted[key] = current.get(key, "")
             for key in (*CREDENTIAL_URL_FIELDS, *BOOLEAN_KEYS):
                 if key not in form and key not in BOOLEAN_KEYS:
                     continue
@@ -688,7 +791,9 @@ def serve(
                     # Redacted input submitted unchanged: keep the server-side draft.
                     submitted[key] = current[key]
             for key in SECRET_FIELDS:
-                if key in submitted and not submitted[key] and current.get(key):
+                if form.get(key) == [CLEAR_SENTINEL]:
+                    submitted[key] = ""
+                elif key in submitted and not submitted[key] and current.get(key):
                     submitted[key] = current[key]
             normalize = form.get("_normalize_schedule") == ["yes"]
             check_values = dict(submitted)
@@ -707,15 +812,19 @@ def serve(
                     check_values.pop("TIMEZONE", None)
             # Installed native schedules use YAML/env resolution in prepare,
             # not the stock defaults used by fresh setup and Docker.
-            # Keep redacted switch drafts after rejection: an unchanged blank
-            # retry must not turn an invalid value into a YAML fallback.
-            for key in BOOLEAN_KEYS:
-                if key in submitted:
-                    current[key] = submitted[key]
+            # Retain redacted drafts across errors/GET/blank retries. Nothing
+            # reaches disk until an explicit, valid save.
+            current = submitted
+            root = getattr(application, "app_dir", Path(__file__).resolve().parents[1])
             errors = validate(check_values, deployment=deployment,
-                              check_delivery_windows=application is None)
+                              check_delivery_windows=application is None,
+                              config_path=effective_config_path(check_values, root))
             if errors:
                 self.send_page(self.page(submitted, errors), 400)
+                return
+            if action == "preview":
+                notice = '<pre>[待保存变更]\n' + html.escape("\n".join(change_lines(document.values, current)) or "没有待保存变更。") + '</pre>'
+                self.send_page(self.page(current).replace('<form method="post">', notice + '<form method="post">'))
                 return
             try:
                 if application:
@@ -726,6 +835,7 @@ def serve(
                 message = str(error) if isinstance(error, ConfigError) else "保存或应用失败，请检查文件权限及私有备份"
                 self.send_page(self.page(submitted, [message]), 409)
                 return
+            saved = True
             self.send_page(self.page(submitted, saved=True))
             done.set()
 
@@ -737,9 +847,12 @@ def serve(
     print("远程 VPS 请在本机终端直接复制执行：", flush=True)
     print(command, flush=True)
     print("保持该终端运行，再用本机浏览器打开配置页面。", flush=True)
-    while not done.is_set():
-        server.handle_request()
-    server.server_close()
+    try:
+        while not done.is_set():
+            server.handle_request()
+    finally:
+        server.server_close()
+    return saved
 
 
 def main() -> int:
@@ -813,7 +926,7 @@ def main() -> int:
         if args.deployment == "linux":
             from native_config import NativeApplication
             application = NativeApplication(args.output, unit_dir=args.unit_dir, install=args.install)
-        serve(
+        saved = serve(
             args.output,
             args.host,
             args.port,
@@ -827,7 +940,7 @@ def main() -> int:
     except (EOFError, KeyboardInterrupt, ConfigError, OSError) as error:
         print(str(error) if isinstance(error, ConfigError) else "网页配置已中止，未完成保存", file=sys.stderr)
         return 2
-    return 0
+    return 0 if saved else 2
 
 
 if __name__ == "__main__":

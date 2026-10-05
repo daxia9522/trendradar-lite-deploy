@@ -85,10 +85,17 @@ jobs:
 
       - name: Generate weekly report and send email
         env:
+          # 与日报共用同名 Secrets；按备用槽位绑定模型、地址和 Key
           AI_API_KEY: ${{ secrets.AI_API_KEY }}
           AI_API_BASE: ${{ secrets.AI_API_BASE }}
           AI_MODEL: ${{ secrets.AI_MODEL }}
+          # 模型用英文逗号分隔；未设/空值沿用 config.yaml ai.fallback_models
           AI_FALLBACK_MODELS: ${{ secrets.AI_FALLBACK_MODELS }}
+          # URL/Key 用 @ 分隔并保留空位；直接 env 注入，不经过 shell 拼接
+          AI_FALLBACK_API_BASE: ${{ secrets.AI_FALLBACK_API_BASE }}
+          AI_FALLBACK_API_KEY: ${{ secrets.AI_FALLBACK_API_KEY }}
+          # 未设置/空值沿用 config.yaml；当前默认 120 秒
+          AI_TIMEOUT: ${{ secrets.AI_TIMEOUT }}
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}

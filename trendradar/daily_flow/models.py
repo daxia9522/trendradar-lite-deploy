@@ -32,6 +32,24 @@ class RSSResult(NamedTuple):
 
 
 @dataclass(frozen=True)
+class RSSCollection:
+    """Collection status only; preparation reads the frozen source capture."""
+
+    available: bool = False
+    failed_ids: tuple = ()
+
+
+@dataclass(frozen=True)
+class PublicationPlan:
+    """Collection, generation and frozen-snapshot retries are independent gates."""
+
+    collect_allowed: bool
+    generate_new_report: bool
+    retry_existing_reports: tuple = ()
+    report_id: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class PreparedReportInput:
     mode: str
     hotlist: ModeInput
@@ -40,6 +58,7 @@ class PreparedReportInput:
     failed_ids: Optional[List] = None
     standalone: Optional[Dict] = None
     quiet: bool = False
+    capture: Optional[object] = None
 
 
 class ReportArtifacts(NamedTuple):

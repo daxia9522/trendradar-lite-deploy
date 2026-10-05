@@ -62,6 +62,8 @@ class LinuxLifecycleTests(unittest.TestCase):
         self.home.mkdir()
         self.app = self.root / "checkout with spaces"
         shutil.copytree(ROOT / "deploy", self.app / "deploy", ignore=shutil.ignore_patterns("__pycache__"))
+        (self.app / "trendradar").mkdir()
+        shutil.copy2(ROOT / "trendradar" / "ai_config.py", self.app / "trendradar" / "ai_config.py")
         shutil.copytree(ROOT / "config", self.app / "config")
         shutil.copy(ROOT / ".env.example", self.app / ".env.example")
         shutil.copy(ROOT / "requirements.txt", self.app / "requirements.txt")

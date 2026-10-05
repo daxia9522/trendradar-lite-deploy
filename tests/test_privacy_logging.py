@@ -14,15 +14,17 @@ from trendradar.storage import remote as remote_storage
 
 class PrivacyLoggingTests(unittest.TestCase):
     def test_email_rejects_empty_or_invalid_recipients(self):
-        self.assertFalse(send_to_email("sender@example.invalid", "password", "", "daily", "missing.html"))
-        self.assertFalse(send_to_email("sender@example.invalid", "password", "bad-address", "daily", "missing.html"))
+        self.assertFalse(send_to_email("sender@example.invalid", "password", "", "daily", "missing.html").sent)
+        self.assertFalse(send_to_email("sender@example.invalid", "password", "bad-address", "daily", "missing.html").sent)
 
     def test_email_passes_explicit_envelope_recipients(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             report = Path(temp_dir) / "report.html"
             report.write_text("<html>report</html>", encoding="utf-8")
             smtp = Mock()
-            smtp.send_message.return_value = {}
+            smtp.mail.return_value = (250, b"ok")
+            smtp.rcpt.return_value = (250, b"ok")
+            smtp.data.return_value = (250, b"queued")
 
             with patch("trendradar.notification.senders.smtplib.SMTP_SSL", return_value=smtp):
                 sent = send_to_email(
@@ -35,9 +37,9 @@ class PrivacyLoggingTests(unittest.TestCase):
                     custom_smtp_port=465,
                 )
 
-        self.assertTrue(sent)
+        self.assertTrue(sent.sent)
         self.assertEqual(
-            smtp.send_message.call_args.kwargs["to_addrs"],
+            [call.args[0] for call in smtp.rcpt.call_args_list],
             ["one@example.invalid", "two@example.invalid"],
         )
 
@@ -52,7 +54,9 @@ class PrivacyLoggingTests(unittest.TestCase):
             report = Path(temp_dir) / "report.html"
             report.write_text("<html>report</html>", encoding="utf-8")
             smtp = Mock()
-            smtp.send_message.return_value = {}
+            smtp.mail.return_value = (250, b"ok")
+            smtp.rcpt.return_value = (250, b"ok")
+            smtp.data.return_value = (250, b"queued")
             output = io.StringIO()
 
             with patch("trendradar.notification.senders.smtplib.SMTP_SSL", return_value=smtp):
@@ -67,8 +71,8 @@ class PrivacyLoggingTests(unittest.TestCase):
                         custom_smtp_port=465,
                     )
 
-        self.assertTrue(sent)
-        self.assertIn("邮件发送成功 [daily]", output.getvalue())
+        self.assertTrue(sent.sent)
+        self.assertIn("邮件发送成功", output.getvalue())
         for private_value in (
             "sender@example.invalid",
             "recipient@example.invalid",
@@ -89,20 +93,18 @@ class PrivacyLoggingTests(unittest.TestCase):
             output = io.StringIO()
 
             with patch("trendradar.notification.senders.smtplib.SMTP_SSL", return_value=smtp):
-                # 认证错误不重试；替换等待以确保测试不会实际退避。
-                with patch("trendradar.notification.senders.time.sleep"):
-                    with redirect_stdout(output):
-                        sent = send_to_email(
-                            "sender@example.invalid",
-                            "test-password",
-                            "recipient@example.invalid",
-                            "daily",
-                            str(report),
-                            custom_smtp_server="smtp.example.invalid",
-                            custom_smtp_port=465,
-                        )
+                with redirect_stdout(output):
+                    sent = send_to_email(
+                        "sender@example.invalid",
+                        "test-password",
+                        "recipient@example.invalid",
+                        "daily",
+                        str(report),
+                        custom_smtp_server="smtp.example.invalid",
+                        custom_smtp_port=465,
+                    )
 
-        self.assertFalse(sent)
+        self.assertFalse(sent.sent)
         self.assertIn("认证错误", output.getvalue())
         self.assertNotIn("sender@example.invalid", output.getvalue())
 

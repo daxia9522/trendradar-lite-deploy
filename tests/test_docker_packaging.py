@@ -52,15 +52,15 @@ class DockerPackagingTests(unittest.TestCase):
         self.assertNotIn("build", initializer)
         self.assertNotIn("ports", initializer)
 
-    def test_all_services_share_fixed_version_and_multiarch_index(self):
-        # Registry evidence (2026-09-29) identified this as the index, not either
-        # platform child manifest. This offline contract does not requery GHCR.
-        expected = "${TREND_RADAR_IMAGE:-ghcr.io/daxia9522/trendradar-lite-deploy:v26.10@sha256:b8ef73d28828c5d6e4cad8970b4ac2fc1c881617114430525903422307ec8e83}"
+    def test_all_services_default_to_latest_with_explicit_override(self):
+        expected = "${TREND_RADAR_IMAGE:-ghcr.io/daxia9522/trendradar-lite-deploy:latest}"
         for name, service in self.compose["services"].items():
             with self.subTest(service=name):
                 self.assertEqual(service["image"], expected)
-                self.assertNotIn(":latest", service["image"])
-        self.assertIn("#TREND_RADAR_IMAGE=trendradar-lite-deploy:local", (ROOT / ".env.example").read_text())
+                self.assertNotIn("@sha256:", service["image"])
+        example = (ROOT / ".env.example").read_text()
+        self.assertIn("#TREND_RADAR_IMAGE=ghcr.io/daxia9522/trendradar-lite-deploy:latest", example)
+        self.assertIn("#TREND_RADAR_IMAGE=trendradar-lite-deploy:local", example)
 
     def test_capabilities_match_privileged_setup_filesystem_operations(self):
         for name, service in self.compose["services"].items():
@@ -170,6 +170,19 @@ class DockerPackagingTests(unittest.TestCase):
             self.assertEqual(local.returncode, 0, local.stderr)
             self.assertTrue(all(service["image"] == "trendradar-lite-deploy:local"
                                 for service in json.loads(local.stdout)["services"].values()))
+            # A shell override wins over the saved local selection. Even with a
+            # latest default, explicit version/digest choices remain supported.
+            for image in ("example/app:v1", "example/app@sha256:" + "a" * 64,
+                          "ghcr.io/daxia9522/trendradar-lite-deploy:latest"):
+                with self.subTest(image=image):
+                    override = subprocess.run(
+                        ["docker", "compose", "--profile", "setup", "config", "--format", "json"],
+                        cwd=root, env=dict(env, TREND_RADAR_IMAGE=image),
+                        capture_output=True, text=True, timeout=20,
+                    )
+                    self.assertEqual(override.returncode, 0, override.stderr)
+                    self.assertTrue(all(service["image"] == image for service
+                                        in json.loads(override.stdout)["services"].values()))
 
 
 if __name__ == "__main__":
