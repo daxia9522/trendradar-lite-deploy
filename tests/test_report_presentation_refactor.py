@@ -545,7 +545,7 @@ class ReportPresentationTests(unittest.TestCase):
             for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
                 if isinstance(node, ast.ImportFrom):
                     self.assertNotIn(node.module, {"trendradar.ai.analyzer", "trendradar.ai.client", "trendradar.ai.formatter",
-                                                   "trendradar.report.html", "weekly_report.presentation", "weekly_report.runtime"}, name)
+                                                   "trendradar.report.html", "weekly_report.presentation", "weekly_report.weekly_ai_report_email", "weekly_report.analysis"}, name)
 
 
 IMPORT_AUDIT = textwrap.dedent('''
@@ -555,7 +555,7 @@ IMPORT_AUDIT = textwrap.dedent('''
     config_open_attempts = []
     socket_attempts = []
     runtime_import_attempts = []
-    forbidden_modules = ("trendradar.ai", "litellm", "weekly_report.runtime")
+    forbidden_modules = ("trendradar.ai", "litellm", "weekly_report.weekly_ai_report_email", "weekly_report.analysis")
 
     def is_forbidden_module(name):
         return any(name == prefix or name.startswith(prefix + ".") for prefix in forbidden_modules)
@@ -703,7 +703,7 @@ class ReportResourceTests(unittest.TestCase):
 
     def test_import_audit_rejects_runtime_modules_even_when_caught(self):
         with tempfile.TemporaryDirectory() as tmp:
-            for name in ("trendradar.ai", "litellm", "weekly_report.runtime"):
+            for name in ("trendradar.ai", "litellm", "weekly_report.weekly_ai_report_email", "weekly_report.analysis"):
                 for operation in (f"__import__({name!r})", f"importlib.import_module({name!r})"):
                     with self.subTest(name=name, operation=operation):
                         self.assert_audit_rejects(tmp, operation,

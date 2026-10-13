@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from trendradar.report.weekly import render_weekly_html
-from weekly_report import collection, keywords, prompting
+from weekly_report import analysis, collection
 
 
 class SyntheticHistory:
@@ -28,10 +28,10 @@ class WeeklyBehaviorTests(unittest.TestCase):
             self.assertEqual(item["count"], 8)
             self.assertEqual(item["dates"], ["2026-09-29", "2026-09-30"])
             self.assertEqual(len(item["platforms"]), 2)
-        evidence = prompting.build_evidence_index(items)
+        evidence = analysis.build_evidence_index(items)
         self.assertEqual(set(evidence), {"N1", "R1"})
         self.assertEqual(evidence["N1"]["source_type"], "news")
-        messages = prompting.build_prompt("2026-09-29", "2026-09-30", items, platforms, stats)
+        messages = analysis.build_prompt("2026-09-29", "2026-09-30", items, platforms, stats)
         text = messages[-1]["content"]
         for expected in ("N1.", "R1.", "日本发生地震", "火箭发射成功", '"raw_news": 4', '"selected_rss": 1'):
             self.assertIn(expected, text)
@@ -42,17 +42,17 @@ class WeeklyBehaviorTests(unittest.TestCase):
                   {"title": "虚构主题", "keyword": "火箭发射", "evidence_ids": ["N99", "N100"]}]
         body = "# 日本地震\n\n救援继续。"
         raw = f"<THEMES_JSON>{json.dumps(themes, ensure_ascii=False)}</THEMES_JSON><REPORT_MARKDOWN>{body}</REPORT_MARKDOWN>"
-        report, parsed = keywords.parse_structured_report(raw, evidence)
+        report, parsed = analysis.parse_structured_report(raw, evidence)
         self.assertEqual(report, body)
         self.assertEqual(parsed, [{"title": "震后救援", "keyword": "日本地震", "evidence_ids": ["N1", "N2"]}])
-        self.assertEqual(keywords.keywords_from_themes(parsed), ["日本地震"])
+        self.assertEqual(analysis.keywords_from_themes(parsed), ["日本地震"])
 
     def test_keyword_model_failure_uses_local_rules(self):
         client = Mock(model="synthetic/model", api_key="synthetic", api_base="", timeout=1, fallback_models=[])
         failed = Mock()
         failed.chat.side_effect = RuntimeError("synthetic unavailable")
-        with patch.object(keywords, "build_keyword_client", return_value=failed):
-            result, source = keywords.extract_headline_keywords(client, "2026-09-29", "2026-09-30",
+        with patch.object(analysis, "build_keyword_client", return_value=failed):
+            result, source = analysis.extract_headline_keywords(client, "2026-09-29", "2026-09-30",
                 [{"title": "日本发生地震救援继续", "source_type": "news"},
                  {"title": "日本地震启动救援行动", "source_type": "news"}], "日本地震救援继续")
         self.assertEqual(source, "rule_only")

@@ -27,7 +27,7 @@ DENIED_TARGETS = (
 
 
 def _offline_exists(path):
-    # collection and runtime normally read config.yaml at import time.
+    # collection reads config.yaml at import time; the CLI resolves its clock lazily.
     return False if path.absolute() == CONFIG_PATH else _original_exists(path)
 
 
@@ -37,7 +37,7 @@ with ExitStack() as imports:
     for target in DENIED_TARGETS:
         imports.enter_context(patch(target, side_effect=AssertionError("offline import attempted I/O")))
     from trendradar.ai.client import AIClient
-    from weekly_report import keywords
+    from weekly_report import analysis
     from weekly_report import weekly_ai_report_email as weekly
 
 
@@ -120,10 +120,10 @@ class WeeklyAILoggingTests(unittest.TestCase):
         )
         self._patch("weekly_report.weekly_ai_report_email.report_now", return_value=datetime(2026, 10, 3, 20))
         self.messages = [{"role": "user", "content": "synthetic weekly prompt"}]
-        self._patch("weekly_report.weekly_ai_report_email.build_prompt", return_value=self.messages)
+        self._patch("weekly_report.analysis.build_prompt", return_value=self.messages)
         # Most main() tests avoid a second AI branch; selected tests enable it below.
         self.themes = self._patch(
-            "weekly_report.weekly_ai_report_email.keywords_from_themes", return_value=LABELS.copy(),
+            "weekly_report.analysis.keywords_from_themes", return_value=LABELS.copy(),
         )
 
     def tearDown(self):
@@ -139,7 +139,7 @@ class WeeklyAILoggingTests(unittest.TestCase):
             return weekly.main()
 
     def _keywords(self):
-        return keywords.extract_headline_keywords(
+        return analysis.extract_headline_keywords(
             AIClient(self.config), "2026-09-27", "2026-10-03", NEWS, REPORT,
         )
 

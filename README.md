@@ -543,6 +543,34 @@ docker compose exec trendradar python -m trendradar.publication_cli --backend lo
 
 来源历史确实无法补齐时，可在停止相关采集/生成进程、核实缺口并取得最新 `status` 版本后使用 `readopt-source news|rss --version VERSION --evidence 非敏感工单引用 --confirm --stopped`（同样通过 `python -m trendradar.publication_cli` 调用）。这会明确重新采用最近 24 小时，保留全部已发布身份、原边界审计和报告发布序号；**它是承认缺口，不是补回历史**。日常无需运行此命令。
 
+## 本地开发与周报结构
+
+只需要在本地修改源码、检查入口时，可以创建项目自己的 Python 虚拟环境；不必运行安装器，也不需要 Docker：
+
+```bash
+git clone https://github.com/daxia9522/trendradar-lite-deploy.git
+cd trendradar-lite-deploy
+python3 -m venv .venv
+.venv/bin/python -m pip install --require-hashes -r requirements.lock
+.venv/bin/python weekly_report/weekly_ai_report_email.py --help
+```
+
+这只是**源码的原生运行环境**，不会注册或启用 systemd 服务、定时采集或发送邮件。`.venv/` 和 `output/` 是本地状态，不进入 Git；提交前用 `git diff` 检查源码变化。
+
+周报专用 Python 代码收敛为三个文件，调用路径保持不变：
+
+| 文件 | 职责 |
+|---|---|
+| `weekly_report/weekly_ai_report_email.py` | 参数、日期和环境配置；串联阶段；HTML/JSON 归档；调用共享渲染与邮件发送，处理退出码 |
+| `weekly_report/collection.py` | 从已有历史数据库读取新闻；去重、聚簇、评分与热榜/RSS 配额 |
+| `weekly_report/analysis.py` | 提示词组装、正文分析与解析、关键词生成及校验；`generate_report()` 与 `generate_keywords()` 是两个独立阶段 |
+
+两份提示词仍在 `config/weekly_ai_prompt.txt` 和 `config/weekly_keyword_prompt.txt`；模型鉴权、HTML 组件和 SMTP 继续使用 `trendradar` 的共享实现。运行时的报告时区在首次使用时解析并缓存，不在导入入口时加载完整运行配置。
+
+本次只是结构收敛：保留主模型主题关键词优先、独立关键词模型补缺及规则兜底等既有行为。以后修改关键词规则应与结构整理分别验收。
+
+实际生成周报前，需要准备所选日期的历史数据库，并通过可信方式提供 AI/邮件环境配置；clone 不会自动复制其他服务器的数据或凭据。**周报 `--dry-run` 仍会真实调用 AI，只禁止发邮件**，不是离线验证。直接运行完整周报会按配置发送邮件，命令见下节。
+
 ## 手动运行
 
 按所在环境选择对应命令。⚠️ `--force-run` 会绕过推送窗口与 once 去重，**真实调用 AI 并立即发送邮件**；不会绕过未解决投递的安全检查。验证链路请优先在非推送窗口执行普通命令。

@@ -1,21 +1,281 @@
-"""Headline extraction, structured AI response parsing, and fallbacks."""
+"""Weekly analysis and keywords, without runtime, persistence or mail side effects.
+
+Public stages: generate_report() then generate_keywords(). Prompt construction,
+response parsing and each stage's retry policy stay local to this module.
+"""
 from __future__ import annotations
 
 import json
 import re
 from collections import Counter
-from typing import Any, Dict, List, Sequence, Tuple
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from trendradar.ai.client import AIClient, build_keyword_client
-from .prompting import build_keyword_prompt
-from .collection import (
-    STOPWORDS, NOISE_WORDS, RULE_DATA_TEMPLATE_TITLE_RE, KEYWORD_TOPN,
-    KEYWORD_TITLE_LIMIT,
-    HEADLINE_BANNED, HEADLINE_LEN_EXCEPTIONS, HEADLINE_MIN_LEN, HEADLINE_MAX_LEN,
-    is_column_title,
-    _is_hotlist_item, _title_similarity,
+from .collection import is_column_title
+
+# Keyword policy is not part of news collection/scoring.
+KEYWORD_TOPN = 5
+KEYWORD_TITLE_LIMIT = 100
+HEADLINE_MIN_LEN = 2
+HEADLINE_MAX_LEN = 4
+
+STOPWORDS = {
+    "今日", "本周", "最新", "热点", "表示", "消息", "中国", "美国", "公司", "市场", "已经", "进行", "相关", "发布", "报道", "工作", "记者",
+    "快讯", "图示", "数据", "显示", "回应", "通报", "指出", "视频", "全文", "直播", "热搜", "话题", "头条", "网友", "全球", "国内", "国际",
+    "同比", "环比", "财经", "财联社", "金十", "金十数据", "卫报", "BBC", "雅虎", "新华社", "中新网", "局势", "政策", "基建",
+}
+
+NOISE_WORDS = {
+    "亿元", "美元", "万亿", "万亿元", "万元", "百亿", "千亿", "图示", "快讯", "消息", "市场消息", "金十图示", "最新动态", "边打边",
+}
+
+# 邮件头禁止/空泛词（方案 B）
+HEADLINE_BANNED = {
+    "亿元", "美元", "市场消息", "金十图示", "图示", "快讯", "热点", "新闻", "边打边", "最新动态",
+    "中东局势", "AI基建", "特朗普政策", "全球市场", "避险情绪", "中国消费", "智能终端",
+    "局势", "政策", "市场", "基建", "消息", "动态", "分析", "观察", "综述",
+    # 真实周报规则兜底中出现过的空泛词与滑窗碎片
+    "规模", "科技", "早盘", "盘收", "如何", "为何", "怎么", "哪些", "上涨", "发行", "最高", "年期",
+    "利率", "倍数", "登陆", "风白海", "宇树科", "发行利率", "边际倍数",
+    "早盘收", "风白", "倍数预",
+}
+
+# 债券发行行情是高频结构化数据，不适合从字符滑窗中提取周报主题。
+# 整条标题跳过，避免完整词被过滤后又留下“行利/际倍”一类内部碎片。
+RULE_DATA_TEMPLATE_TITLE_RE = re.compile(
+    r"(发行利率|边际利率|投标倍数|边际倍数|倍数预期)"
 )
 
+# 允许略长的缩写/专名
+HEADLINE_LEN_EXCEPTIONS = {
+    "CPI", "GDP", "GPU", "Nvidia", "OpenAI", "ChatGPT", "WTI", "OPEC", "VIX",
+}
+
+
+
+def _is_hotlist_item(item: Dict[str, Any]) -> bool:
+    """邮件头/实体热词只吃热榜（news/mixed），不含纯 RSS。"""
+    return (item.get("source_type") or "news") in ("news", "mixed")
+
+
+# ---- Prompt templates and evidence formatting ----
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+WEEKLY_AI_PROMPT_FILE = PROJECT_ROOT / "config" / "weekly_ai_prompt.txt"
+WEEKLY_KEYWORD_PROMPT_FILE = PROJECT_ROOT / "config" / "weekly_keyword_prompt.txt"
+
+
+def _load_prompt_template(prompt_path: Path) -> Tuple[str, str]:
+    """加载提示词；仅识别单独成行的 [system] / [user]，缺文件或 user 空则硬失败。"""
+    if not prompt_path.exists():
+        raise FileNotFoundError(f"周报提示词不存在: {prompt_path}")
+    lines = prompt_path.read_text(encoding="utf-8").splitlines()
+    sections: Dict[str, List[str]] = {"system": [], "user": []}
+    current: Optional[str] = None
+    for raw in lines:
+        token = raw.strip()
+        if token == "[system]":
+            current = "system"
+            continue
+        if token == "[user]":
+            current = "user"
+            continue
+        if current:
+            sections[current].append(raw)
+    system_prompt = "\n".join(sections["system"]).strip()
+    user_prompt = "\n".join(sections["user"]).strip()
+    if not user_prompt:
+        raise ValueError(f"周报提示词 user 段为空: {prompt_path}")
+    return system_prompt, user_prompt
+
+
+def _fill_prompt_template(template: str, mapping: Dict[str, str]) -> str:
+    """按占位符替换；未知花括号保持原样。"""
+    out = template
+    for key, value in mapping.items():
+        out = out.replace("{" + key + "}", value)
+    return out
+
+
+def _format_cluster_line(idx: int, item: Dict[str, Any], prefix: str = "") -> str:
+    dates = item.get("dates") or []
+    if len(dates) >= 2:
+        date_part = f"{dates[0][5:]}~{dates[-1][5:]}" if len(dates[0]) >= 10 else f"{dates[0]}~{dates[-1]}"
+    elif dates:
+        date_part = dates[0][5:] if len(dates[0]) >= 10 else dates[0]
+    else:
+        date_part = "-"
+
+    platforms = item.get("platforms") or []
+    if len(platforms) > 3:
+        plat_part = "/".join(platforms[:3]) + f"等{len(platforms)}台"
+    else:
+        plat_part = "/".join(platforms) if platforms else "-"
+
+    best = item.get("best_rank")
+    hi = item.get("rank_hi")
+    if best is not None and hi is not None and best != hi:
+        rank_part = f" | 排名:{best}-{hi}"
+    elif best is not None:
+        rank_part = f" | 排名:{best}"
+    else:
+        rank_part = ""
+
+    span = item.get("date_span") or 1
+    span_part = f" | 跨天:{span}" if span > 1 else ""
+    return (
+        f"{prefix}{idx}. [{date_part}] [{plat_part}] {item.get('title', '')} "
+        f"| 分:{float(item.get('score') or 0):.1f} | 次:{item.get('count') or 1}{rank_part}{span_part}"
+    )
+
+
+def build_evidence_index(news_items: Sequence[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    evidence: Dict[str, Dict[str, Any]] = {}
+    n_i = r_i = 0
+    for item in news_items:
+        if item.get("source_type") == "rss":
+            r_i += 1
+            evidence[f"R{r_i}"] = item
+        else:
+            n_i += 1
+            evidence[f"N{n_i}"] = item
+    return evidence
+
+
+def build_prompt(
+    start_date: str,
+    end_date: str,
+    news_items: List[Dict[str, Any]],
+    platform_counter: Dict[str, int],
+    pipeline_stats: Optional[Dict[str, Any]] = None,
+    prompt_path: Optional[Path] = None,
+) -> List[Dict[str, str]]:
+    """填充 weekly_ai_prompt.txt。"""
+    top_platforms = list(platform_counter.items())[:12]
+    pipeline_stats = pipeline_stats or {}
+
+    news_lines: List[str] = []
+    rss_lines: List[str] = []
+    n_i = r_i = 0
+    for item in news_items:
+        if item.get("source_type") == "rss":
+            r_i += 1
+            rss_lines.append(_format_cluster_line(r_i, item, prefix="R"))
+        else:
+            n_i += 1
+            news_lines.append(_format_cluster_line(n_i, item, prefix="N"))
+
+    stats_block = {
+        "raw_news": pipeline_stats.get("raw_news"),
+        "raw_rss": pipeline_stats.get("raw_rss"),
+        "exact_total": pipeline_stats.get("exact_total"),
+        "cluster_total": pipeline_stats.get("cluster_total"),
+        "selected": pipeline_stats.get("selected", len(news_items)),
+        "selected_news": pipeline_stats.get("selected_news"),
+        "selected_rss": pipeline_stats.get("selected_rss"),
+        "rss_day_coverage": pipeline_stats.get("rss_day_coverage"),
+    }
+
+    system_content, user_template = _load_prompt_template(
+        prompt_path or WEEKLY_AI_PROMPT_FILE
+    )
+    user_content = _fill_prompt_template(
+        user_template,
+        {
+            "start_date": start_date,
+            "end_date": end_date,
+            "stats_json": json.dumps(stats_block, ensure_ascii=False),
+            "news_count": str(len(news_items)),
+            "platforms_json": json.dumps(top_platforms, ensure_ascii=False),
+            "news_content": "\n".join(news_lines) if news_lines else "（无）",
+            "rss_content": "\n".join(rss_lines) if rss_lines else "（无）",
+        },
+    )
+    messages: List[Dict[str, str]] = []
+    if system_content:
+        messages.append({"role": "system", "content": system_content})
+    messages.append({"role": "user", "content": user_content})
+    return messages
+
+
+def build_keyword_prompt(
+    start_date: str,
+    end_date: str,
+    report_text: str,
+    prompt_path: Optional[Path] = None,
+) -> List[Dict[str, str]]:
+    """填充 weekly_keyword_prompt.txt。"""
+    system_content, user_template = _load_prompt_template(
+        prompt_path or WEEKLY_KEYWORD_PROMPT_FILE
+    )
+    user_content = _fill_prompt_template(
+        user_template,
+        {
+            "start_date": start_date,
+            "end_date": end_date,
+            "report_text": report_text,
+        },
+    )
+    messages: List[Dict[str, str]] = []
+    if system_content:
+        messages.append({"role": "system", "content": system_content})
+    messages.append({"role": "user", "content": user_content})
+    return messages
+
+
+# ---- Report analysis: selected news -> parsed body/themes/model ----
+
+@dataclass(frozen=True)
+class ReportAnalysis:
+    report_text: str
+    themes: List[Dict[str, Any]]
+    model: str
+
+
+def generate_report(
+    client: AIClient,
+    start_s: str,
+    end_s: str,
+    all_news: List[Dict[str, Any]],
+    platform_counter: Dict[str, int],
+    pipeline_stats: Optional[Dict[str, Any]] = None,
+) -> Optional[ReportAnalysis]:
+    """Use an already validated client; None means both report attempts failed."""
+    # 主干①：周报正文（空结果/异常时再试 1 次；模型链 fallback 由 AIClient 处理）
+    messages = build_prompt(
+        start_s,
+        end_s,
+        all_news,
+        platform_counter,
+        pipeline_stats,
+    )
+    raw_report = ""
+    last_report_err = ""
+    used_model = ""
+    for attempt in range(2):
+        try:
+            raw_report = (client.chat(messages) or "").strip()
+            if raw_report:
+                used_model = (getattr(client, "last_model", None) or "").strip()
+                break
+            last_report_err = "empty_response"
+            print(f"[周报正文] 空响应 attempt={attempt + 1}")
+        except Exception as exc:
+            # AIClient re-raises the provider error; never format its body here.
+            last_report_err = type(exc).__name__
+            print(f"[周报正文] 调用失败 attempt={attempt + 1}: {last_report_err}")
+    if not raw_report:
+        print(f"周报正文生成失败: {last_report_err or 'unknown'}")
+        return None
+
+    evidence_index = build_evidence_index(all_news)
+    report_text, themes = parse_structured_report(raw_report, evidence_index)
+    return ReportAnalysis(report_text, themes, used_model)
+
+
+# ---- Keyword extraction and validation (existing behavior retained) ----
 
 def _headline_len_ok(label: str) -> bool:
     if label in HEADLINE_LEN_EXCEPTIONS:
@@ -210,6 +470,8 @@ def build_rule_entity_headlines(news_items: List[Dict[str, Any]], topn: int = 5)
         if len(selected) >= topn:
             return selected
     return selected
+
+
 def _parse_keyword_list(raw: str) -> List[str]:
     text = (raw or "").strip()
     if not text:
@@ -387,3 +649,38 @@ def extract_headline_keywords(
 
     print(f"[关键词] 回退规则实体 Top{topn}（{last_error}）")
     return rule_fallback[:topn], "rule_only"
+
+
+def generate_keywords(
+    client: AIClient,
+    start_s: str,
+    end_s: str,
+    all_news: List[Dict[str, Any]],
+    report_text: str,
+    themes: Sequence[Dict[str, Any]],
+) -> Tuple[List[str], str]:
+    """Select existing theme labels first, then fill from the independent branch."""
+    headline_keywords = keywords_from_themes(themes)
+    if len(headline_keywords) >= KEYWORD_TOPN:
+        keyword_source = "structured_themes"
+    else:
+        # 保留已验证的主题关键词，独立 Prompt 仅补足缺额。
+        fallback_keywords, fallback_source = extract_headline_keywords(
+            client,
+            start_s,
+            end_s,
+            all_news,
+            report_text,
+        )
+        for keyword in fallback_keywords:
+            if keyword not in headline_keywords:
+                headline_keywords.append(keyword)
+            if len(headline_keywords) >= KEYWORD_TOPN:
+                break
+        keyword_source = (
+            f"structured_themes+{fallback_source}"
+            if themes
+            else fallback_source
+        )
+
+    return headline_keywords, keyword_source

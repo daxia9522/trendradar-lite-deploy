@@ -9,15 +9,17 @@ import unittest
 from pathlib import Path
 
 from trendradar.report.weekly import render_weekly_html
-from weekly_report import keywords, prompting
+from weekly_report import analysis
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class WeeklyRefactorTests(unittest.TestCase):
     def test_split_modules_have_resolvable_types_and_unique_definitions(self):
-        for name in ("weekly_report.collection", "weekly_report.prompting", "weekly_report.keywords",
-                     "trendradar.report.weekly", "weekly_report.runtime"):
+        self.assertEqual({path.name for path in (ROOT / "weekly_report").glob("*.py")},
+                         {"collection.py", "analysis.py", "weekly_ai_report_email.py"})
+        for name in ("weekly_report.collection", "weekly_report.analysis",
+                     "trendradar.report.weekly", "weekly_report.weekly_ai_report_email"):
             module = importlib.import_module(name)
             for function in vars(module).values():
                 if inspect.isfunction(function) and function.__module__ == module.__name__:
@@ -49,8 +51,8 @@ class WeeklyRefactorTests(unittest.TestCase):
                 "ranks": [1],
             }
         ]
-        evidence = prompting.build_evidence_index(items)
-        report, themes = keywords.parse_structured_report(
+        evidence = analysis.build_evidence_index(items)
+        report, themes = analysis.parse_structured_report(
             "<THEMES_JSON>[]</THEMES_JSON><REPORT_MARKDOWN># 正文</REPORT_MARKDOWN>",
             evidence,
         )

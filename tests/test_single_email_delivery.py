@@ -20,6 +20,7 @@ from trendradar import cli
 from trendradar.notification import EmailDeliveryResult, NotificationDispatcher, PreparedEmail
 from trendradar.notification import dispatcher as delivery
 from trendradar.notification import senders
+from weekly_report import analysis
 from weekly_report import weekly_ai_report_email as weekly
 
 NOW = datetime(2026, 9, 21, 7, 30)
@@ -196,7 +197,7 @@ class WeeklySingleEmailTests(unittest.TestCase):
         self.report_clock = Mock(return_value=NOW)
         self.send_clock = Mock(return_value=send_now)
         replacements = {
-            "OUTPUT_DIR": self.output_dir, "report_now": self.report_clock, "datetime": Mock(now=self.send_clock),
+            "OUTPUT_DIR": self.output_dir, "report_now": self.report_clock, "datetime": Mock(now=self.send_clock, strptime=datetime.strptime),
             "load_ai_config": Mock(return_value={"MODEL": "synthetic/model", "EMAIL_TO": "wrong@example.invalid"}),
             "AIClient": Mock(return_value=self.client), "collect_news": Mock(return_value=([{"title": "synthetic news"}], {}, {})),
             "build_prompt": Mock(return_value=[]), "build_evidence_index": Mock(return_value={}),
@@ -208,9 +209,15 @@ class WeeklySingleEmailTests(unittest.TestCase):
         }
         if not real_runtime_env:
             replacements["load_runtime_env"] = Mock(return_value=config)
+        analysis_replacements = {
+            key: replacements.pop(key)
+            for key in ("build_prompt", "build_evidence_index", "parse_structured_report",
+                        "keywords_from_themes", "extract_headline_keywords")
+        }
         argv = ["weekly", "--start", "2026-09-15", "--end", "2026-09-21", *flags]
         output = io.StringIO()
         with (
+            patch.multiple(analysis, **analysis_replacements),
             patch.multiple(weekly, **replacements), patch.object(sys, "argv", argv),
             patch.object(senders.smtplib, "SMTP_SSL", return_value=self.smtp) as self.smtp_factory,
             patch.object(senders.smtplib, "SMTP", side_effect=AssertionError("unexpected SMTP connection")),
@@ -220,7 +227,7 @@ class WeeklySingleEmailTests(unittest.TestCase):
             status = weekly.main()
         self.logs = output.getvalue()
         self.client.chat.assert_called_once_with([])
-        replacements["extract_headline_keywords"].assert_not_called()
+        analysis_replacements["extract_headline_keywords"].assert_not_called()
         replacements["render_weekly_html"].assert_called_once()
         self.assertEqual(replacements["render_weekly_html"].call_args.args[2], "synthetic/fallback-model")
         self.assertEqual(replacements["render_weekly_html"].call_args.kwargs["generated_at"], "2026-09-21 07:30:00")

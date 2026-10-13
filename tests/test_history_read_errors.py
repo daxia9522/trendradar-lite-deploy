@@ -317,7 +317,7 @@ class WeeklyHistoryFailureTests(TemporaryHistoryTests):
             "load_runtime_env": Mock(return_value={}),
             "load_ai_config": Mock(),
             "AIClient": Mock(),
-            "build_prompt": Mock(),
+            "generate_report": Mock(),
         }
         argv = ["weekly", "--start", "2026-10-01", "--end", "2026-10-01"]
         for error in read_errors():
@@ -333,7 +333,7 @@ class WeeklyHistoryFailureTests(TemporaryHistoryTests):
                                     status = weekly.main()
                     self.assertEqual(status, 7)
                     self.assertEqual(status, weekly.HISTORY_READ_EXIT_CODE)
-                    for name in ("load_ai_config", "AIClient", "build_prompt"):
+                    for name in ("load_ai_config", "AIClient", "generate_report"):
                         replacements[name].assert_not_called()
                     mail.assert_not_called()
                     self.assertFalse(replacements["OUTPUT_DIR"].exists())

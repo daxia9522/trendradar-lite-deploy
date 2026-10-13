@@ -18,11 +18,6 @@ SIM_THRESHOLD = 0.72
 RSS_TARGET_RATIO = 0.15
 RSS_MAX_RATIO = 0.20
 RSS_NEWS_MATCH_THRESHOLD = 0.58
-KEYWORD_TOPN = 5
-KEYWORD_TITLE_LIMIT = 100
-HEADLINE_MIN_LEN = 2
-HEADLINE_MAX_LEN = 4
-
 # 核心三维（默认与 config.yaml advanced.weight 同口径；启动时可被 yaml 覆盖）
 WEIGHT_RANK = 0.6
 WEIGHT_FREQUENCY = 0.3
@@ -44,38 +39,6 @@ COLUMN_PENALTY = 0.08
 # 行情/经济数据播报：允许入池垫底，但不得占据叙事分析的 Top 位。
 # 实测旧逻辑下跨天 TOP12 全部是单平台行情流（span7d、成员至8）。
 DATAFLOW_PENALTY = 0.10
-
-STOPWORDS = {
-    "今日", "本周", "最新", "热点", "表示", "消息", "中国", "美国", "公司", "市场", "已经", "进行", "相关", "发布", "报道", "工作", "记者",
-    "快讯", "图示", "数据", "显示", "回应", "通报", "指出", "视频", "全文", "直播", "热搜", "话题", "头条", "网友", "全球", "国内", "国际",
-    "同比", "环比", "财经", "财联社", "金十", "金十数据", "卫报", "BBC", "雅虎", "新华社", "中新网", "局势", "政策", "基建",
-}
-
-NOISE_WORDS = {
-    "亿元", "美元", "万亿", "万亿元", "万元", "百亿", "千亿", "图示", "快讯", "消息", "市场消息", "金十图示", "最新动态", "边打边",
-}
-
-# 邮件头禁止/空泛词（方案 B）
-HEADLINE_BANNED = {
-    "亿元", "美元", "市场消息", "金十图示", "图示", "快讯", "热点", "新闻", "边打边", "最新动态",
-    "中东局势", "AI基建", "特朗普政策", "全球市场", "避险情绪", "中国消费", "智能终端",
-    "局势", "政策", "市场", "基建", "消息", "动态", "分析", "观察", "综述",
-    # 真实周报规则兜底中出现过的空泛词与滑窗碎片
-    "规模", "科技", "早盘", "盘收", "如何", "为何", "怎么", "哪些", "上涨", "发行", "最高", "年期",
-    "利率", "倍数", "登陆", "风白海", "宇树科", "发行利率", "边际倍数",
-    "早盘收", "风白", "倍数预",
-}
-
-# 债券发行行情是高频结构化数据，不适合从字符滑窗中提取周报主题。
-# 整条标题跳过，避免完整词被过滤后又留下“行利/际倍”一类内部碎片。
-RULE_DATA_TEMPLATE_TITLE_RE = re.compile(
-    r"(发行利率|边际利率|投标倍数|边际倍数|倍数预期)"
-)
-
-# 允许略长的缩写/专名
-HEADLINE_LEN_EXCEPTIONS = {
-    "CPI", "GDP", "GPU", "Nvidia", "OpenAI", "ChatGPT", "WTI", "OPEC", "VIX",
-}
 
 # 栏目/模板帖：每日固定输出，跨天频次虚高，选稿与关键词都要压
 COLUMN_TITLE_RE = re.compile(
@@ -632,9 +595,6 @@ def rss_quality(item: Dict[str, Any], news_clusters: Sequence[Dict[str, Any]]) -
     return 1 if RSS_HARD_NEWS_RE.search(title) else 0
 
 
-def _is_hotlist_item(item: Dict[str, Any]) -> bool:
-    """邮件头/实体热词只吃热榜（news/mixed），不含纯 RSS。"""
-    return (item.get("source_type") or "news") in ("news", "mixed")
 
 def collect_news(
     start_date: datetime,

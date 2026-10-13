@@ -1,43 +1,73 @@
 #!/usr/bin/env python3
 """CLI orchestration for the AI weekly report email job.
 
-Data, analysis, rendering and runtime behavior live in their owning modules.
-This file retains the deployed CLI path.
+This file owns runtime setup, orchestration, artifact writes and delivery.
+Collection and analysis are separate stages; rendering and mail remain shared.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
+from typing import Dict, Optional, Tuple
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from trendradar.ai.client import AIClient
-from trendradar.core.loader import load_ai_config
+from trendradar.context import AppContext
+from trendradar.core.loader import load_ai_config, load_config
+from trendradar.utils.time import DEFAULT_TIMEZONE
 from trendradar.notification import NotificationDispatcher
 from trendradar.report.weekly import render_weekly_html
-from weekly_report.runtime import (
-    report_now,
-    load_runtime_env,
-    resolve_date_range,
-)
-from weekly_report.collection import KEYWORD_TOPN, collect_news
-from weekly_report.prompting import (
-    build_evidence_index,
-    build_prompt,
-)
-from weekly_report.keywords import (
-    build_rule_entity_headlines, parse_structured_report, keywords_from_themes,
-    extract_headline_keywords,
+from weekly_report.collection import collect_news
+from weekly_report.analysis import (
+    build_rule_entity_headlines,
+    generate_report,
+    generate_keywords,
 )
 
 OUTPUT_DIR = PROJECT_ROOT / "output" / "weekly-ai-reports"
 PARTIAL_EMAIL_EXIT_CODE = 6
 HISTORY_READ_EXIT_CODE = 7
+
+
+@lru_cache(maxsize=1)
+def build_report_context() -> AppContext:
+    """Resolve the shared report timezone once, on first use rather than import."""
+    config_path = PROJECT_ROOT / "config" / "config.yaml"
+    try:
+        return AppContext(load_config(str(config_path)))
+    except (FileNotFoundError, OSError, ValueError, TypeError):
+        return AppContext({"TIMEZONE": DEFAULT_TIMEZONE})
+
+
+def report_now() -> datetime:
+    """Return the current time in the report display timezone."""
+    return build_report_context().get_time()
+
+
+def load_runtime_env() -> Dict[str, str]:
+    """Read only EMAIL_* values from the process environment."""
+    return {key: value for key, value in os.environ.items() if key.startswith("EMAIL_")}
+
+
+def resolve_date_range(start: Optional[str], end: Optional[str]) -> Tuple[datetime, datetime]:
+    if bool(start) ^ bool(end):
+        raise SystemExit("--start 和 --end 必须一起传")
+    if start and end:
+        start_date = datetime.strptime(start, "%Y-%m-%d")
+        end_date = datetime.strptime(end, "%Y-%m-%d")
+        if start_date > end_date:
+            raise SystemExit("--start 不能晚于 --end")
+        return start_date, end_date
+    end_date = report_now().replace(tzinfo=None)
+    return end_date - timedelta(days=6), end_date
 
 
 def main() -> int:
@@ -82,57 +112,13 @@ def main() -> int:
     start_s = start_date.strftime("%Y-%m-%d")
     end_s = end_date.strftime("%Y-%m-%d")
 
-    # 主干①：周报正文（空结果/异常时再试 1 次；模型链 fallback 由 AIClient 处理）
-    messages = build_prompt(
-        start_s,
-        end_s,
-        all_news,
-        platform_counter,
-        pipeline_stats,
-    )
-    raw_report = ""
-    last_report_err = ""
-    used_model = ""
-    for attempt in range(2):
-        try:
-            raw_report = (client.chat(messages) or "").strip()
-            if raw_report:
-                used_model = (getattr(client, "last_model", None) or "").strip()
-                break
-            last_report_err = "empty_response"
-            print(f"[周报正文] 空响应 attempt={attempt + 1}")
-        except Exception as exc:
-            # AIClient re-raises the provider error; never format its body here.
-            last_report_err = type(exc).__name__
-            print(f"[周报正文] 调用失败 attempt={attempt + 1}: {last_report_err}")
-    if not raw_report:
-        print(f"周报正文生成失败: {last_report_err or 'unknown'}")
+    report = generate_report(client, start_s, end_s, all_news, platform_counter, pipeline_stats)
+    if report is None:
         return 5
-
-    evidence_index = build_evidence_index(all_news)
-    report_text, themes = parse_structured_report(raw_report, evidence_index)
-    headline_keywords = keywords_from_themes(themes)
-    if len(headline_keywords) >= KEYWORD_TOPN:
-        keyword_source = "structured_themes"
-    else:
-        # 保留已验证的主题关键词，独立 Prompt 仅补足缺额。
-        fallback_keywords, fallback_source = extract_headline_keywords(
-            client,
-            start_s,
-            end_s,
-            all_news,
-            report_text,
-        )
-        for keyword in fallback_keywords:
-            if keyword not in headline_keywords:
-                headline_keywords.append(keyword)
-            if len(headline_keywords) >= KEYWORD_TOPN:
-                break
-        keyword_source = (
-            f"structured_themes+{fallback_source}"
-            if themes
-            else fallback_source
-        )
+    report_text, themes, used_model = report.report_text, report.themes, report.model
+    headline_keywords, keyword_source = generate_keywords(
+        client, start_s, end_s, all_news, report_text, themes,
+    )
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     stamp = report_now().strftime("%Y%m%d-%H%M%S")

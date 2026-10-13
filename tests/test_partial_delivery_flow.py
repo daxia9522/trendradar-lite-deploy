@@ -21,6 +21,7 @@ from trendradar.daily_flow.runner import DailyRunner
 from trendradar.notification import senders
 from trendradar.notification.dispatcher import NotificationDispatcher
 from trendradar.storage.publication import LocalPublicationStore, PublicationError
+from weekly_report import analysis
 from weekly_report import weekly_ai_report_email as weekly
 
 
@@ -283,14 +284,19 @@ class PartialDeliveryFlowTests(unittest.TestCase):
             "render_weekly_html": Mock(return_value="<html>synthetic weekly</html>"),
             "build_rule_entity_headlines": Mock(return_value=[]),
         }
+        analysis_replacements = {
+            key: replacements.pop(key)
+            for key in ("build_prompt", "build_evidence_index", "parse_structured_report",
+                        "keywords_from_themes", "extract_headline_keywords")
+        }
         argv = ["weekly", "--start", "2026-09-15", "--end", "2026-09-21"]
-        with patch.multiple(weekly, **replacements), patch.object(sys, "argv", argv):
+        with patch.multiple(analysis, **analysis_replacements), patch.multiple(weekly, **replacements), patch.object(sys, "argv", argv):
             with patch.object(senders.smtplib, "SMTP_SSL", return_value=server) as factory:
                 with patch("time.sleep") as sleep, redirect_stdout(io.StringIO()):
                     result = weekly.main()
         replacements["load_runtime_env"].assert_called_once_with()
         client.chat.assert_called_once()
-        replacements["extract_headline_keywords"].assert_not_called()
+        analysis_replacements["extract_headline_keywords"].assert_not_called()
         replacements["render_weekly_html"].assert_called_once()
         self.assertEqual(factory.call_count, 1)
         sleep.assert_not_called()
