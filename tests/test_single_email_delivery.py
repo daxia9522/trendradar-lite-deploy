@@ -202,17 +202,18 @@ class WeeklySingleEmailTests(unittest.TestCase):
             "AIClient": Mock(return_value=self.client), "collect_news": Mock(return_value=([{"title": "synthetic news"}], {}, {})),
             "build_prompt": Mock(return_value=[]), "build_evidence_index": Mock(return_value={}),
             "parse_structured_report": Mock(return_value=("synthetic report", [])),
-            "keywords_from_themes": Mock(return_value=["甲", "乙", "丙", "丁", "戊"]),
-            "extract_headline_keywords": Mock(side_effect=AssertionError("unexpected keyword model request")),
+            "generate_keywords": Mock(return_value={
+                "version": 2, "final": ["甲", "乙", "丙", "丁", "戊"],
+                "source": "keyword_ai", "model": "synthetic/keyword-model",
+                "final_details": [], "attempts": [],
+            }),
             "render_weekly_html": Mock(wraps=weekly.render_weekly_html) if real_html else Mock(return_value="<html>synthetic weekly</html>"),
-            "build_rule_entity_headlines": Mock(return_value=[]),
         }
         if not real_runtime_env:
             replacements["load_runtime_env"] = Mock(return_value=config)
         analysis_replacements = {
             key: replacements.pop(key)
-            for key in ("build_prompt", "build_evidence_index", "parse_structured_report",
-                        "keywords_from_themes", "extract_headline_keywords")
+            for key in ("build_prompt", "build_evidence_index", "parse_structured_report")
         }
         argv = ["weekly", "--start", "2026-09-15", "--end", "2026-09-21", *flags]
         output = io.StringIO()
@@ -227,7 +228,7 @@ class WeeklySingleEmailTests(unittest.TestCase):
             status = weekly.main()
         self.logs = output.getvalue()
         self.client.chat.assert_called_once_with([])
-        analysis_replacements["extract_headline_keywords"].assert_not_called()
+        replacements["generate_keywords"].assert_called_once()
         replacements["render_weekly_html"].assert_called_once()
         self.assertEqual(replacements["render_weekly_html"].call_args.args[2], "synthetic/fallback-model")
         self.assertEqual(replacements["render_weekly_html"].call_args.kwargs["generated_at"], "2026-09-21 07:30:00")

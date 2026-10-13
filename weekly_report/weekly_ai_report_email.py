@@ -27,7 +27,6 @@ from trendradar.notification import NotificationDispatcher
 from trendradar.report.weekly import render_weekly_html
 from weekly_report.collection import collect_news
 from weekly_report.analysis import (
-    build_rule_entity_headlines,
     generate_report,
     generate_keywords,
 )
@@ -116,9 +115,9 @@ def main() -> int:
     if report is None:
         return 5
     report_text, themes, used_model = report.report_text, report.themes, report.model
-    headline_keywords, keyword_source = generate_keywords(
-        client, start_s, end_s, all_news, report_text, themes,
-    )
+    keyword_result = generate_keywords(client, start_s, end_s, report_text)
+    headline_keywords = keyword_result["final"]
+    keyword_source = keyword_result["source"]
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     stamp = report_now().strftime("%Y%m%d-%H%M%S")
@@ -132,6 +131,7 @@ def main() -> int:
         "去重/送入簇": len(all_news),
         "覆盖平台": len(platform_counter),
         "Top5关键词": " / ".join(headline_keywords) if headline_keywords else "-",
+        "关键词列表": headline_keywords,
         "关键词来源": keyword_source,
         "raw_news": pipeline_stats.get("raw_news"),
         "raw_rss": pipeline_stats.get("raw_rss"),
@@ -153,7 +153,13 @@ def main() -> int:
                 "final": headline_keywords,
                 "source": keyword_source,
                 "themes": themes,
-                "rule_fallback": build_rule_entity_headlines(all_news, topn=12),
+                "keyword_version": 2,
+                "keyword_model": keyword_result["model"],
+                "final_details": keyword_result["final_details"],
+                "keyword_audit": keyword_result,
+                "raw_themes": report.raw_themes,
+                "rule_fallback": [],
+                "rule_fallback_disabled": True,
                 "pipeline": pipeline_stats,
             },
             ensure_ascii=False,

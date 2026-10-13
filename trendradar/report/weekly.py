@@ -1,7 +1,7 @@
 """Weekly content policy and composition, independent of collection and runtime."""
 
 import re
-from typing import Dict
+from typing import Any, Dict
 
 from .components import render_ai_card, render_header
 from .markdown import render_markdown
@@ -44,14 +44,18 @@ def render_weekly_html(
     title: str,
     date_range: str,
     model_name: str,
-    statistics: Dict[str, str],
+    statistics: Dict[str, Any],
     report_markdown: str,
     *,
     generated_at: str,
 ) -> str:
     """Render a weekly document with an already-resolved display timestamp."""
     report_html = _render_report_content(report_markdown)
-    keyword_text = statistics.get("Top5关键词") or "-"
+    labels = statistics.get("关键词列表")
+    if not isinstance(labels, list):
+        # Older callers can still pass the display string; an empty list takes priority.
+        keyword_text = statistics.get("Top5关键词") or statistics.get("Top3关键词", "")
+        labels = [] if keyword_text == "-" else [part.strip() for part in keyword_text.split("/") if part.strip()]
     display_model_name = (model_name or "").strip() or "-"
     display_model_name = display_model_name[:1].upper() + display_model_name[1:]
     meta = ReportMeta(
@@ -61,7 +65,7 @@ def render_weekly_html(
             ("周报模型", display_model_name),
             ("生成时间", generated_at),
         ),
-        pills=tuple(part.strip() for part in keyword_text.split("/") if part.strip()),
+        pills=tuple(label for label in labels if isinstance(label, str) and label),
     )
     return render_document(
         title=title,

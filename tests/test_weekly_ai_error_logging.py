@@ -5,6 +5,7 @@ network/DNS and mail transports are denied, environment/config/history are
 replaced, and generated reports stay in a temporary directory.
 """
 import io
+import json
 import os
 import sys
 import tempfile
@@ -42,6 +43,7 @@ with ExitStack() as imports:
 
 
 MODEL = "openai/synthetic-weekly-model"
+KEYWORD_MODEL = "openai/synthetic-keyword-model"
 PRIVATE_KEY = "SYNTHETIC_CREDENTIAL_MUST_NOT_APPEAR"
 PRIVATE_URL = "https://weekly-relay.example.invalid/private-api"
 PRIVATE_REQUEST = "SYNTHETIC_REQUEST_BODY_MUST_NOT_APPEAR"
@@ -121,9 +123,11 @@ class WeeklyAILoggingTests(unittest.TestCase):
         self._patch("weekly_report.weekly_ai_report_email.report_now", return_value=datetime(2026, 10, 3, 20))
         self.messages = [{"role": "user", "content": "synthetic weekly prompt"}]
         self._patch("weekly_report.analysis.build_prompt", return_value=self.messages)
-        # Most main() tests avoid a second AI branch; selected tests enable it below.
-        self.themes = self._patch(
-            "weekly_report.analysis.keywords_from_themes", return_value=LABELS.copy(),
+        # Most main() tests isolate delivery from the independent keyword model.
+        self.keywords = self._patch(
+            "weekly_report.weekly_ai_report_email.generate_keywords",
+            return_value={"version": 2, "final": LABELS.copy(), "source": "keyword_ai",
+                          "model": KEYWORD_MODEL, "final_details": [], "attempts": []},
         )
 
     def tearDown(self):
@@ -139,8 +143,10 @@ class WeeklyAILoggingTests(unittest.TestCase):
             return weekly.main()
 
     def _keywords(self):
-        return analysis.extract_headline_keywords(
-            AIClient(self.config), "2026-09-27", "2026-10-03", NEWS, REPORT,
+        return analysis.generate_keywords(
+            AIClient(dict(self.config, FALLBACK_MODELS=[KEYWORD_MODEL],
+                          FALLBACK_API_BASE=PRIVATE_URL, FALLBACK_API_KEY=PRIVATE_KEY)),
+            "2026-09-27", "2026-10-03", REPORT,
         )
 
     def _assert_private_absent(self):
@@ -239,59 +245,68 @@ class WeeklyAILoggingTests(unittest.TestCase):
         self.assertEqual(self.completion.call_count, 2)
         self.dispatcher.send_report.assert_called_once()
 
-    def test_keyword_errors_keep_two_outer_attempts_and_rule_fallback(self):
+    def test_keyword_errors_keep_bounded_retries_without_rule_fallback(self):
         self.completion.side_effect = SyntheticHTTPError(PRIVATE_BODY)
-        labels, source = self._keywords()
-        self.assertEqual(source, "rule_only")
-        self.assertTrue(labels)
-        # The keyword client retains its existing one inner retry per outer attempt.
+        result = self._keywords()
+        self.assertEqual(result["source"], "keyword_empty")
+        self.assertEqual(result["final"], [])
+        self.assertEqual(len(result["attempts"]), 2)
+        # Native keyword client still has one inner retry per business attempt.
         self.assertEqual(self.completion.call_count, 4)
         self.assertEqual(self.sleep.call_count, 2)
-        for attempt in (1, 2):
-            self.assertIn(f"[关键词] lite 抽取失败 attempt={attempt}: SyntheticHTTPError\n", self.output.getvalue())
-        self.assertIn("[关键词] 回退规则实体 Top5（SyntheticHTTPError）", self.output.getvalue())
+        self.assertEqual([row["error_type"] for row in result["attempts"]], ["SyntheticHTTPError"] * 2)
+        self.assertNotIn(PRIVATE_BODY, json.dumps(result))
         self._assert_private_absent()
         self._assert_no_delivery_or_files()
 
     def test_keyword_never_formats_exception_str_or_repr(self):
         self.completion.side_effect = UnprintableError(PRIVATE_BODY)
-        labels, source = self._keywords()
-        self.assertEqual(source, "rule_only")
-        self.assertTrue(labels)
+        result = self._keywords()
+        self.assertEqual(result["source"], "keyword_empty")
+        self.assertEqual(result["final"], [])
         self.assertEqual(self.completion.call_count, 4)
-        self.assertIn("[关键词] 回退规则实体 Top5（UnprintableError）", self.output.getvalue())
+        self.assertEqual([row["error_type"] for row in result["attempts"]], ["UnprintableError"] * 2)
         self.assertNotIn("AssertionError", self.output.getvalue())
+        self.assertNotIn(PRIVATE_BODY, json.dumps(result))
         self._assert_private_absent()
 
     def test_keyword_second_outer_attempt_success_keeps_source(self):
         self.completion.side_effect = [
             SyntheticHTTPError(PRIVATE_BODY), SyntheticHTTPError(PRIVATE_BODY),
-            response('["日本地震", "火箭发射", "英伟达", "量子计算", "宇树科技"]'),
+            response(json.dumps([{"label": label, "evidence": label} for label in LABELS])),
         ]
-        labels, source = self._keywords()
-        self.assertEqual(source, "ai_lite_retry")
-        self.assertEqual(labels, LABELS)
+        result = self._keywords()
+        self.assertEqual(result["source"], "keyword_ai_retry")
+        self.assertEqual(result["final"], LABELS)
+        self.assertEqual(result["model"], KEYWORD_MODEL)
         self.assertEqual(self.completion.call_count, 3)
         self._assert_private_absent()
 
-    def test_keyword_invalid_output_logs_counts_not_raw_response(self):
+    def test_keyword_invalid_output_is_audited_not_printed(self):
         self.completion.return_value = response(PRIVATE_BODY)
-        labels, source = self._keywords()
-        self.assertEqual(source, "rule_only")
-        self.assertTrue(labels)
+        result = self._keywords()
+        self.assertEqual(result["source"], "keyword_empty")
+        self.assertEqual(result["final"], [])
         self.assertEqual(self.completion.call_count, 2)
-        self.assertEqual(self.output.getvalue().count("[关键词] lite 无效输出 attempt="), 2)
-        self.assertIn("valid_labels=", self.output.getvalue())
+        self.assertEqual([row["status"] for row in result["attempts"]], ["invalid_json"] * 2)
         self.assertNotIn("raw=", self.output.getvalue())
         self._assert_private_absent()
 
     def test_keyword_failure_does_not_suppress_successful_report_delivery(self):
-        self.themes.return_value = []
+        self.keywords.side_effect = analysis.generate_keywords
+        self.config["FALLBACK_MODELS"] = [KEYWORD_MODEL]
+        self.config["FALLBACK_API_BASE"] = PRIVATE_URL
+        self.config["FALLBACK_API_KEY"] = PRIVATE_KEY
         self.completion.side_effect = [response(REPORT)] + [SyntheticHTTPError(PRIVATE_BODY)] * 4
         self.assertEqual(self._main(), 0)
         self.assertEqual(self.completion.call_count, 5)
         self.dispatcher.send_report.assert_called_once()
         self.assertEqual(len(list(self.output_dir.glob("*"))), 2)
+        saved = json.loads(next(self.output_dir.glob("*.keywords.json")).read_text())
+        self.assertEqual(saved["final"], [])
+        self.assertEqual(saved["rule_fallback"], [])
+        self.assertTrue(saved["rule_fallback_disabled"])
+        self.assertNotIn('class="tab-strip"', next(self.output_dir.glob("*.html")).read_text())
         self._assert_private_absent()
 
     def test_delivery_result_exit_codes_unchanged_after_report_retry(self):

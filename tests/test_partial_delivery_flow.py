@@ -279,15 +279,16 @@ class PartialDeliveryFlowTests(unittest.TestCase):
             "build_prompt": Mock(return_value=[]),
             "build_evidence_index": Mock(return_value={}),
             "parse_structured_report": Mock(return_value=("synthetic report", [])),
-            "keywords_from_themes": Mock(return_value=["甲", "乙", "丙", "丁", "戊"]),
-            "extract_headline_keywords": Mock(side_effect=AssertionError("unexpected keyword AI path")),
+            "generate_keywords": Mock(return_value={
+                "version": 2, "final": ["甲", "乙", "丙", "丁", "戊"],
+                "source": "keyword_ai", "model": "synthetic/keyword-model",
+                "final_details": [], "attempts": [],
+            }),
             "render_weekly_html": Mock(return_value="<html>synthetic weekly</html>"),
-            "build_rule_entity_headlines": Mock(return_value=[]),
         }
         analysis_replacements = {
             key: replacements.pop(key)
-            for key in ("build_prompt", "build_evidence_index", "parse_structured_report",
-                        "keywords_from_themes", "extract_headline_keywords")
+            for key in ("build_prompt", "build_evidence_index", "parse_structured_report")
         }
         argv = ["weekly", "--start", "2026-09-15", "--end", "2026-09-21"]
         with patch.multiple(analysis, **analysis_replacements), patch.multiple(weekly, **replacements), patch.object(sys, "argv", argv):
@@ -296,7 +297,7 @@ class PartialDeliveryFlowTests(unittest.TestCase):
                     result = weekly.main()
         replacements["load_runtime_env"].assert_called_once_with()
         client.chat.assert_called_once()
-        analysis_replacements["extract_headline_keywords"].assert_not_called()
+        replacements["generate_keywords"].assert_called_once()
         replacements["render_weekly_html"].assert_called_once()
         self.assertEqual(factory.call_count, 1)
         sleep.assert_not_called()

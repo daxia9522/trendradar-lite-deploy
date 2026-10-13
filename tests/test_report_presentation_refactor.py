@@ -219,7 +219,8 @@ class ReportPresentationTests(unittest.TestCase):
                 self.assertEqual(dom.text(dom.with_class("meta-item")[2]), "生成时间：2026-10-02 10:40:15")
                 if name == "weekly_missing_keywords":
                     self.assertEqual(dom.text(dom.with_class("meta-item")[1]), "周报模型：-")
-                    self.assertEqual([dom.text(node) for node in dom.with_class("tab-pill")], ["-"])
+                    self.assertFalse(dom.with_class("tab-pill"))
+                    self.assertFalse(dom.with_class("tab-strip"))
                 elif name == "weekly_empty_pills":
                     self.assertFalse(dom.with_class("tab-strip"))
                     self.assertIn("空关键词", dom.text(dom.with_class("ai-card__body")[0]))
@@ -474,11 +475,12 @@ class ReportPresentationTests(unittest.TestCase):
             finally:
                 os.chdir(cwd)
 
-    def test_weekly_missing_and_empty_top5_keep_default_keyword(self):
+    def test_weekly_missing_and_empty_top5_hide_label_strip(self):
         for statistics in ({}, {"Top5关键词": ""}, {"Top5关键词": None}):
             with self.subTest(statistics=statistics):
                 dom = ReportDOM(render_weekly_html(**dict(weekly_cases()["weekly_default"], statistics=statistics)))
-                self.assertEqual([dom.text(node) for node in dom.with_class("tab-pill")], ["-"])
+                self.assertFalse(dom.with_class("tab-pill"))
+                self.assertFalse(dom.with_class("tab-strip"))
 
     def test_injected_timestamp_parser_errors_are_not_swallowed(self):
         parser = Mock(side_effect=RuntimeError("timestamp programming error"))
