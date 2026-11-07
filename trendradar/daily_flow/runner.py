@@ -3,6 +3,7 @@
 
 import os
 import json
+import re
 from copy import deepcopy
 import webbrowser
 from pathlib import Path
@@ -22,6 +23,28 @@ from . import collection, inputs, rss
 from .capture import capture_sources
 from .publication import PublicationCoordinator
 from .models import CrawlResult, KeywordRules, PreparedReportInput, PublicationPlan, ReportArtifacts, RSSResult, RSSCollection
+
+
+def _jsonable_keywords(keywords: KeywordRules) -> Dict[str, object]:
+    """Copy keyword rules into a JSON-safe snapshot without changing live rules.
+
+    Normal, required and filter words all carry a compiled ``pattern`` derived
+    from their textual ``word``/``is_regex`` fields. Omit only that derived
+    field, preserving the remaining values and rejecting unknown types at the
+    caller's normal JSON boundary instead of silently stringifying them.
+    """
+    def freeze(value):
+        if isinstance(value, dict):
+            return {
+                key: freeze(item)
+                for key, item in value.items()
+                if key != "pattern" or not isinstance(item, re.Pattern)
+            }
+        if isinstance(value, (list, tuple)):
+            return [freeze(item) for item in value]
+        return value
+
+    return freeze(keywords._asdict())
 
 
 class DailyRunner:
@@ -484,7 +507,7 @@ class DailyRunner:
         frozen_input = prepared.capture.to_dict()
         frozen_input["report_view"] = json.loads(json.dumps({
             "mode": prepared.mode, "hotlist": prepared.hotlist._asdict(),
-            "keywords": prepared.keywords._asdict(), "rss": prepared.rss._asdict(),
+            "keywords": _jsonable_keywords(prepared.keywords), "rss": prepared.rss._asdict(),
             "standalone": prepared.standalone, "failed_ids": prepared.failed_ids,
         }, ensure_ascii=False))
         artifacts = self.analyze_report(prepared, schedule)
