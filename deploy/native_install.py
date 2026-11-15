@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 from envfile import ConfigError, atomic_write, read_env
-from native_config import UnitTransaction, config_home
+from native_config import config_home, TIMER_NAMES, UnitTransaction
 
 
 def launcher_content(app: Path, env: Path, units: Path, python: str) -> bytes:
@@ -67,15 +67,12 @@ def migrate_quoted_unit_paths(text: str, app: Path, env: Path) -> str:
     return "".join(lines)
 
 
-def install_units(app: Path, env: Path, units: Path, runner=None, *, enable_backup=False) -> bool:
+def install_units(app: Path, env: Path, units: Path, runner=None) -> bool:
     from native_schedule import NativeSchedule, ScheduleError
-    from native_backup import BackupPlan, commit_plan
     changes = {}
-    timer_paths = [units / f"{name}.timer" for name in ("trendradar-lite", "trendradar-weekly")]
+    timer_paths = [units / name for name in TIMER_NAMES]
     is_new = not any(path.exists() for path in timer_paths)
     values = read_env(env)
-    backup = BackupPlan(app, env, units, values, values, runner=runner,
-                        install=True, first_install=is_new, enable=enable_backup)
     if is_new:
         required = {"TZ", "CRAWLER_MINUTE", "MORNING_PUSH_TIME", "NOON_PUSH_TIME", "EVENING_PUSH_TIME",
                     "DAILY_SUMMARY_TIME", "WEEKLY_WEEKDAY", "WEEKLY_HOUR", "WEEKLY_MINUTE"}
@@ -103,22 +100,17 @@ def install_units(app: Path, env: Path, units: Path, runner=None, *, enable_back
         text = text.replace("@APP_DIR@", unit_path(app)).replace("@ENV_FILE@", unit_path(env))
         text = text.replace("@PYTHON@", unit_path(app / ".venv/bin/python", executable=True))
         changes[path] = text.encode()
-    commit_plan(changes, backup, runner)
-    if backup.message:
-        print(backup.message)
+    UnitTransaction(changes, runner, guard_paths=timer_paths).commit()
     return is_new
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("check-launcher", "install-launcher", "remove-launcher", "install-units", "doctor",
-                                           "install-backup", "backup-status", "remove-backup"))
+    parser.add_argument("action", choices=("check-launcher", "install-launcher", "remove-launcher", "install-units", "doctor"))
     parser.add_argument("--app", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--output", type=Path, default=config_home() / "trendradar-lite/env")
     parser.add_argument("--unit-dir", type=Path, default=config_home() / "systemd/user")
     parser.add_argument("--python", default=sys.executable)
-    parser.add_argument("--enable-backup", action="store_true", help="Enable backup only on first native installation")
-    parser.add_argument("--enable", action="store_true", help="Explicitly install/enable the configured backup timer")
     args = parser.parse_args()
     app, env, units = args.app.resolve(), args.output.absolute(), args.unit_dir.absolute()
     launcher = Path.home() / ".local/bin/trendradar"
@@ -131,21 +123,7 @@ def main() -> int:
         elif args.action == "remove-launcher":
             remove_launcher(launcher, content)
         elif args.action == "install-units":
-            install_units(app, env, units, enable_backup=args.enable_backup)
-        elif args.action == "install-backup":
-            from native_backup import BackupPlan, commit_plan, settings
-            values = read_env(env)
-            if not args.enable or not settings(values).enabled:
-                raise ConfigError("请先配置 R2_BACKUP_ENABLED=true，再用 install-backup --enable 明确安装/启用")
-            backup = BackupPlan(app, env, units, values, values, install=True, explicit=True)
-            commit_plan({}, backup)
-            print(backup.message)
-        elif args.action == "backup-status":
-            from native_backup import status
-            print(status(app, env, units, read_env(env)))
-        elif args.action == "remove-backup":
-            from native_backup import uninstall
-            uninstall(app, env, units)
+            install_units(app, env, units)
         elif args.action == "doctor":
             environment = dict(os.environ)
             environment.update(read_env(env, deployment="linux"))

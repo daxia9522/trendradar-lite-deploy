@@ -41,7 +41,7 @@ ACTIVE_SCHEDULER = None
 # are stored. Old top-level task markers remain for state/API compatibility.
 MAX_COMPLETED_WINDOWS = 4096
 MAX_STATE_BYTES = 4 * 1024 * 1024
-TASKS = ("crawler", "weekly", "backup")
+TASKS = ("crawler", "weekly")
 CHILD_SHUTDOWN_TIMEOUT = 5.0
 
 
@@ -75,13 +75,17 @@ def _parse_marker(value: object, *, utc: bool | None = None) -> datetime:
 
 
 def _validate_state(state: object) -> dict:
-    if not isinstance(state, dict) or set(state) - {*TASKS, "_windows"}:
+    # Accept only the retired task's old completion shape, validating it just
+    # as strictly as live task history. Drop it in memory without rewriting the
+    # file or touching business deduplication; this is not a runnable task.
+    state_tasks = {*TASKS, "backup"}
+    if not isinstance(state, dict) or set(state) - {*state_tasks, "_windows"}:
         raise SchedulerStateError()
-    for name in TASKS:
+    for name in state_tasks:
         if name in state:
             _parse_marker(state[name])
     history = state.get("_windows", {})
-    if not isinstance(history, dict) or set(history) - set(TASKS):
+    if not isinstance(history, dict) or set(history) - state_tasks:
         raise SchedulerStateError()
     for name, windows in history.items():
         if not isinstance(windows, list) or not 1 <= len(windows) <= MAX_COMPLETED_WINDOWS:
@@ -104,7 +108,12 @@ def _validate_state(state: object) -> dict:
             previous = window["utc"]
         if state.get(name) not in (windows[-1]["utc"], windows[-1]["local"]):
             raise SchedulerStateError()
-    return state
+    if "backup" not in state and "backup" not in history:
+        return state
+    normalized = {key: value for key, value in state.items() if key != "backup"}
+    if "backup" in history:
+        normalized["_windows"] = {key: value for key, value in history.items() if key != "backup"}
+    return normalized
 
 
 def _unique_object(pairs: list[tuple]) -> dict:
@@ -184,7 +193,6 @@ class Scheduler:
         self.attempts: dict[str, tuple[str, int]] = {}
         self.signature: tuple | None = None
         self.blocked_minute: str | None = None
-        self.backup_blocked_minute: str | None = None
         self.latest_minute: str | None = None
         self.latest_instant: datetime | None = None
         self.error_code: str | None = None
@@ -288,7 +296,6 @@ class Scheduler:
         if rearming:
             # Startup can dispatch the current minute; a hot change or recovery
             # from invalid configuration must not retroactively trigger it.
-            self.backup_blocked_minute = actual_marker
             if snapshot.external:
                 self.blocked_minute = actual_marker
         if changed or self.invalid:
@@ -350,14 +357,10 @@ class Scheduler:
             "weekly": (selected_local.weekday() == selected_settings.weekly_weekday
                        and selected_local.hour == selected_settings.weekly_hour
                        and selected_local.minute == selected_settings.weekly_minute),
-            "backup": (selected_settings.backup_enabled
-                       and selected_local.strftime("%H:%M") == selected_settings.backup_time
-                       and selected_actual != self.backup_blocked_minute),
         }
         commands = {
             "crawler": [sys.executable, "-m", "trendradar"],
             "weekly": [sys.executable, "weekly_report/weekly_ai_report_email.py"],
-            "backup": [sys.executable, "deploy/r2_backup.py", "--configured"],
         }
         for name in TASKS:
             if not due[name]:

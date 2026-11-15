@@ -64,22 +64,6 @@ CREATE TABLE IF NOT EXISTS rss_crawl_status (
 );
 
 -- ============================================
--- 推送记录表
--- 用于 push_window once_per_day 功能
--- 以及 ai_analysis analysis_window once_per_day 功能
--- ============================================
-CREATE TABLE IF NOT EXISTS rss_push_records (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    date TEXT NOT NULL UNIQUE,                -- 日期（YYYY-MM-DD）
-    pushed INTEGER DEFAULT 0,                 -- 是否已推送
-    push_time TEXT,                           -- 推送时间
-    ai_analyzed INTEGER DEFAULT 0,            -- 是否已进行 AI 分析
-    ai_analysis_time TEXT,                    -- AI 分析时间
-    ai_analysis_mode TEXT,                    -- AI 分析模式
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- ============================================
 -- 索引定义
 -- ============================================
 

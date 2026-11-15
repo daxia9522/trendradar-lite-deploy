@@ -104,6 +104,7 @@ def count_word_frequency(
     is_first_crawl_func: Optional[Callable[[], bool]] = None,
     convert_time_func: Optional[Callable[[str], str]] = None,
     quiet: bool = False,
+    group_resolver: Optional[Callable[[str], Optional[str]]] = None,
 ) -> Tuple[List[Dict], int]:
     """
     统计词频，支持必须词、频率词、过滤词、全局过滤词，并标记新增标题
@@ -204,13 +205,12 @@ def count_word_frequency(
         filter_status = (
             "全部显示"
             if len(word_groups) == 1 and word_groups[0]["group_key"] == "全部新闻"
-            else "频率词过滤"
+            else ("栏目筛选" if group_resolver is not None else "频率词过滤")
         )
         print(f"当日汇总模式：处理 {total_input_news} 条新闻，模式：{filter_status}")
 
     word_stats = {}
     total_titles = 0
-    processed_titles = {}
     matched_new_count = 0
 
     if title_info is None:
@@ -225,17 +225,11 @@ def count_word_frequency(
     for source_id, titles_data in results_to_process.items():
         total_titles += len(titles_data)
 
-        if source_id not in processed_titles:
-            processed_titles[source_id] = {}
-
         for title, title_data in titles_data.items():
-            if title in processed_titles.get(source_id, {}):
-                continue
-
             # 使用统一的匹配逻辑
-            matches_frequency_words = matches_word_groups(
-                title, word_groups, filter_words, global_filters
-            )
+            resolved_group = group_resolver(title) if group_resolver is not None else None
+            matches_frequency_words = (resolved_group is not None if group_resolver is not None
+                                       else matches_word_groups(title, word_groups, filter_words, global_filters))
 
             if not matches_frequency_words:
                 continue
@@ -253,8 +247,10 @@ def count_word_frequency(
             # 找到匹配的词组（防御性转换确保类型安全）
             title_lower = str(title).lower() if not isinstance(title, str) else title.lower()
             for group in word_groups:
-                required_words = group["required"]
-                normal_words = group["normal"]
+                if group_resolver is not None and group["group_key"] != resolved_group:
+                    continue
+                required_words = group["required"] if group_resolver is None else []
+                normal_words = group["normal"] if group_resolver is None else []
 
                 # 如果是"全部新闻"模式，所有标题都匹配第一个（唯一的）词组
                 if len(word_groups) == 1 and word_groups[0]["group_key"] == "全部新闻":
@@ -358,10 +354,6 @@ def count_word_frequency(
                     }
                 )
 
-                if source_id not in processed_titles:
-                    processed_titles[source_id] = {}
-                processed_titles[source_id][title] = True
-
                 break
 
     # 最后统一打印汇总信息
@@ -371,7 +363,7 @@ def count_word_frequency(
             filter_status = (
                 "全部显示"
                 if len(word_groups) == 1 and word_groups[0]["group_key"] == "全部新闻"
-                else "频率词匹配"
+                else ("栏目筛选" if group_resolver is not None else "频率词匹配")
             )
             if not quiet:
                 print(
@@ -384,14 +376,15 @@ def count_word_frequency(
                     "全部显示"
                     if len(word_groups) == 1
                     and word_groups[0]["group_key"] == "全部新闻"
-                    else "匹配频率词"
+                    else ("栏目筛选" if group_resolver is not None else "匹配频率词")
                 )
                 if not quiet:
                     print(
                         f"增量模式：{total_new_count} 条新增新闻中，有 {matched_new_count} 条{filter_status}"
                     )
                     if matched_new_count == 0 and len(word_groups) > 1:
-                        print("增量模式：没有新增新闻匹配频率词，将不会发送通知")
+                        print("增量模式：没有新增新闻通过栏目筛选，将不会发送通知" if group_resolver is not None
+                              else "增量模式：没有新增新闻匹配频率词，将不会发送通知")
             else:
                 if not quiet:
                     print("增量模式：未检测到新增新闻")
@@ -401,7 +394,7 @@ def count_word_frequency(
             filter_status = (
                 "全部显示"
                 if len(word_groups) == 1 and word_groups[0]["group_key"] == "全部新闻"
-                else "频率词匹配"
+                else ("栏目筛选" if group_resolver is not None else "频率词匹配")
             )
             if not quiet:
                 print(
@@ -412,7 +405,7 @@ def count_word_frequency(
             filter_status = (
                 "全部显示"
                 if len(word_groups) == 1 and word_groups[0]["group_key"] == "全部新闻"
-                else "频率词匹配"
+                else ("栏目筛选" if group_resolver is not None else "频率词匹配")
             )
             if not quiet:
                 print(
@@ -483,8 +476,9 @@ def count_word_frequency(
     # 打印过滤后的匹配新闻数
     matched_news_count = sum(len(stat["titles"]) for stat in stats if stat["count"] > 0)
     if not quiet and mode == "daily":
-        print(f"当日汇总模式：处理 {total_titles} 条新闻，模式：频率词过滤")
-        print(f"频率词过滤后：{matched_news_count} 条新闻匹配")
+        label = "栏目筛选" if group_resolver is not None else "频率词过滤"
+        print(f"当日汇总模式：处理 {total_titles} 条新闻，模式：{label}")
+        print(f"{label}后：{matched_news_count} 条新闻匹配")
 
     return stats, total_titles
 
@@ -500,6 +494,7 @@ def count_rss_frequency(
     timezone: str = DEFAULT_TIMEZONE,
     rank_threshold: int = 5,
     quiet: bool = False,
+    group_resolver: Optional[Callable[[str], Optional[str]]] = None,
 ) -> Tuple[List[Dict], int]:
     """
     按关键词分组统计 RSS 条目（与热榜统计格式一致）
@@ -593,14 +588,18 @@ def count_rss_frequency(
             processed_urls.add(url)
 
         # 使用统一的匹配逻辑
-        if not matches_word_groups(title, word_groups, filter_words, global_filters):
+        resolved_group = group_resolver(title) if group_resolver is not None else None
+        if (resolved_group is None if group_resolver is not None
+                else not matches_word_groups(title, word_groups, filter_words, global_filters)):
             continue
 
         # 找到匹配的词组
         title_lower = title.lower()
         for group in word_groups:
-            required_words = group["required"]
-            normal_words = group["normal"]
+            if group_resolver is not None and group["group_key"] != resolved_group:
+                continue
+            required_words = group["required"] if group_resolver is None else []
+            normal_words = group["normal"] if group_resolver is None else []
             group_key = group["group_key"]
 
             # "全部 RSS" 模式：所有条目都匹配
@@ -702,7 +701,8 @@ def count_rss_frequency(
 
     matched_count = sum(stat["count"] for stat in stats)
     if not quiet:
-        print(f"[RSS] 关键词分组统计：{matched_count}/{total_items} 条匹配")
+        label = "栏目筛选" if group_resolver is not None else "关键词"
+        print(f"[RSS] {label}分组统计：{matched_count}/{total_items} 条匹配")
 
     return stats, total_items
 

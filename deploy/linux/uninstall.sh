@@ -24,9 +24,6 @@ if [[ $PURGE_DATA == true && -L $BACKUP_DIR ]]; then
   exit 2
 fi
 
-# Refuse foreign/overridden backup units before touching any existing install.
-"$PYTHON_BIN" "$APP_DIR/deploy/native_install.py" remove-backup \
-  --output "$ENV_FILE" --unit-dir "$UNIT_DIR"
 # Stop/disable failures must leave report units intact. The helper verifies
 # timer state and uses the existing safety gate for every explicit reload.
 "$PYTHON_BIN" "$APP_DIR/deploy/native_uninstall.py" --unit-dir "$UNIT_DIR"

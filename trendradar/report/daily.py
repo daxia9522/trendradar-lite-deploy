@@ -18,6 +18,21 @@ from .styles import COMMON_STYLESHEETS
 from trendradar.utils.time import convert_time_for_display
 
 
+_KEYWORD_GROUP_ORDER = {
+    name: index for index, name in enumerate(
+        ("国内新闻", "国际新闻", "科技新闻", "财经新闻", "文娱新闻", "体育新闻")
+    )
+}
+
+
+def _ordered_keyword_groups(stats: List[Dict]) -> List[Dict]:
+    """Order display copies only; unknown groups retain their relative order."""
+    return sorted(
+        stats,
+        key=lambda stat: _KEYWORD_GROUP_ORDER.get(stat.get("word", ""), len(_KEYWORD_GROUP_ORDER)),
+    )
+
+
 def _strip_html_text(value: str) -> str:
     """去掉标签与折叠图标，仅保留可见文本。"""
     text = re.sub(r'<[^>]+>', '', value or '')
@@ -58,25 +73,17 @@ def _format_section_title(title: str, count: str = '') -> str:
 def _render_hotlist(report_data: Dict, *, display_mode: str) -> str:
     stats_html = ""
     if report_data["stats"]:
-        total_count = len(report_data["stats"])
-
-        for i, stat in enumerate(report_data["stats"], 1):
-            count = stat["count"]
-
-            # 确定热度等级
-            if count >= 10:
-                count_class = "hot"
-            elif count >= 5:
-                count_class = "warm"
-            else:
-                count_class = ""
-
+        display_stats = (
+            _ordered_keyword_groups(report_data["stats"])
+            if display_mode == "keyword" else report_data["stats"]
+        )
+        total_count = len(display_stats)
+        for i, stat in enumerate(display_stats, 1):
             escaped_word = html_escape(stat["word"])
 
-            word_count_class = f'word-count {count_class}'.rstrip()
             stats_html += f"""
-                <div class="word-group inner-card">
-                    <div class="word-header"><div class="word-info"><span class="word-name">{escaped_word}</span><span class="meta-sep"> · </span><span class="{word_count_class}">{count}条热点</span><span class="word-index"> ▼{i}/{total_count}</span></div></div>"""
+<div class="word-group inner-card">
+<div class="word-header"><div class="word-info"><span class="word-name">{escaped_word}</span><span class="word-index"> ▼{i}/{total_count}</span></div></div>"""
 
             # 处理每个词组下的新闻标题，给每条新闻标上序号
             for j, title_data in enumerate(stat["titles"], 1):
@@ -84,10 +91,10 @@ def _render_hotlist(report_data: Dict, *, display_mode: str) -> str:
                 new_class = "new" if is_new else ""
 
                 stats_html += f"""
-                    <div class="news-item {new_class}">
-                        <div class="news-number">{j}</div>
-                        <div class="news-content">
-                            <div class="news-header">"""
+<div class="news-item {new_class}">
+<div class="news-number">{j}</div>
+<div class="news-content">
+<div class="news-header">"""
 
                 # 根据 display_mode 决定显示来源还是关键词
                 if display_mode == "keyword":
@@ -143,8 +150,8 @@ def _render_hotlist(report_data: Dict, *, display_mode: str) -> str:
                     stats_html += f'<span class="count-info">{count_info}次</span>'
 
                 stats_html += """
-                            </div>
-                            <div class="news-title">"""
+</div>
+<div class="news-title">"""
 
                 # 处理标题和链接
                 escaped_title = html_escape(title_data["title"])
@@ -157,18 +164,18 @@ def _render_hotlist(report_data: Dict, *, display_mode: str) -> str:
                     stats_html += escaped_title
 
                 stats_html += """
-                            </div>
-                        </div>
-                    </div>"""
+</div>
+</div>
+</div>"""
 
             stats_html += """
-                </div>"""
+</div>"""
 
     # 给热榜统计添加外层包装
     if stats_html:
         stats_html = f"""
-                <div class="news-region hotlist-section">{stats_html}
-                </div>"""
+<div class="news-region hotlist-section">{stats_html}
+</div>"""
 
     return stats_html
 
@@ -180,17 +187,17 @@ def _render_new_items(report_data: Dict, *, show_new_section: bool) -> str:
             "本次新增热点", str(report_data["total_new_count"])
         )
         new_titles_html += f"""
-                <div class="news-region new-section">
-                    <div class="new-section-title">{new_section_title}</div>
-                    <div class="new-sources-grid">"""
+<div class="news-region new-section">
+<div class="new-section-title">{new_section_title}</div>
+<div class="new-sources-grid">"""
 
         for source_data in report_data["new_titles"]:
             escaped_source = html_escape(source_data["source_name"])
             titles_count = len(source_data["titles"])
 
             new_titles_html += f"""
-                    <div class="new-source-group inner-card">
-                        <div class="new-source-title">{escaped_source} · {titles_count}条</div>"""
+<div class="new-source-group inner-card">
+<div class="new-source-title">{escaped_source} · {titles_count}条</div>"""
 
             # 为新增新闻也添加序号
             for idx, title_data in enumerate(source_data["titles"], 1):
@@ -213,11 +220,11 @@ def _render_new_items(report_data: Dict, *, show_new_section: bool) -> str:
                     rank_text = "?"
 
                 new_titles_html += f"""
-                        <div class="new-item">
-                            <div class="new-item-number">{idx}</div>
-                            <div class="new-item-rank {rank_class}">{rank_text}</div>
-                            <div class="new-item-content">
-                                <div class="new-item-title">"""
+<div class="new-item">
+<div class="new-item-number">{idx}</div>
+<div class="new-item-rank {rank_class}">{rank_text}</div>
+<div class="new-item-content">
+<div class="new-item-title">"""
 
                 # 处理新增新闻的链接
                 escaped_title = html_escape(title_data["title"])
@@ -230,16 +237,16 @@ def _render_new_items(report_data: Dict, *, show_new_section: bool) -> str:
                     new_titles_html += escaped_title
 
                 new_titles_html += """
-                                </div>
-                            </div>
-                        </div>"""
+</div>
+</div>
+</div>"""
 
             new_titles_html += """
-                    </div>"""
+</div>"""
 
         new_titles_html += """
-                    </div>
-                </div>"""
+</div>
+</div>"""
 
     return new_titles_html
 
@@ -280,13 +287,13 @@ def _render_rss_stats_html(stats: List[Dict], title: str = "RSS 订阅更新") -
     rss_header = f'<div class="rss-section-title">{_format_section_title(title, str(total_count))}</div>'
 
     rss_html = f"""
-                <div class="news-region rss-section">
-                    <div class="rss-section-header">{rss_header}
-                    </div>
-                    <div class="rss-feeds-grid">"""
+<div class="news-region rss-section">
+<div class="rss-section-header">{rss_header}
+</div>
+<div class="rss-feeds-grid">"""
 
     # 按关键词分组渲染（与热榜格式一致）
-    for stat in stats:
+    for stat in _ordered_keyword_groups(stats):
         keyword = stat.get("word", "")
         titles = stat.get("titles", [])
         if not titles:
@@ -298,9 +305,9 @@ def _render_rss_stats_html(stats: List[Dict], title: str = "RSS 订阅更新") -
         feed_class = "feed-group inner-card"
 
         rss_html += f"""
-                    <div class="{feed_class}">
-                        <div class="feed-header">{feed_header}
-                        </div>"""
+<div class="{feed_class}">
+<div class="feed-header">{feed_header}
+</div>"""
 
         for title_data in titles:
             item_title = title_data.get("title", "")
@@ -310,8 +317,8 @@ def _render_rss_stats_html(stats: List[Dict], title: str = "RSS 订阅更新") -
             is_new = title_data.get("is_new", False)
 
             rss_html += """
-                        <div class="rss-item">
-                            <div class="rss-meta">"""
+<div class="rss-item">
+<div class="rss-meta">"""
 
             if time_display:
                 rss_html += f'<span class="rss-time">{html_escape(time_display)}</span>'
@@ -323,8 +330,8 @@ def _render_rss_stats_html(stats: List[Dict], title: str = "RSS 订阅更新") -
                 rss_html += '<span class="rss-author rss-new-marker">NEW</span>'
 
             rss_html += """
-                            </div>
-                            <div class="rss-title">"""
+</div>
+<div class="rss-title">"""
 
             escaped_title = html_escape(item_title)
             if safe_report_url(url):
@@ -334,15 +341,15 @@ def _render_rss_stats_html(stats: List[Dict], title: str = "RSS 订阅更新") -
                 rss_html += escaped_title
 
             rss_html += """
-                            </div>
-                        </div>"""
+</div>
+</div>"""
 
         rss_html += """
-                    </div>"""
+</div>"""
 
     rss_html += """
-                    </div>
-                </div>"""
+</div>
+</div>"""
     return rss_html
 
 
@@ -412,12 +419,12 @@ def _render_standalone_html(
     standalone_header = f'<div class="standalone-section-title">{_format_section_title("独立展示区", str(total_count))}</div>'
 
     standalone_html = f"""
-                <div class="news-region standalone-section">
-                    <div class="standalone-section-header">{standalone_header}
-                    </div>"""
+<div class="news-region standalone-section">
+<div class="standalone-section-header">{standalone_header}
+</div>"""
 
     standalone_html += """
-                    <div class="standalone-groups-grid">"""
+<div class="standalone-groups-grid">"""
 
     # 渲染热榜平台（复用 word-group 结构）
     for platform in platforms:
@@ -430,9 +437,9 @@ def _render_standalone_html(
         group_header = f'<span class="standalone-name">{html_escape(platform_name)}</span><span class="meta-sep"> · </span><span class="standalone-count">{len(items)}条</span>'
 
         standalone_html += f"""
-                    {group_open}
-                        <div class="standalone-header">{group_header}
-                        </div>"""
+{group_open}
+<div class="standalone-header">{group_header}
+</div>"""
 
         # 渲染每个条目（复用 news-item 结构）
         for j, item in enumerate(items, 1):
@@ -445,10 +452,10 @@ def _render_standalone_html(
             count = item.get("count", 1)
 
             standalone_html += f"""
-                        <div class="news-item">
-                            <div class="news-number">{j}</div>
-                            <div class="news-content">
-                                <div class="news-header">"""
+<div class="news-item">
+<div class="news-number">{j}</div>
+<div class="news-content">
+<div class="news-header">"""
 
             # 排名显示（复用 rank-num 样式，无 # 前缀）
             if ranks:
@@ -492,8 +499,8 @@ def _render_standalone_html(
                 standalone_html += f'<span class="count-info">{count}次</span>'
 
             standalone_html += """
-                                </div>
-                                <div class="news-title">"""
+</div>
+<div class="news-title">"""
 
             # 标题和链接（复用 news-link 样式）
             escaped_title = html_escape(title)
@@ -504,12 +511,12 @@ def _render_standalone_html(
                 standalone_html += escaped_title
 
             standalone_html += """
-                                </div>
-                            </div>
-                        </div>"""
+</div>
+</div>
+</div>"""
 
         standalone_html += """
-                    </div>"""
+</div>"""
 
     # 渲染 RSS 源（复用相同结构）
     for feed in rss_feeds:
@@ -522,9 +529,9 @@ def _render_standalone_html(
         group_header = f'<span class="standalone-name">{html_escape(feed_name)}</span><span class="meta-sep"> · </span><span class="standalone-count">{len(items)}条</span>'
 
         standalone_html += f"""
-                    {group_open}
-                        <div class="standalone-header">{group_header}
-                        </div>"""
+{group_open}
+<div class="standalone-header">{group_header}
+</div>"""
 
         for j, item in enumerate(items, 1):
             title = item.get("title", "")
@@ -533,10 +540,10 @@ def _render_standalone_html(
             author = item.get("author", "")
 
             standalone_html += f"""
-                        <div class="news-item">
-                            <div class="news-number">{j}</div>
-                            <div class="news-content">
-                                <div class="news-header">"""
+<div class="news-item">
+<div class="news-number">{j}</div>
+<div class="news-content">
+<div class="news-header">"""
 
             # 时间显示（格式化 ISO 时间）
             if published_at:
@@ -554,8 +561,8 @@ def _render_standalone_html(
                 standalone_html += f'<span class="source-name">{html_escape(author)}</span>'
 
             standalone_html += """
-                                </div>
-                                <div class="news-title">"""
+</div>
+<div class="news-title">"""
 
             escaped_title = html_escape(title)
             if safe_report_url(url):
@@ -565,16 +572,16 @@ def _render_standalone_html(
                 standalone_html += escaped_title
 
             standalone_html += """
-                                </div>
-                            </div>
-                        </div>"""
+</div>
+</div>
+</div>"""
 
         standalone_html += """
-                    </div>"""
+</div>"""
 
     standalone_html += """
-                    </div>
-                </div>"""
+</div>
+</div>"""
     return standalone_html
 
 
@@ -595,14 +602,14 @@ def render_report_body(
     # 处理失败ID错误信息
     if report_data["failed_ids"]:
         html += """
-                <div class="news-region error-section">
-                    <div class="error-title">⚠️ 请求失败的平台</div>
-                    <ul class="error-list">"""
+<div class="news-region error-section">
+<div class="error-title">⚠️ 请求失败的平台</div>
+<ul class="error-list">"""
         for id_value in report_data["failed_ids"]:
             html += f'<li class="error-item">{html_escape(id_value)}</li>'
         html += """
-                    </ul>
-                </div>"""
+</ul>
+</div>"""
 
     stats_html = _render_hotlist(report_data, display_mode=display_mode)
     new_titles_html = _render_new_items(report_data, show_new_section=show_new_section)
@@ -682,7 +689,7 @@ def render_daily_html(
         meta_items=(
             ("报告类型", mode_label),
             ("分析模型", display_model),
-            ("生成时间", generated_at),
+            ("报告生成", generated_at),
         ),
     )
     return render_document(

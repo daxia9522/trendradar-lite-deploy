@@ -21,10 +21,12 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from trendradar.ai.client import AIClient
 from trendradar.context import AppContext
-from trendradar.core.loader import load_ai_config, load_config
+from trendradar.core.loader import load_ai_tasks, load_config
 from trendradar.utils.time import DEFAULT_TIMEZONE
 from trendradar.notification import NotificationDispatcher
 from trendradar.report.weekly import render_weekly_html
+from trendradar.storage.history_reader import HistoryReader
+from trendradar.storage.manager import StorageManager
 from weekly_report.collection import collect_news
 from weekly_report.analysis import (
     generate_report,
@@ -75,17 +77,41 @@ def main() -> int:
     parser.add_argument("--end", help="结束日期 YYYY-MM-DD")
     parser.add_argument("--to", help="覆盖收件人，多个用逗号分隔")
     parser.add_argument("--subject", help="覆盖邮件主题")
-    parser.add_argument("--model", default="", help="可选：覆盖 AI_MODEL（本地调试用）")
+    parser.add_argument("--model-id", default="", help="可选：仅调用周报正文任务中指定的模型 ID（本地调试用）")
     parser.add_argument("--dry-run", action="store_true", help="只生成报告文件，不发送邮件")
     args = parser.parse_args()
 
     env = load_runtime_env()
+    manager = None
+    try:
+        try:
+            # This strict load is independent of the display-clock fallback.
+            # Explicit remote storage must never read leftover local databases.
+            config = load_config(str(PROJECT_ROOT / "config" / "config.yaml"))
+            manager = StorageManager.from_config(config, project_root=PROJECT_ROOT)
+            reader = HistoryReader(PROJECT_ROOT, source=manager.get_day_source())
+        except Exception as exc:
+            print(f"周报历史读取失败，已中止: {type(exc).__name__}")
+            return HISTORY_READ_EXIT_CODE
+        return _run_report(args, env, reader)
+    finally:
+        if manager is not None:
+            try:
+                # Resource cleanup only; retention/pull are never report reads.
+                manager.cleanup()
+            except Exception as exc:
+                print(f"周报存储资源清理失败: {type(exc).__name__}")
+
+
+def _run_report(args: argparse.Namespace, env: Dict[str, str], reader: HistoryReader) -> int:
+    """Run the existing AI/artifact/delivery stages with an injected day reader."""
 
     start_date, end_date = resolve_date_range(args.start, args.end)
     try:
         all_news, platform_counter, pipeline_stats = collect_news(
             start_date,
             end_date,
+            reader=reader,
         )
     except Exception as exc:
         # Fail before AI, report writes or email. Keep raw exception text and
@@ -95,13 +121,13 @@ def main() -> int:
     if not all_news:
         print("未读取到可用于生成周报的数据")
         return 1
-    ai_config = load_ai_config(str(PROJECT_ROOT / "config" / "config.yaml"))
-    if (args.model or "").strip():
-        ai_config["MODEL"] = args.model.strip()
-    ai_model = str(ai_config.get("MODEL") or "").strip()
-    if not ai_model:
-        print("未配置 AI 模型，请设置 AI_MODEL 或 config.yaml 的 ai.model")
-        return 2
+    tasks = load_ai_tasks(
+        str(PROJECT_ROOT / "config" / "config.yaml"),
+        task_names=("weekly_analysis", "weekly_keywords"),
+        model_overrides={"weekly_analysis": args.model_id} if args.model_id else None,
+    )
+    ai_config = tasks["weekly_analysis"]
+    ai_model = ai_config["MODEL"]
     client = AIClient(ai_config)
     ok, error = client.validate_config()
     if not ok:
@@ -115,7 +141,7 @@ def main() -> int:
     if report is None:
         return 5
     report_text, themes, used_model = report.report_text, report.themes, report.model
-    keyword_result = generate_keywords(client, start_s, end_s, report_text)
+    keyword_result = generate_keywords(AIClient(tasks["weekly_keywords"]), start_s, end_s, report_text)
     headline_keywords = keyword_result["final"]
     keyword_source = keyword_result["source"]
 

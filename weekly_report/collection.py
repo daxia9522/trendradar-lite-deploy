@@ -601,9 +601,12 @@ def collect_news(
     end_date: datetime,
     max_news: int = MAX_NEWS,
     sim_threshold: float = SIM_THRESHOLD,
+    *,
+    reader: Optional[HistoryReader] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, int], Dict[str, Any]]:
     """采集 → 精确合并 → 分池相似聚合 → 配额截断。"""
-    reader = HistoryReader(PROJECT_ROOT)
+    if reader is None:
+        reader = HistoryReader(PROJECT_ROOT)
     platform_counter: Dict[str, int] = {}
     news_exact: Dict[str, Dict[str, Any]] = {}
     rss_exact: Dict[str, Dict[str, Any]] = {}

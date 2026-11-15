@@ -73,29 +73,19 @@ jobs:
       - name: Install dependencies
         run: python -m pip install --require-hashes -r requirements.lock
 
-      - name: Pull last 7 days data from R2
+      - name: Generate weekly report and send email
         env:
+          # 与本机共用日库读取层，不预拉到本地，也不允许 remote 回退。
+          STORAGE_BACKEND: remote
           S3_BUCKET_NAME: ${{ secrets.S3_BUCKET_NAME }}
           S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
           S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
           S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
           S3_REGION: ${{ secrets.S3_REGION }}
-          PULL_DAYS: "7"
-        run: python deploy/actions/pull_remote_data.py
-
-      - name: Generate weekly report and send email
-        env:
-          # 与日报共用同名 Secrets；按备用槽位绑定模型、地址和 Key
-          AI_API_KEY: ${{ secrets.AI_API_KEY }}
-          AI_API_BASE: ${{ secrets.AI_API_BASE }}
-          AI_MODEL: ${{ secrets.AI_MODEL }}
-          # 模型用英文逗号分隔；未设/空值沿用 config.yaml ai.fallback_models
-          AI_FALLBACK_MODELS: ${{ secrets.AI_FALLBACK_MODELS }}
-          # URL/Key 用 @ 分隔并保留空位；直接 env 注入，不经过 shell 拼接
-          AI_FALLBACK_API_BASE: ${{ secrets.AI_FALLBACK_API_BASE }}
-          AI_FALLBACK_API_KEY: ${{ secrets.AI_FALLBACK_API_KEY }}
-          # 未设置/空值沿用 config.yaml；当前默认 120 秒
-          AI_TIMEOUT: ${{ secrets.AI_TIMEOUT }}
+          # 与日报共用连接组凭据；weekly_analysis/weekly_keywords 在 config.yaml 独立配置
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          CF_API_KEY: ${{ secrets.CF_API_KEY }}
+          CF_API_BASE: ${{ secrets.CF_API_BASE }}
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}

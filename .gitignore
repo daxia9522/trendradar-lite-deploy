@@ -1,6 +1,10 @@
 # runtime / local state
 output/
 .venv/
+/backups/
+/memory/
+/tests/
+/AGENTS.md
 *.egg-info/
 __pycache__/
 *.pyc
@@ -11,6 +15,8 @@ index.html
 
 # local secrets only
 .env
+.env.*
+!.env.example
 /runtime/
 docker/.env
 .env.backups/

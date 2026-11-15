@@ -1,8 +1,8 @@
 # coding=utf-8
 """
-本地存储后端 - SQLite + TXT/HTML
+本地存储后端 - SQLite + TXT
 
-使用 SQLite 作为主存储，支持可选的 TXT 快照和 HTML 报告
+使用 SQLite 作为主存储，支持可选的 TXT 快照
 """
 
 import sqlite3
@@ -11,15 +11,14 @@ import pytz
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
-from trendradar.storage.base import StorageBackend, NewsData, RSSItem, RSSData
+from trendradar.storage.base import StorageBackend, NewsData, RSSData
 from trendradar.storage.sqlite_mixin import SQLiteStorageMixin, connect_sqlite
 from trendradar.utils.time import (
     DEFAULT_TIMEZONE,
     get_configured_time,
     format_date_folder,
-    format_time_filename,
 )
 
 
@@ -30,14 +29,12 @@ class LocalStorageBackend(SQLiteStorageMixin, StorageBackend):
     使用 SQLite 数据库存储新闻数据，支持：
     - 按日期组织的 SQLite 数据库文件
     - 可选的 TXT 快照（用于调试）
-    - HTML 报告生成
     """
 
     def __init__(
         self,
         data_dir: str = "output",
         enable_txt: bool = True,
-        enable_html: bool = True,
         timezone: str = DEFAULT_TIMEZONE,
     ):
         """
@@ -46,12 +43,10 @@ class LocalStorageBackend(SQLiteStorageMixin, StorageBackend):
         Args:
             data_dir: 数据目录路径
             enable_txt: 是否启用 TXT 快照
-            enable_html: 是否启用 HTML 报告
             timezone: 时区配置
         """
         self.data_dir = Path(data_dir)
         self.enable_txt = enable_txt
-        self.enable_html = enable_html
         self.timezone = timezone
         self._db_connections: Dict[str, sqlite3.Connection] = {}
 
@@ -75,9 +70,6 @@ class LocalStorageBackend(SQLiteStorageMixin, StorageBackend):
         """格式化日期文件夹名 (ISO 格式: YYYY-MM-DD)"""
         return format_date_folder(date, self.timezone)
 
-    def _format_time_filename(self) -> str:
-        """格式化时间文件名 (格式: HH-MM)"""
-        return format_time_filename(self.timezone)
 
     def _get_db_path(self, date: Optional[str] = None, db_type: str = "news") -> Path:
         """
@@ -150,37 +142,6 @@ class LocalStorageBackend(SQLiteStorageMixin, StorageBackend):
 
         return success
 
-    def get_today_all_data(self, date: Optional[str] = None) -> Optional[NewsData]:
-        """获取指定日期的所有新闻数据（合并后）"""
-        db_path = self._get_db_path(date)
-        if not db_path.exists():
-            return None
-        return self._get_today_all_data_impl(date)
-
-    def get_latest_crawl_data(self, date: Optional[str] = None) -> Optional[NewsData]:
-        """获取最新一次抓取的数据"""
-        db_path = self._get_db_path(date)
-        if not db_path.exists():
-            return None
-        return self._get_latest_crawl_data_impl(date)
-
-    def detect_new_titles(self, current_data: NewsData) -> Dict[str, Dict]:
-        """检测新增的标题"""
-        return self._detect_new_titles_impl(current_data)
-
-    def is_first_crawl_today(self, date: Optional[str] = None) -> bool:
-        """检查是否是当天第一次抓取"""
-        db_path = self._get_db_path(date)
-        if not db_path.exists():
-            return True
-        return self._is_first_crawl_today_impl(date)
-
-    def get_crawl_times(self, date: Optional[str] = None) -> List[str]:
-        """获取指定日期的所有抓取时间列表"""
-        db_path = self._get_db_path(date)
-        if not db_path.exists():
-            return []
-        return self._get_crawl_times_impl(date)
 
     # ========================================
     # 时间段执行记录（调度系统）
@@ -215,52 +176,9 @@ class LocalStorageBackend(SQLiteStorageMixin, StorageBackend):
 
         return success
 
-    def get_rss_data(self, date: Optional[str] = None) -> Optional[RSSData]:
-        """获取指定日期的所有 RSS 数据"""
-        return self._get_rss_data_impl(date)
-
-    def detect_new_rss_items(self, current_data: RSSData) -> Dict[str, List[RSSItem]]:
-        """检测新增的 RSS 条目"""
-        return self._detect_new_rss_items_impl(current_data)
-
-    def get_latest_rss_data(self, date: Optional[str] = None) -> Optional[RSSData]:
-        """获取最新一次抓取的 RSS 数据"""
-        db_path = self._get_db_path(date, db_type="rss")
-        if not db_path.exists():
-            return None
-        return self._get_latest_rss_data_impl(date)
 
     # ========================================
-    # AI 智能筛选
-    # ========================================
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    def get_all_news_ids(self, date=None):
-        if not self._get_db_path(date, "news").exists():
-            return []
-        return self._get_all_news_ids_impl(date)
-
-    def get_all_rss_ids(self, date=None):
-        if not self._get_db_path(date, "rss").exists():
-            return []
-        return self._get_all_rss_ids_impl(date)
-
-    # ========================================
-    # 本地特有功能：TXT/HTML 快照
+    # 本地特有功能：TXT 快照
     # ========================================
 
     def save_txt_snapshot(self, data: NewsData) -> Optional[str]:
@@ -321,38 +239,6 @@ class LocalStorageBackend(SQLiteStorageMixin, StorageBackend):
             print(f"[本地存储] 保存 TXT 快照失败: {e}")
             return None
 
-    def save_html_report(self, html_content: str, filename: str) -> Optional[str]:
-        """
-        保存 HTML 报告
-
-        新结构：output/html/{date}/{filename}
-
-        Args:
-            html_content: HTML 内容
-            filename: 文件名
-
-        Returns:
-            保存的文件路径
-        """
-        if not self.enable_html:
-            return None
-
-        try:
-            date_folder = self._format_date_folder()
-            html_dir = self.data_dir / "html" / date_folder
-            html_dir.mkdir(parents=True, exist_ok=True)
-
-            file_path = html_dir / filename
-
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(html_content)
-
-            print(f"[本地存储] HTML 报告已保存: {file_path}")
-            return str(file_path)
-
-        except Exception as e:
-            print(f"[本地存储] 保存 HTML 报告失败: {e}")
-            return None
 
     # ========================================
     # 本地特有功能：资源清理

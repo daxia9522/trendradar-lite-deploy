@@ -1,15 +1,8 @@
 # coding=utf-8
-"""Immutable SMTP payloads and explicit, serializable submission receipts.
-
-A receipt records SMTP acceptance, not mailbox delivery. Sensitive fields are
-excluded from repr; callers persist these objects only in private storage.
-"""
+"""In-memory MIME payloads and SMTP submission results."""
 from __future__ import annotations
 
-import base64
-import binascii
 from dataclasses import dataclass, field
-from typing import Any, Mapping
 
 
 def _addresses(value, name: str) -> tuple[str, ...]:
@@ -25,11 +18,7 @@ def _addresses(value, name: str) -> tuple[str, ...]:
 
 @dataclass(frozen=True)
 class PreparedEmail:
-    """One frozen MIME message, with its original authorized envelope.
-
-    Credentials and SMTP connection settings deliberately live outside this
-    object. Retries change only the envelope subset, never these bytes/headers.
-    """
+    """MIME bytes and envelope; no credentials."""
 
     sender: str = field(repr=False)
     recipients: tuple[str, ...] = field(repr=False)
@@ -47,40 +36,10 @@ class PreparedEmail:
             if not isinstance(value, str) or not value or "\r" in value or "\n" in value:
                 raise ValueError(f"Invalid prepared email {name}")
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "version": 1,
-            "sender": self.sender,
-            "recipients": list(self.recipients),
-            "subject": self.subject,
-            "mime_base64": base64.b64encode(self.mime_bytes).decode("ascii"),
-            "message_id": self.message_id,
-            "date": self.date,
-        }
-
-    @classmethod
-    def from_dict(cls, document: Mapping[str, Any]) -> PreparedEmail:
-        try:
-            if document["version"] != 1:
-                raise ValueError("Unsupported prepared email version")
-            return cls(
-                sender=document["sender"], recipients=document["recipients"],
-                subject=document["subject"],
-                mime_bytes=base64.b64decode(document["mime_base64"], validate=True),
-                message_id=document["message_id"], date=document["date"],
-            )
-        except (KeyError, TypeError, ValueError, binascii.Error) as exc:
-            raise ValueError("Invalid prepared email document") from None
-
 
 @dataclass(frozen=True)
 class EmailDeliveryResult:
-    """Disjoint, exhaustive outcomes for the requested envelope of one attempt.
-
-    temporary_failed is safe to retry after the caller durably records this
-    receipt. unknown is never an automatic retry candidate. RCPT acceptance
-    alone is not acceptance here: DATA must receive its final 250 response.
-    """
+    """One SMTP attempt; acceptance is not mailbox delivery."""
 
     configured: bool
     requested: tuple[str, ...] = field(default=(), repr=False)
@@ -111,23 +70,3 @@ class EmailDeliveryResult:
 
     def __bool__(self) -> bool:
         raise TypeError("请显式检查 configured、sent、partially_delivered 或逐收件人结果")
-
-    def to_dict(self) -> dict[str, Any]:
-        return {"version": 1, "configured": self.configured, **{
-            name: list(getattr(self, name)) for name in (
-                "requested", "accepted", "temporary_failed", "permanent_failed", "unknown"
-            )
-        }}
-
-    @classmethod
-    def from_dict(cls, document: Mapping[str, Any]) -> EmailDeliveryResult:
-        try:
-            if document["version"] != 1:
-                raise ValueError("Unsupported receipt version")
-            return cls(configured=document["configured"], **{
-                name: document[name] for name in (
-                    "requested", "accepted", "temporary_failed", "permanent_failed", "unknown"
-                )
-            })
-        except (KeyError, TypeError, ValueError):
-            raise ValueError("Invalid SMTP receipt document") from None

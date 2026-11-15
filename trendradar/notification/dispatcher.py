@@ -1,8 +1,8 @@
 # coding=utf-8
-"""Prepare immutable report emails, then submit explicit envelope attempts."""
+"""Shared report email preparation and sending."""
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Optional, Sequence
+from typing import Any, Callable, Dict, Optional
 
 from .models import EmailDeliveryResult, PreparedEmail
 from .senders import prepare_email, send_prepared_email
@@ -44,17 +44,10 @@ class NotificationDispatcher:
             print(f"[邮件] 报告准备失败（{type(exc).__name__}）")
             return None
 
-    def send_prepared(
-        self, prepared: PreparedEmail, *, recipients: Optional[Sequence[str]] = None,
-    ) -> EmailDeliveryResult:
-        """Submit one attempt using current transport credentials and frozen payload.
-
-        The configured sender/recipient list is intentionally not reapplied: a
-        pending report has its own authorized original envelope. The caller must
-        durably claim the attempt and then persist its returned receipt.
-        """
+    def send_prepared(self, prepared: PreparedEmail) -> EmailDeliveryResult:
+        """Send the prepared message once."""
         return send_prepared_email(
-            prepared, recipients=recipients, password=self.config.get("EMAIL_PASSWORD", ""),
+            prepared, password=self.config.get("EMAIL_PASSWORD", ""),
             custom_smtp_server=self.config.get("EMAIL_SMTP_SERVER") or None,
             custom_smtp_port=self.config.get("EMAIL_SMTP_PORT") or None,
         )
@@ -64,7 +57,7 @@ class NotificationDispatcher:
         period_name: Optional[str] = None, subject_override: Optional[str] = None,
         sender_name_override: Optional[str] = None,
     ) -> EmailDeliveryResult:
-        """Prepare+send convenience for non-daily consumers; no implicit retry."""
+        """Prepare and send one report."""
         prepared = self.prepare_report(
             report_type, html_file_path, period_name=period_name,
             subject_override=subject_override, sender_name_override=sender_name_override,

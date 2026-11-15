@@ -1,320 +1,265 @@
 # TrendRadar Lite Deploy
 
-> 源码版本 v26.10.05 ｜ [Releases](https://github.com/daxia9522/trendradar-lite-deploy/releases) ｜ 镜像 `ghcr.io/daxia9522/trendradar-lite-deploy`
+> 源码版本 **v26.11.15** ｜ [Releases](https://github.com/daxia9522/trendradar-lite-deploy/releases) ｜ 镜像 `ghcr.io/daxia9522/trendradar-lite-deploy`
 
-聚合 11 平台热榜与 RSS → 关键词筛选 → AI 事件分析 → HTML 日报/周报邮件推送。
+聚合热榜与 RSS → 六栏筛选 → AI 日报/周报分析 → HTML 与邮件推送。基于 [sansan0/TrendRadar](https://github.com/sansan0/TrendRadar) 的非官方精简发行版。
 
-基于 [`sansan0/TrendRadar`](https://github.com/sansan0/TrendRadar) 的**非官方**精简部署发行版。
+## 选择部署方式
 
-## 怎么选部署方式
-
-| 方式 | 适合 | 你需要有 |
+| 方式 | 适合 | 前置条件 |
 |---|---|---|
-| [原生 Linux](#方式一原生-linux) | 小内存 VPS（推荐）；任务跑完即退出，无常驻进程 | Python 3.10+、systemd |
-| [GitHub Actions](#方式二github-actions) | 不想养服务器；云端按时执行 | R2/S3 存储桶（数据持久化）+ 外部定时触发 |
-| [Docker Compose](#方式三docker-compose) | 已有 Docker/NAS 环境；直接拉取预构建镜像 | Docker Engine + Compose v2 |
+| 原生 Linux | VPS、本地生产与源码维护 | Python 3.10+、venv、systemd |
+| GitHub Actions | 云端执行，由外部定时器触发 | GitHub仓库、R2/S3、邮件及AI凭据 |
+| Docker Compose | NAS或已有Docker环境 | Docker Engine、Compose v2 |
 
-原生 Linux 安装使用**纯终端分组菜单**，安装后输入以下命令可随时重新配置：
+克隆仓库后，可运行 `./install.sh` 选择部署方式。下面的配置、安装、触发、维护和日志说明均可直接在本页查阅。
 
-```bash
-trendradar
-```
-
-Docker 使用同一套数字分组菜单，安装后输入以下命令重新配置：
-
-```bash
-trendradar-docker
-```
-
-克隆仓库后可用统一入口选择部署方式：
-
-```bash
-./install.sh
-```
-
-## 共同配置
-
-三种方式共用同一组核心文件：
+## 配置文件与变量
 
 | 文件 | 作用 |
 |---|---|
-| `config/config.yaml` | 平台、报告、AI、存储主配置（模型/地址/Key 留空占位，一律由环境变量注入） |
-| `config/timeline.yaml` | 每日推送窗口（07/12/18/22 点，北京时间） |
-| `config/frequency_words.txt` | 筛选关键词 |
-| `config/ai_analysis_prompt.txt` | AI 分析提示词 |
+| `config/config.yaml` | 新闻源、报告、存储、模型连接组与四项AI任务 |
+| `config/timeline.yaml` | 日报推送窗口和执行策略 |
+| `config/frequency_words.txt` | 关键词筛选及AI筛选失败时的兜底规则 |
+| `config/ai_filter/tags.yaml` | 六栏描述及展示上限 |
+| `config/ai_filter/prompt.txt` | 标题分类提示词 |
+| `config/ai_analysis_prompt.txt` | 日报分析提示词 |
+| `config/weekly_ai_prompt.txt` | 周报分析结构与事件三级标题要求 |
+| `config/weekly_keyword_prompt.txt` | 周报短标签与原文引用要求 |
 
-本地部署的密钥保存在环境文件中；GitHub Actions 使用仓库 Secrets。不要把密钥写入 YAML 或提交到 Git。原生 Linux 使用 `~/.config/trendradar-lite/env`，Docker 使用 `runtime/env`；Docker 根目录的 `.env` 仅用于镜像和部署参数。首次安装直接运行安装器，无需复制 `.env.example`。
+原生 Linux 将私有环境变量保存在 `~/.config/trendradar-lite/env`（权限0600）；Docker使用宿主机 `runtime/env`；Actions使用仓库Secrets。首次安装由菜单填写，无需手工复制模板。密钥及私有接口地址不写入YAML、不提交Git。
 
-### AI
+原生部署设置 `XDG_CONFIG_HOME` 时，env与用户unit保存到该配置根目录下；安装、配置和维护时使用一致的环境。
 
-开关类变量填 `true/false`，也接受 `1/0`（不区分大小写，首尾空格会忽略）；留空时使用默认配置，其他值会报错。`R2_BACKUP_ENABLED` 留空表示关闭备份；`DOCKER_CONTAINER` 由 Docker 自动设置，无需手动填写。
+### AI连接与功能开关
 
-| 变量 | 必填 | 说明 |
-|---|---|---|
-| `AI_API_KEY` | **必填**（启用 AI 时） | 中转站或官方 Key |
-| `AI_MODEL` | **必填**（启用 AI 时） | LiteLLM `provider/model` 格式，如 `gemini/gemini-3.5-flash`、`openai/实际模型名` |
-| `AI_API_BASE` | 中转站必填；官方留空 | 中转根地址**原样使用**，项目不自动追加 `/v1` |
-| `AI_FALLBACK_MODELS` | 可选 | **英文逗号**分隔备用模型；首项同时作周报关键词便宜模型 |
-| `AI_FALLBACK_API_BASE` | 可选，新列表模式 | **`@` 分隔**各备用地址，与模型按位置对应，保留空位 |
-| `AI_FALLBACK_API_KEY` | 可选，新列表模式 | **`@` 分隔**各备用 Key；整列作为一个秘密，仅通过 env / Secrets 输入 |
-| `AI_ANALYSIS_ENABLED` | 可选，默认 `false` | 是否启用日报 AI 分析 |
-| `AI_TIMEOUT` | 可选，默认 `120` | 日报、周报正文及周报关键词共用的单次请求超时（秒），不是整条模型链的总时限 |
+| 变量 | 填写方法 |
+|---|---|
+| `GEMINI_API_KEY` | Gemini连接组API Key，供组内模型共用 |
+| `CF_API_KEY` | CF连接组API Key |
+| `CF_API_BASE` | CF完整HTTP(S)接口根地址，保留所需路径，不自动拼接 `/v1` |
+| `AI_ANALYSIS_ENABLED` | 日报AI分析开关：`true/false/1/0`，留空沿用YAML；安装模板默认false |
+| `AI_FILTER_ENABLED` | AI六栏筛选开关：`true/false/1/0`，留空沿用YAML；安装模板默认false |
+| `GEMINI_API_KEY_FILE` / `CF_API_KEY_FILE` | 原生部署可选：私有密钥文件路径，须在对应组改用 `api_key_file_env` 引用 |
 
-#### 备用列表规则
-
-<details>
-<summary>展开查看备用列表规则与配置示例</summary>
-
-只增加地址、Key 两列，不需要 `AI_FALLBACK_1_*` 等编号变量。主模型仍由 `AI_MODEL` / `AI_API_BASE` / `AI_API_KEY` 独立配置，**不占备用列表的一项**。
-
-- **唯一解析规则**：所有备用都按位置绑定；两个鉴权列都空时只是 N 个空槽，不进入另一种模式。任一非空地址/Key 列都必须恰好 N 项。模型严格按英文逗号切分、空模型报错、重复模型保留原槽位。
-- **逐项对应**：模型列按英文逗号切分，URL / Key 列按 `@` 切分。`@url` 是 `[空,url]`，`url@` 是 `[url,空]`，`@` 是 `[空,空]`，`url@@url` 保留中间空项。不能过滤开头、结尾或连续分隔符产生的空位。
-- **严格数量**：最终备用模型数为 N，每个有内容的地址 / Key 列必须恰好 N 项。环境变量中的模型列表有内容时覆盖 YAML，三列均按这一最终顺序对齐；无备用模型却填新列、连续 / 首尾逗号产生空模型、非法 `provider/model`、列数不足或超出都报错，不能截断、补齐部分列或向左移位。校验不能识别人工把两把合法 Key 顺序写反，填写时仍须逐槽核对。
-- **空 URL 槽**：表示该 provider 的**官方默认地址**，不是继承主接口的自定义中转。主备想用同一中转时，在备用槽明确填写相同 URL。`openai/` 空 URL 也是官方默认，不代表任意兼容中转；第三方地址请显式填写。URL 原样使用、不自动追加 `/v1`，必须为合法 HTTP(S)，不能含内嵌 `user:password` 凭据；Gemini/OpenAI 默认地址由客户端显式固定，不受 SDK 的地址环境变量覆盖；其他 provider 需显式填写地址。
-- **空 Key 槽**：仅在**同 provider 且同有效主端点**时继承主 Key。两侧均为同 provider 的官方默认地址可继承；两个显式地址作保守规范化比较。默认地址与手填地址不能可靠判定相同时必须显式填 Key。同 provider 但不同 URL 也必须分别配置 Key，并隔离 `headers` / `extra_headers` 等鉴权信息；不能只看模型前缀。不会从另一个备用继承 Key，也不按模型名去重，同名模型可以指向不同端点。
-- **保留分隔符**：URL、Key 的**单个值内任何 `@` 都不支持**，本版没有转义语法，也不要擅自编码或改写 Key。模型列只按逗号分隔，`openai/@cf/...` 这类模型名不受影响。
-- **错误范围**：列数或空模型会阻止按猜测运行；单个备用缺独立 Key 或 URL 不合法会标记该槽不可用，诊断不显示 Key / URL 原文。关键词始终选择原始备用 1；该槽不可用时沿既有规则降级，不会偷偷换到备用 2。未配备用时关键词使用主模型。
-
-**示例一：两个官方 Gemini 共用主 Key**
-
-以下均为示例模型和占位 Key，使用前按服务商实际支持替换。备用地址、Key 留空，表示使用官方端点并继承主 Key：
-
-```dotenv
-AI_MODEL=gemini/gemini-3.5-flash
-AI_API_BASE=
-AI_API_KEY=synthetic-gemini-key
-AI_FALLBACK_MODELS=gemini/gemini-3.5-flash-lite
-AI_FALLBACK_API_BASE=
-AI_FALLBACK_API_KEY=
-```
-
-若再加一个独立中转备用，只需调整三列；前导 `@` 保留第一备用 Gemini 的空槽：
-
-```dotenv
-AI_FALLBACK_MODELS=gemini/gemini-3.5-flash-lite,openai/relay-model
-AI_FALLBACK_API_BASE=@https://relay.example.invalid/v1
-AI_FALLBACK_API_KEY=@synthetic-relay-key
-```
-
-**示例二：多个 OpenAI-compatible 接口各用独立地址 / Key**
-
-即使都使用 `openai/`，不同端点仍需分别填写地址和 Key：
-
-```dotenv
-AI_MODEL=openai/primary-model
-AI_API_BASE=https://primary.example.invalid/v1
-AI_API_KEY=synthetic-primary-key
-AI_FALLBACK_MODELS=openai/fallback-model-a,openai/fallback-model-b
-AI_FALLBACK_API_BASE=https://backup-a.example.invalid/v1@https://backup-b.example.invalid/v1
-AI_FALLBACK_API_KEY=synthetic-backup-a-key@synthetic-backup-b-key
-```
-
-日报和周报正文共用这条有序模型链；周报短标签统一由第一备用模型独立生成，并绑定该项完整的模型/地址/密钥身份。未配置第一备用时跳过标签生成，不改用主模型；标签失败可为空，不影响已有正文与邮件发送决策。
-
-**填写与密钥保存**
-
-- 原生、Docker 菜单及环境文件遵循同一规则；菜单直接回车保留整列，清空第一槽并保留第二槽可填 `@后续值`。Key 输入和预览不回显。
-- `AI_FALLBACK_API_KEY` 整列只放 env / Actions 同名 Secret，不写 YAML、不提交 Git；暂无 `AI_FALLBACK_API_KEY_FILE`。
-- 主 Key 可用 `AI_API_KEY_FILE`：仅限权限 `0400/0600`、路径无符号链接的普通文件，直接环境变量 Key 优先。Docker 中该文件须在容器内可读；Actions 直接用同名 Secret。
-- 旧预构建镜像须先升级到包含此功能的版本，修改环境文件不会更新镜像代码。
-
-</details>
+密钥文件须为无符号链接路径中的普通文件，权限0400/0600。菜单不会读取密钥文件或调用模型。
 
 ### 邮件
 
-| 变量 | 必填 | 说明 |
+| 变量 | 必填 | 填写方法 |
 |---|---|---|
-| `EMAIL_FROM` | **必填** | 发件人 |
-| `EMAIL_PASSWORD` | **必填** | SMTP 密码/授权码（163/189/QQ 填授权码；Gmail 填应用专用密码） |
-| `EMAIL_TO` | **必填** | 收件人（多个用英文逗号分隔） |
-| `EMAIL_SMTP_SERVER` | 可选，如 `smtp.163.com` | 不填则按发件域名自动识别 |
-| `EMAIL_SMTP_PORT` | 可选，如 `465` 或 `587` | 与 SERVER 成对配置，都填或都不填 |
+| `EMAIL_FROM` | 是 | 发件邮箱 |
+| `EMAIL_PASSWORD` | 是 | SMTP密码或邮箱授权码；iCloud使用App专用密码 |
+| `EMAIL_TO` | 是 | 收件邮箱，多个地址用英文逗号分隔 |
+| `EMAIL_SMTP_SERVER` | 否 | SMTP服务器；与端口成对设置 |
+| `EMAIL_SMTP_PORT` | 否 | SMTP端口，例如465或587 |
 
-> PS：SMTP 自动识别内置 gmail / qq / 163 / vip.163 / 126 / sina / sohu / 189 / aliyun / yandex / outlook（含 hotmail、live）/ icloud 域名，其余回退 `smtp.<发件域名>:587`。常见邮箱只需上面三个必填项，SMTP 两项可不配。
+SMTP服务器和端口都留空时按发件邮箱域名识别；内置支持Gmail、QQ、163/126、Outlook/Hotmail、iCloud等常见服务。无法自动识别时填写邮箱服务商提供的服务器和端口。
 
----
+### 时间与采集
 
-## 方式一：原生 Linux
+| 变量 | 默认值 | 用途 |
+|---|---|---|
+| `TZ` | `Asia/Shanghai` | 部署时区 |
+| `TIMEZONE` | 可选 | 程序优先读取的时区覆盖；设置时须与 `TZ` 一致 |
+| `CRAWLER_MINUTE` | `5` | 每小时采集分钟，0～59 |
+| `MORNING_PUSH_TIME` | `07:00` | 早间推送 |
+| `NOON_PUSH_TIME` | `12:00` | 午间推送 |
+| `EVENING_PUSH_TIME` | `18:00` | 傍晚推送 |
+| `DAILY_SUMMARY_TIME` | `22:00` | 全天汇总 |
+| `WEEKLY_WEEKDAY` | `6` | 周报星期：0=周一，6=周日 |
+| `WEEKLY_HOUR` / `WEEKLY_MINUTE` | `12` / `30` | 周报时、分 |
+| `PLATFORMS_API_URL` | 留空沿用YAML | 热榜主接口 |
+| `PLATFORMS_API_FALLBACK_URLS` | 留空沿用YAML | 多个备用接口用英文逗号分隔 |
+| `CONFIG_PATH` | `config/config.yaml` | 日报及配置加载的可选配置路径；当前周报固定读取仓库 `config/config.yaml` |
 
-推荐 Debian 12+ / Ubuntu 22.04+。最小化系统先补依赖：
+推送时刻是窗口起点，持续到该小时 `:59`；四档推送须位于不同小时。非推送整点只采集入库，不调用筛选/分析模型或生成邮件。实际时间以已安装timer或Docker调度配置为准。
 
-```bash
-sudo apt update && sudo apt install -y git python3 python3-venv
+### 存储与R2/S3变量
+
+| 变量 | 填写方法 |
+|---|---|
+| `STORAGE_BACKEND` | 原生可选 `local`、`remote`或`auto`；Actions固定remote，官方Docker固定local |
+| `S3_BUCKET_NAME` | 已创建的存储桶名称 |
+| `S3_ENDPOINT_URL` | S3接口根地址；R2通常为 `https://<account-id>.r2.cloudflarestorage.com` |
+| `S3_ACCESS_KEY_ID` | 对象存储Access Key ID |
+| `S3_SECRET_ACCESS_KEY` | 对象存储Secret Access Key |
+| `S3_REGION` | R2用 `auto`；其他S3服务按平台填写 |
+
+- `local`：新闻/RSS日库保存在 `storage.local.data_dir`，默认 `output/`。
+- `remote`：新闻/RSS日库直接保存在R2/S3的 `news/`、`rss/`；读取时下载到临时目录，需配置S3变量。
+- `auto`：本机选local；Actions远程配置齐全时选remote，否则选local。Actions业务工作流明确使用remote。
+- 官方Docker的运行配置锁定local，应用数据保存在持久卷中。
+- 同一组日库只保留一个采集写入端；交接前先停原写入端，核对所需历史日库，再启新端。
+
+<details>
+<summary>点击展开：如何获取 R2/S3 凭据（以 Cloudflare R2 为例）</summary>
+
+1. 登录 [Cloudflare Dashboard](https://dash.cloudflare.com/)，进入 **Storage & databases → R2 → Overview**，按页面提示开通R2订阅并完成付款信息设置。R2有免费月度额度，超出后按用量计费，以开通页面和[官方价格](https://developers.cloudflare.com/r2/pricing/)为准。
+2. 点击 **Create bucket** 创建存储桶，例如 `trendradar-data`，记录桶名。
+3. 回到R2概览，在 **Account Details → API Tokens → Manage** 创建R2 API token。可按账户权限选择Account或User token。
+4. 权限选择 **Object Read & Write（对象读和写）**，并限定到本项目的存储桶；本程序通过S3接口读写对象，不需要创建或删除桶的管理员权限。
+5. 创建后立即保存 **Access Key ID** 和 **Secret Access Key**；Secret Access Key只在创建时显示，不能用普通Cloudflare API token字符串替代这两项。
+6. 从桶连接信息或账户详情取得 **S3 API endpoint**。通常为 `https://<account-id>.r2.cloudflarestorage.com`；使用特定jurisdiction的桶时，采用控制台给出的对应地址。
+7. 在本机配置菜单或GitHub仓库Secrets中填写：
+   - `S3_BUCKET_NAME`：桶名。
+   - `S3_ACCESS_KEY_ID`：Access Key ID。
+   - `S3_SECRET_ACCESS_KEY`：Secret Access Key。
+   - `S3_ENDPOINT_URL`：S3 API endpoint。
+   - `S3_REGION`：`auto`。
+
+只在受保护的环境配置或Secrets页面填写真实凭据。需要轮换时先创建新凭据、更新配置并确认读写，再撤销旧凭据。官方入口：[R2认证说明](https://developers.cloudflare.com/r2/api/tokens/)。
+
+</details>
+
+## AI模型、筛选与周报
+
+### 模型组与任务
+
+`model_groups` 定义连接及模型ID，`tasks` 决定每项任务使用哪些模型。
+
+```yaml
+model_groups:
+  gemini_official:
+    api_key_env: GEMINI_API_KEY
+    models:
+      g4_hydrogen: gemini/gemini-4-hydrogen
+      g35_lite: gemini/gemini-3.5-flash-lite
+      g31_lite: gemini/gemini-3.1-flash-lite
+  cf:
+    api_base_env: CF_API_BASE
+    api_key_env: CF_API_KEY
+    models:
+      qwen_cf: openai/@cf/qwen/qwen3.8-27b
 ```
 
-安装与验证：
+每组地址选择 `api_base`（字面地址）或 `api_base_env`（变量名），二选一；凭据选择 `api_key_env` 或 `api_key_file_env`，二选一。Gemini原生组可省略地址或写 `api_base: ""`；显式地址引用缺失、为空或非法时会报错。同组模型须使用同一协议，模型ID须全局唯一。
+
+配置与源码/镜像版本须匹配，字段按本页的模型组与任务结构填写；无效或冲突配置会明确报错。新增Actions连接组时，在对应工作流的 `env` 中显式注入该组引用的Secret；只在仓库设置页面新增Secret不会自动传入任务。
+
+| 任务 | 当前候选链 | 用途与参数 |
+|---|---|---|
+| `ai_filter` | `g35_lite → g31_lite` | 六栏标题分类，使用默认思考设置 |
+| `daily_analysis` | `g4_hydrogen → g35_lite → qwen_cf` | 日报正文；Gemini low，Qwen关闭thinking |
+| `weekly_analysis` | `g4_hydrogen → g35_lite → qwen_cf` | 周报正文，任务参数与日报独立 |
+| `weekly_keywords` | `g35_lite` | 周报短标签，单模型、默认思考设置 |
+
+每项任务设置 `timeout`、`retry` 和 `model_chain`；链中每个节点为 `model_id` 与可选 `request_params`。当前请求超时120秒，Gemini正文参数为 `reasoning_effort: low`，Qwen为 `extra_body.chat_template_kwargs.enable_thinking: false`。请求参数只能控制生成内容，不能覆盖连接地址、密钥、TLS或SDK重试。
+
+筛选每候选最多2次，失败后等待5秒，总共最多4次。正文普通错误最多初次加2次，超时后切换下一候选。调整重试次数或模型链前，应核对平台限流。
+
+### 六栏筛选与缓存
+
+栏目为国内、国际、科技、财经、文娱、体育，默认展示上限20、20、15、15、10、10；相关度门槛默认为0.7。栏目和上限在 `config/ai_filter/tags.yaml` 调整。
+
+全部未缓存标题整包分类，不按固定条数拆批；全命中缓存时不调用分类模型。AI筛选独立于关键词规则；关闭AI或所有候选失败时，整轮使用 `frequency_words.txt` 筛选。
+
+归类后按热度、展示去重及限额形成最终名单，同时用于正文分析与HTML。默认主榜最多90条、新增最多40条；独立速览只展示。相关度用于判断栏目匹配，不代替热度排序。
+
+缓存默认位于 `output/ai_filter/cache.sqlite3`，随 `storage.local.data_dir` 调整，不上传R2。缓存用于减少重复分类请求，30天前的记录会自动清理。
+
+### 周报正文与关键词
+
+周报从所选日期的历史日库整理素材，正文与短标签分别调用模型。正文固定六个章节，第二节每个事件名使用 `### 序号. 主题名称`，下方写“发生了什么、为什么重要、后续怎么看”。格式在 `config/weekly_ai_prompt.txt` 维护。
+
+短标签附带正文中的逐字引用，数量按内容确定。标签与引用随周报保存在 `output/weekly-ai-reports/`；页头显示正文实际使用的模型。
+
+## 原生 Linux
+
+推荐Debian/Ubuntu；安装系统依赖后，以运行服务的同一用户操作：
 
 ```bash
+sudo apt update
+sudo apt install -y git python3 python3-venv
 git clone https://github.com/daxia9522/trendradar-lite-deploy.git
 cd trendradar-lite-deploy
-./deploy/linux/install.sh        # 终端配置 → 建 venv → 装 timer 与命令入口
-./deploy/linux/status.sh         # 按需查看状态并执行本地配置体检
+./deploy/linux/install.sh
+./deploy/linux/status.sh
 ```
 
-安装器会创建并启用 systemd 用户定时器；运行配置保存在 `~/.config/trendradar-lite/env`（权限 `600`），默认时区为 `Asia/Shanghai`。使用 `--no-enable` 可只安装、不启用定时器。设置 `XDG_CONFIG_HOME` 时，配置和 unit 文件会保存到该目录。安装或配置不会发送测试邮件，也不会调用 AI。
+安装器创建 `.venv/`、用户级systemd服务/定时器和 `~/.local/bin/trendradar` 配置入口。只安装而不启用timer时加 `--no-enable`。需要退出SSH后继续运行用户timer时，执行 `loginctl enable-linger "$USER"`（由系统决定是否需要管理员权限）。
 
-重新运行安装器会修正已知旧格式并保留自定义 unit 设置和现有定时计划；仅更新源码不会改变已安装的服务配置。
+### 配置菜单与生效
 
-### 一个命令打开菜单
-
-安装器创建用户级入口 `~/.local/bin/trendradar`。在任意目录执行：
-
-```bash
-trendradar
-```
-
-如果当前 shell 的 PATH 未包含 `~/.local/bin`，使用 `~/.local/bin/trendradar`，或按安装器提示为当前会话设置 PATH；安装器不会修改 shell 启动文件，也不会覆盖其他程序占用的同名入口。
+任意目录运行 `trendradar`；PATH未包含 `~/.local/bin` 时使用完整路径。仓库内也可执行 `./deploy/linux/install.sh --configure`。
 
 ```text
-TrendRadar Lite 配置
 1. 邮件推送
-2. AI 模型与接口
+2. AI 开关与连接组变量
 3. 采集与推送时间
 4. 高级配置
 5. 查看待保存变更
-6. R2/S3 晚间备份（可选）
+6. 存储配置
 s. 保存并应用
 q. 放弃修改并退出
 ```
 
-这是**数字选择式菜单**，不是依次重填所有字段：进入分组，选择字段，输入新值，返回子菜单即可。
-
-- 回车保留当前值；`:cancel` 取消当前字段编辑；可选字段用 `:clear` 清空。
-- 密码和 API Key 输入不回显，菜单和变更预览只显示是否设置，不能查看秘密原文。
-- 邮件分组包含发件人、授权码、收件人和 SMTP；AI 分组包含开关、主模型/接口/密钥及备用模型、地址列表、Key 列表。
-- 时间分组包含每小时采集分钟、早/午/晚推送、全天汇总、周报星期与时间、时区。
-- 高级配置包含 AI 请求超时、热榜数据接口及备用接口；通常保留默认值即可。
-- R2/S3 备份分组默认关闭；可设置夜间时间、回看天数及桶/端点/密钥，复用 Actions 的 `S3_*` 参数。仅对本地数据库部署启用，详见[可选夜间备份](#可选夜间-r2s3-备份)。
-- 修改先保存在内存，返回分组或主菜单不会写文件。修改项标注 `[待保存]`，`5` 查看旧值到新值的变更；恢复原值后不再列出。
-- `s` 校验并确认后备份、保存和应用；`q` 放弃，有改动时要求确认。EOF/Ctrl-C 不保存；首次安装取消后不继续启用任务。
-
-### 保存与生效
+进入分组后逐项修改；回车保留原值，`:cancel` 取消该字段编辑，`:clear` 清空可选字段。密码、密钥及CF地址不回显。修改先保存在内存，预览确认后按 `s` 保存；`q`、EOF或Ctrl-C不保存。
 
 | 修改内容 | 生效方式 |
 |---|---|
-| 邮件、AI、数据接口等 | 下次 oneshot 任务启动读取新 env，不重启当前任务 |
-| 采集、推送、周报时间或时区 | 同步环境覆盖与相关 timer，保持原来的启用/禁用状态 |
-| R2/S3 备份开关、时间 | 管理独立备份 timer；明确开关变化可启停，普通保存/重装保留人工暂停；不手动启动上传服务 |
+| 邮件、AI、采集接口等 | 下次任务启动读取新env，不重启正在运行的任务 |
+| 采集/推送/周报时间、时区 | 同步相关timer，保留原启用/禁用及运行状态 |
+| 存储模式与S3参数 | 下次任务读取新env；选择remote时填写对应桶、地址和凭据 |
 
-仍可使用 `nano ~/.config/trendradar-lite/env` 修改普通环境参数。
+原生 timer 由安装器和配置菜单统一生成、更新，不提供独立生成命令。
 
-### 常用维护
+网页配置需显式执行 `trendradar --web`，默认绑定本机 `127.0.0.1`；远程使用SSH端口转发，地址和端口按命令输出填写。普通终端菜单不会自动开放网络配置页面。
 
-关闭采集、日报和周报定时任务（用安装时的同一用户执行，不加 `sudo`；保留配置与数据）：
+### 定时启停、更新与卸载
+
+程序更新使用下列更新脚本；日常采集不请求远程版本清单。
+
+以下命令按需要单独执行，不要整段一起运行：
 
 ```bash
 systemctl --user disable --now trendradar-lite.timer trendradar-weekly.timer
-```
-
-重新启用并启动定时任务：
-
-```bash
 systemctl --user enable --now trendradar-lite.timer trendradar-weekly.timer
+./deploy/linux/update.sh
+./deploy/linux/uninstall.sh
 ```
 
-关闭 timer 不会中断已经运行的任务；日报和周报 timer 默认 `Persistent=true`，恢复时可能立即触发错过的任务。
+关闭timer不会中断已运行任务；timer设置 `Persistent=true`，恢复时可能立即补触发错过的任务。
 
-若已安装并开启 R2/S3 定时备份，需单独关闭：
+更新器要求已跟踪文件没有未提交修改，并且与上游可快进；更新失败不会自动stash或重写历史。卸载默认保留env及数据；明确要连数据删除时才使用 `./deploy/linux/uninstall.sh --purge-data`。
 
-```bash
-systemctl --user disable --now trendradar-r2-backup.timer
-```
+## GitHub Actions
 
-恢复已安装的备份 timer（配置中仍需保持 `R2_BACKUP_ENABLED=true`）：
+业务工作流 `Get Hot News`（`crawler.yml`）和 `Weekly AI Report`（`weekly-report.yml`）均由 `workflow_dispatch` 触发，可手动或由外部定时器调用。
 
-```bash
-systemctl --user enable --now trendradar-r2-backup.timer
-```
+1. Fork或使用自己有写权限的仓库，确认工作流文件已在默认分支。
+2. 在 **Settings → Secrets and variables → Actions → New repository secret** 填写前文的邮件、AI及R2/S3变量。`CF_API_BASE`也使用同名Secret；本机env不会自动同步。
+3. 日报按需设置 `AI_ANALYSIS_ENABLED`、`AI_FILTER_ENABLED`；周报正文不受日报AI开关控制。
+4. 在 **Actions → 工作流 → Run workflow** 手动运行一次首验。这会真实调用AI并发送邮件。
+5. 外部定时器按需要发送的时刻dispatch。Actions会绕过日报推送时间窗和once去重，不要照搬本机每小时采集频率。
 
-其他维护命令（按需选择，不要整段执行）：
-
-```bash
-trendradar                              # 打开配置菜单（任意目录）
-./deploy/linux/install.sh --configure   # 从仓库目录打开同一菜单，不重装依赖
-./deploy/linux/update.sh                # 更新（脏工作区会被拒绝）
-./deploy/linux/uninstall.sh             # 卸载本安装的入口与 units，保留数据与 env
-./deploy/linux/uninstall.sh --purge-data
-loginctl enable-linger "$USER"          # 退出 SSH 后 timer 仍要运行时需要
-
-cd ~/trendradar-lite-deploy
-.venv/bin/python -m trendradar --force-run   # ⚠️ 真实链路：AI+邮件（绕过推送窗口与 once 去重）
-```
-
-更新器只接受 fast-forward：先确认工作区干净，再显式 `fetch` + `merge --ff-only`；历史分叉、网络失败都会在改动前退出，不 rebase、不 stash，不受 `pull.rebase` 配置影响。
-
-原生 Linux 默认不自动回退到网页。无交互终端时会退出并提示；使用 SSH 请分配终端。网页配置仅通过 `trendradar --web` 或 `./deploy/linux/install.sh --configure --web` 显式开启，默认绑定 `127.0.0.1`；远程访问仍需 SSH 端口转发。
-
-## 方式二：GitHub Actions
-
-无需服务器，数据持久化依赖 R2/S3。触发方式：**仅 `workflow_dispatch`**（可手动或由外部定时调用）。可用云函数定时器或已有主机的 crontab 按计划调用 GitHub API；外部定时能减少对 GitHub 内置定时调度的依赖，但 Actions 仍可能排队。
-
-步骤：
-
-1. Fork 或使用自己有写权限的目标仓库；
-2. 在 `Settings → Secrets and variables → Actions` 配置下表 Secrets（AI 变量按[共同配置](#共同配置)一节）；
-3. 手动运行 `Get Hot News`、`Weekly AI Report` 各一次完成首验（会真实调用 AI 和发送邮件）；
-4. 外部定时器按需要的推送时刻 dispatch。
-
-### AI Secrets（日报 / 周报共用）
-
-两条业务 workflow 均在各自的运行步骤中，从**同名 Actions Secrets** 注入以下变量，沿用既有 Secrets 约定，不改用 Actions Variables：
-
-| Secret | 用途 |
-|---|---|
-| `AI_MODEL` | 主模型，如 `gemini/gemini-3.5-flash` |
-| `AI_API_KEY` | 主接口 Key（Gemini 方案用官方 Key） |
-| `AI_API_BASE` | 主接口地址；Gemini 官方留空 |
-| `AI_FALLBACK_MODELS` | 英文逗号分隔，按槽位顺序填写；有内容时覆盖 YAML 备用链 |
-| `AI_FALLBACK_API_BASE` | `@` 分隔的备用地址列，原样保留开头、结尾与连续空位 |
-| `AI_FALLBACK_API_KEY` | `@` 分隔的备用 Key 列，整列保存在这一个 Secret 中 |
-| `AI_TIMEOUT` | 日报与周报共用，当前约定 `120`；不设/留空沿用 YAML |
-
-日报另按需配置 `AI_ANALYSIS_ENABLED=true`；周报正文不由这个日报开关控制。未创建的 Secret 在 Actions 中注入为空字符串；两个鉴权列都空时同样按 N 个空项处理，随后逐项校验；`@` 表示两个空槽，不是模式开关。旧 `AI_OPENAI_*` 不再使用，不读取旧 `_FILE`，也不产生新旧冲突。两条 workflow 直接通过步骤 `env` 注入，不拼接 shell 命令、不拆分或过滤 Secret 字符串；列数和鉴权继承遵循上面的共同规则。只在仓库设置页面填写真实 Key，勿写入 YAML、示例、运行命令或日志。
-
-可先执行无网络、无 AI、无邮件的映射与加载验证（已安装项目依赖时）：
-
-```bash
-PYTHONDONTWRITEBYTECODE=1 LITELLM_LOCAL_MODEL_COST_MAP=True python3 -m unittest discover -s tests -p 'test_actions_ai_env.py' -v
-```
-
-此验证清空外部环境、阻断网络 / AI completion / SMTP，只解析 workflow、加载合成配置并检查候选绑定和关键词派生，不运行业务命令。实际 `workflow_dispatch` 以及周报 `--dry-run` **都不是离线 AI 测试**（后者仅禁止发信），真实首验需另行授权。
+同一组日库不要同时启用本机和Actions采集。排队超过30分钟的日报、超过6小时的周报会跳过，手动重跑除外。CI仅检查依赖、语法、入口及容器构建；镜像发布由版本标签或 `Release Container Image` 手动工作流触发。源码版本号不代表同名镜像已经发布。
 
 ### 华为云函数调用模板
 
-创建 Python 事件函数，把下面的代码保存为 `index.py`，执行入口设为 **`index.handler`**。在函数中配置一个环境变量 **`GITHUB_TOKEN`**，值为你的 GitHub PAT；细粒度 PAT 选择目标仓库并授予 **Actions: Read and write**。
+创建Python事件函数，代码文件为 `index.py`，执行入口为 **`index.handler`**。函数环境变量设置 **`GITHUB_TOKEN`**：细粒度GitHub PAT选择目标仓库，并授予 **Actions: Read and write**。按需要设置超时，须大于模板中的20秒HTTP超时。
 
-需要确认的值：
-
-- **`<用户名>`**：替换为你的 GitHub 用户名或组织名。
-- **`<仓库名>`**：替换为目标仓库名，例如 `trendradar-lite-deploy`。
-- **`workflow` / `ref`**：默认 `crawler.yml` / `main`，通常不用改。
-
-**PAT 只限定访问权限，不会自动选择仓库。代码中的 `owner/repo` 必须与 PAT 授权的仓库对应。** 以下沿用原有函数逻辑；使用前将 `<用户名>`、`<仓库名>` 连同尖括号替换为实际值。
+将代码里的 `<用户名>`、`<仓库名>` 替换为实际值。PAT限定的是权限，不会替你选择仓库；`owner/repo`必须属于授权范围。模板默认触发 `crawler.yml` 的 `main` 分支。
 
 <details>
-<summary>展开复制完整 Python 代码</summary>
+<summary>点击展开：完整华为云函数 Python 代码</summary>
 
 ```python
 # -*- coding: utf-8 -*-
-"""GitHub workflow_dispatch。入口: index.handler
-环境变量必填: GITHUB_TOKEN
-默认: <用户名>/<仓库名> / crawler.yml / main
-TIMER 附加或测试事件可覆盖, 例:
- {"workflow":"weekly-report.yml"}
-"""
+"""GitHub workflow_dispatch；入口index.handler，环境变量GITHUB_TOKEN。"""
 import json
 import os
 import urllib.error
 import urllib.request
 
 
-def _dict(v):
-    if isinstance(v, dict):
-        return v
-    if isinstance(v, str) and v.strip():
+def _dict(value):
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
         try:
-            o = json.loads(v)
-            return o if isinstance(o, dict) else {}
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
         except json.JSONDecodeError:
             return {}
     return {}
@@ -322,19 +267,17 @@ def _dict(v):
 
 def handler(event, context):
     token = os.environ["GITHUB_TOKEN"]
-    ev = _dict(event)
-    cfg = _dict(ev.get("user_event")) or ev
-
-    owner = cfg.get("owner") or "<用户名>"
-    repo = cfg.get("repo") or "<仓库名>"
-    workflow = cfg.get("workflow") or cfg.get("workflow_id") or "crawler.yml"
-    ref = cfg.get("ref") or "main"
-
+    payload = _dict(event)
+    config = _dict(payload.get("user_event")) or payload
+    owner = config.get("owner") or "<用户名>"
+    repo = config.get("repo") or "<仓库名>"
+    workflow = config.get("workflow") or config.get("workflow_id") or "crawler.yml"
+    ref = config.get("ref") or "main"
     url = (
         f"https://api.github.com/repos/{owner}/{repo}"
         f"/actions/workflows/{workflow}/dispatches"
     )
-    req = urllib.request.Request(
+    request = urllib.request.Request(
         url,
         data=json.dumps({"ref": ref}).encode("utf-8"),
         method="POST",
@@ -347,272 +290,137 @@ def handler(event, context):
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            return {"ok": resp.status == 204, "status": resp.status, "workflow": workflow}
-    except urllib.error.HTTPError as e:
-        return {
-            "ok": False,
-            "status": e.code,
-            "workflow": workflow,
-            "error": e.read().decode("utf-8", errors="replace"),
-        }
-    except Exception as e:
-        return {"ok": False, "status": 0, "workflow": workflow, "error": str(e)}
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return {"ok": response.status == 204, "status": response.status, "workflow": workflow}
+    except urllib.error.HTTPError as error:
+        return {"ok": False, "status": error.code, "workflow": workflow}
+    except Exception as error:
+        return {"ok": False, "status": 0, "error_type": type(error).__name__}
 ```
 
 </details>
 
-在华为云 TIMER 的“附加信息”或函数测试事件中填写：
+创建TIMER触发器时，在“附加信息”填写：
 
-- 日报：`{}`（使用代码中的默认配置）。
+- 日报：`{}`。
 - 周报：`{"workflow":"weekly-report.yml"}`。
-- 不改代码也可通过事件指定目标，填写前替换占位符：`{"owner":"<用户名>","repo":"<仓库名>","workflow":"crawler.yml","ref":"main"}`。
+- 指定仓库和分支：`{"owner":"用户名","repo":"仓库名","workflow":"crawler.yml","ref":"main"}`。
 
-返回 `ok: true, status: 204` 表示 GitHub 已接受触发请求，实际执行结果到仓库 **Actions** 查看。当前外部 dispatch 也会绕过分析/推送时间窗和 once 去重，因此按需要的推送时刻触发，不要照搬原生 Linux 的每小时采集频率。
+先通过函数测试事件检查返回，再配置定时触发；每次成功dispatch都会真正启动对应业务。`ok: true, status: 204` 只表示GitHub接受触发请求，运行和邮件结果到Actions日志查看。常见错误：401检查PAT及有效期，403检查仓库权限，404检查仓库/工作流路径，422检查分支与工作流是否支持dispatch。
 
-### R2/S3 Secrets（Actions 必填）
+## Docker Compose
 
-| 分组 | Secret | 说明 |
-|---|---|---|
-| R2/S3 | `S3_BUCKET_NAME` | 桶名 |
-| R2/S3 | `S3_ACCESS_KEY_ID` | Access Key ID |
-| R2/S3 | `S3_SECRET_ACCESS_KEY` | Secret Access Key |
-| R2/S3 | `S3_ENDPOINT_URL` | 如 `https://<account-id>.r2.cloudflarestorage.com` |
-| R2/S3 | `S3_REGION` | 可选，默认 `auto` |
+要求Docker Engine和Compose v2。按 [Docker官方安装说明](https://docs.docker.com/engine/install/)安装；非root用户需具备Docker权限，加入docker组意味着较高的主机权限。
 
-<details>
-<summary>👉 点击展开：如何获取 R2/S3 凭据（以 Cloudflare R2 为例）</summary>
-
-**⚠️ 前置条件：** 根据 Cloudflare 平台规则，开通 R2 需绑定支付方式。
-
-- **目的**：仅作身份验证（Verify Only），**不产生扣费**。
-- **支付**：支持双币信用卡或国区 PayPal。
-- **用量**：R2 免费额度（10GB 存储/月）足以覆盖本项目日常运行。
-
-**操作步骤：**
-
-1. **创建存储桶**：登录 [Cloudflare Dashboard](https://dash.cloudflare.com/) → 左侧 `R2 对象存储` → 右上角 `创建存储桶`（如 `trendradar-data`）。
-2. **创建 API 令牌**：`概述` → `Account Details` → `Manage`（Manage R2 API Tokens）→ `创建 Account API 令牌`。
-   - 权限选择 `管理员读和写`；
-   - 建议 `仅适用于指定存储桶` 并选中你的桶；
-   - 同时可见 `S3 API` 地址：`https://<account-id>.r2.cloudflarestorage.com`（即 `S3_ENDPOINT_URL`）。
-3. **填入 GitHub Secrets**：
-   - `S3_BUCKET_NAME` = 桶名
-   - `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` = 创建后立即复制的两个密钥（只显示一次）
-   - `S3_ENDPOINT_URL` = 上一步 S3 API 地址
-   - `S3_REGION` = `auto`（可选）
-
-</details>
-
-Actions 的日报和周报都由手动或外部 `workflow_dispatch` 触发，不受 `timeline.yaml` 时间窗限制；请按需要发送的时刻触发，避免重复运行造成重复邮件。排队过久的任务会自动跳过（日报 30 分钟、周报 6 小时），手动重跑除外。
-
-## 方式三：Docker Compose
-
-**Docker 使用与原生同款的数字分组菜单，配置保存在宿主机 `runtime/env`；保存配置不会拉取/构建镜像，也不会重启或重建服务容器。**
-
-| 方式 | 配置操作 | 配置文件 |
-|---|---|---|
-| 原生 Linux | 输入 `trendradar`，分组菜单 | `~/.config/trendradar-lite/env` |
-| Docker | 输入 `trendradar-docker`（或 `./deploy/docker/install.sh --configure`），同一套分组菜单；非交互环境可用网页表单 | 项目目录 `runtime/env`（只读挂载进容器） |
-
-分组菜单支持邮件、AI、采集与推送时间、高级配置的字段级修改、待保存预览、秘密输入不回显与取消退出。与原生版的区别：Docker 菜单不调用 systemd（容器内置调度器），保存后由调度器在下一次任务读取新配置；**修改正在执行的时间参数不会立即补跑当前分钟**。
-
-前置：Docker Engine + Compose v2。全新系统用 Docker 官方脚本安装：
+克隆仓库后，根据实际来源选择一种安装方式，不要两条一起执行：
 
 ```bash
-curl -fsSL https://get.docker.com | sh
-sudo usermod -aG docker "$USER"   # 非 root 用户执行后重新登录
+./deploy/docker/install.sh --build      # 从当前源码构建并安装
+./deploy/docker/install.sh --pull       # 拉取已发布且与配置匹配的镜像
 ```
 
-部署：
+安装器打开分组配置菜单并启动容器。`--no-start`只准备不启动；需要指定界面时加 `--terminal` 或 `--web`。
 
 ```bash
-git clone https://github.com/daxia9522/trendradar-lite-deploy.git
-cd trendradar-lite-deploy
-./deploy/docker/install.sh        # 拉取兼容镜像 → 分组菜单配置 → 启动容器
-docker compose ps trendradar      # 状态应为 healthy
+trendradar-docker                       # 修改runtime/env
+./deploy/docker/install.sh --configure # 仓库内打开同一菜单
+docker compose ps trendradar
 docker compose logs --tail=50 trendradar
 ```
 
-默认使用 `ghcr.io/daxia9522/trendradar-lite-deploy:latest`，首次安装会拉取并校验镜像；已有部署通过下方更新命令获取新版。`latest` 代表最近成功发布的镜像，不等于尚未发布的本地源码。
+Docker的应用变量在宿主机 `runtime/env`，根目录 `.env` 用于部署参数；保存应用配置不拉取/构建镜像、不重建服务容器，调度器在后续任务读取新值。网页配置仅绑定宿主机回环地址，远程使用安装器提示的SSH转发；关闭浏览器标签不等于结束配置进程，应在页面选择取消。
 
-### 镜像更新与源码构建
+| 根 `.env` 变量 | 用途 |
+|---|---|
+| `TREND_RADAR_IMAGE` | 镜像标签；默认 `ghcr.io/daxia9522/trendradar-lite-deploy:latest` |
+| `TRENDRADAR_UID` / `TRENDRADAR_GID` | 安装器沿用已存身份，首次通常取当前非root用户UID/GID；直接Compose回退1000/1000 |
+| `SETUP_PORT` | 配置网页宿主机回环端口，默认8765 |
+| `SETUP_SSH_USER` / `SETUP_SSH_HOST` / `SETUP_SSH_PORT` | 可选，用于配置页面显示SSH转发连接信息 |
 
-在仓库目录按需选择：
+### 镜像更新、调度与数据
 
-```bash
-./deploy/docker/update.sh            # 默认拉取 latest 并重建容器，保留配置与数据
-./deploy/docker/update.sh --build    # 从当前本地源码构建并重建容器，不拉取预构建应用镜像
-```
-
-- **旧部署切换 latest**：将根 `.env` 中的 `TREND_RADAR_IMAGE` 改为 `ghcr.io/daxia9522/trendradar-lite-deploy:latest`，或删除该项，再运行更新命令。同名 shell 环境变量优先级更高，也需检查。
-- 首次从源码安装用 `./deploy/docker/install.sh --build`。从官方 `latest` 或固定 digest 构建时，自动改用并保存 `trendradar-lite-deploy:local`；自定义标签保留。切回预构建镜像时，按上一条重置镜像选择。
-- `latest` 随成功的镜像发布更新：推送版本标签，或在 Actions 的 **Release Container Image** 工作流选择 `main` 手动运行；普通源码推送不会发布镜像。
-
-### 修改配置（无需重建镜像或容器）
-
-任意目录执行（PATH 未含 `~/.local/bin` 时用完整路径）：
+以下更新方式二选一：
 
 ```bash
-trendradar-docker
+./deploy/docker/update.sh --build       # 当前源码构建并重建容器
+./deploy/docker/update.sh --pull        # 拉取所选镜像并重建容器
 ```
 
-或在仓库目录运行 `./deploy/docker/install.sh --configure`。配置保存在 `runtime/env`，也可直接编辑，下次任务读取；**保存配置不会拉取/构建镜像，也不会启动或重建常驻容器**。
+从官方latest或digest执行源码构建时，安装器会将镜像选择保存为本地标签；使用自定义标签时保留该选择。切换预构建版本时在 `.env` 设置所需 `TREND_RADAR_IMAGE`，同时检查同名shell变量是否覆盖它。`latest`指向最近成功发布的镜像，普通源码push不会自动发布镜像。
 
-缺少 `runtime/env` 的旧部署，会在安装或更新时打开菜单，确认后才迁移旧 `.env`。可追加 `--terminal` / `--web` 选择界面；取消不保存配置或启动服务，但不会撤销已完成的拉取/构建。网页请用“取消”结束配置，仅关闭标签页不会退出配置进程。
-
-### 调度与数据
-
-Docker 按 `runtime/env` 中的 `TZ` 调度，默认 `Asia/Shanghai`。常用时间配置及默认值：
-
-| 变量 | 默认值 | 用途 |
-|---|---|---|
-| `CRAWLER_MINUTE` | `5` | 每小时采集分钟 |
-| `MORNING_PUSH_TIME` / `NOON_PUSH_TIME` / `EVENING_PUSH_TIME` | `07:00` / `12:00` / `18:00` | 早间、午间、傍晚推送 |
-| `DAILY_SUMMARY_TIME` | `22:00` | 全天汇总 |
-| `WEEKLY_WEEKDAY` / `WEEKLY_HOUR` / `WEEKLY_MINUTE` | `6` / `12` / `30` | 周报时间（周日 12:30；周日编号为 6） |
-
-推送时刻是窗口起点，窗口持续到该小时 `:59`；四档推送必须设在不同小时，否则配置会被拒绝。成功的分析／推送在各自窗口内只执行一次；错过的任务不会补跑。修改配置后，调度器按新配置运行。
-
-数据保存在 Docker 持久卷 `trendradar-output`；运行配置在宿主机 `runtime/env`。普通卸载保留数据，`--purge-data` 会删除数据卷和运行配置；需要异地备份时见[夜间 R2/S3 备份](#可选夜间-r2s3-备份)。
-
-查看配置和下一次调度：
+Docker使用 `TZ` 与前文时间变量调度；持久化数据保存在 `trendradar-output` 卷。调度器不会因修改时间立即补跑当前分钟，错过的业务任务也不会自动补跑。
 
 ```bash
 docker compose exec trendradar python deploy/docker/entrypoint.py doctor
 docker compose exec trendradar python deploy/docker/entrypoint.py show-schedule
-```
-
-### 定时任务启停
-
-在仓库目录执行。停止容器即关闭全部内置定时任务（含已开启的备份），保留配置和数据，但会终止容器内正在执行的任务：
-
-```bash
 docker compose stop trendradar
-```
-
-恢复已停止的容器及定时调度：
-
-```bash
 docker compose start trendradar
 ```
 
----
+停止容器会终止其中正在执行的任务，操作前确认空闲。普通卸载 `./deploy/docker/uninstall.sh` 保留数据卷、运行配置和源码；`--purge-data`删除数据卷、配置及本安装入口；`--purge-all`再尝试删除所选本地镜像。清理参数具有破坏性，只在明确不再需要这些数据时使用。
 
-## 可选：夜间 R2/S3 备份
+## 本地维护与手动运行
 
-原生与 Docker 均支持“本地 SQLite 每晚备份到 R2/S3”，**默认关闭**；菜单 `6` 设置，密钥不回显，不开启就不需要凭据。
+| 目录 | 职责 |
+|---|---|
+| `trendradar/` | 主程序、AI、采集、存储、日报、共享渲染与邮件 |
+| `weekly_report/` | 素材整理、正文分析、短标签及周报入口 |
+| `config/` | 可调整的业务配置与提示词 |
+| `deploy/` | 安装、配置、更新、卸载、数据维护工具 |
+| `.github/` | CI、业务触发及镜像发布 |
 
-| 参数 | 默认 | 说明 |
-|---|---|---|
-| `R2_BACKUP_ENABLED` | `false` | 设为 `true` 才自动上传 |
-| `R2_BACKUP_TIME` | `23:40` | 按 `TZ`/`TIMEZONE` 每日执行 |
-| `R2_BACKUP_LOOKBACK_DAYS` | `2` | 当天+昨天；首次补齐历史可调大 |
-
-开启需 `STORAGE_BACKEND=local` 和已有的四个 `S3_*` 必填项。两端共用 `deploy/r2_backup.py`：原生用独立备份 timer（菜单开关即启停，人工暂停不会被重装恢复），Docker 用容器内调度器。旧镜像尚不支持备份时，按[镜像更新与源码构建](#镜像更新与源码构建)升级后再配置。
-
-备份对象与 Actions 远程存储同一布局（`news/`、`rss/` 按日文件），因此同一桶持续同步后切 Actions 不用搬采集数据库。**同日期整库覆盖，切换前必须：停旧端 → 最后一次同步 → 再启新端。** 此备份不包含发布账本和待补投邮件；仅迁移采集数据库会重新建立发布基线，不能当作完整的投递状态迁移。
+只建立源码运行环境而不安装定时器：
 
 ```bash
-python3 deploy/native_install.py backup-status                    # 原生：开关/计划/timer状态
-.venv/bin/python deploy/native_install.py install-backup --enable # 原生：明确安装/启用timer
-docker compose exec trendradar python deploy/docker/entrypoint.py backup --dry-run  # Docker：列举待传，不上传
-```
-
-## 新增内容与发布状态
-
-- **本次新增热点、RSS 新增更新**统一相对上次已发布报告统计，包含期间采到、后来退榜的内容；每小时采集不会提前消耗新增。主报告的 `current/daily` 范围不变，统一的 `is_new` 继续参与 AI 的新增加分。
-- 新闻和 RSS 的输入、覆盖边界在 AI 分析前冻结；发送耗时不会把后续采集误算为已覆盖。首次接入来源时采用最近 24 小时的初始化范围，不把旧定时窗口记录当作成功推送凭据。
-- 任一收件人被 SMTP 明确接受、且回执持久化后，本期即视为**已发布**，不等于所有人都已收到。明确暂时失败者在后续有效推送执行中补投原邮件，不重跑 AI、不重发给已接受者；永久拒收或结果未知保留待核对。
-- 本地发布状态在数据目录的 `meta/publication-v1.sqlite3`；Actions 在 R2/S3 的 `meta/publication-v1/`。包含私有报告和收件人信息，请随数据妥善保留；远端必须支持条件写入，不会静默退回本地状态。
-- 发布清单保持有界；精确去重身份、历史报告及回执存入不可变分片/归档，不会因时间到期删除身份。总存储仍会增长；未解决报告达到容量上限时先停止新生成/发信，不丢弃问题记录。
-- 新闻/RSS 分别初始化和推进覆盖边界。某类来源超过 32 天读取范围或读取失败，只标记该类缺口，不拖住健康来源；部分成功采到并已发布的内容仍会消费新增身份，未读范围不冒充已覆盖。
-
-查看状态（不采集、不调用 AI、不发邮件；默认隐藏收件人）：
-
-```bash
-.venv/bin/python -m trendradar.publication_cli --backend local status
-.venv/bin/python -m trendradar.publication_cli --backend local receipts REPORT_ID --limit 20
-# Docker：
-docker compose exec trendradar python -m trendradar.publication_cli --backend local status
-```
-
-自定义本地数据目录可在子命令前加 `--data-dir 路径`；远端用 `--backend remote`，并通过环境提供现有 `S3_*` 配置。`status` 用 `--offset/--limit` 分页，`receipts` 用返回的 `next_cursor` 配合 `--cursor` 读取后续页；二者默认不展示邮箱，包含已归档历史，且不会隐式执行恢复。
-
-异常恢复入口为 `release-generation` / `resolve-unknown`，用 `--help` 查看参数：必须先核实原执行进程已停止，提供最新状态版本和非敏感证据引用；这些命令只更新状态，不发送邮件。提交中断且未核实的尝试会阻止新的 SMTP 提交，但不停止小时采集；已有持久化 SMTP 回执会在后续正常恢复时重放，不重复发信。**邮箱未到账不等于 SMTP 未接受，不能据此把未知结果改成可重投。**
-
-来源历史确实无法补齐时，可在停止相关采集/生成进程、核实缺口并取得最新 `status` 版本后使用 `readopt-source news|rss --version VERSION --evidence 非敏感工单引用 --confirm --stopped`（同样通过 `python -m trendradar.publication_cli` 调用）。这会明确重新采用最近 24 小时，保留全部已发布身份、原边界审计和报告发布序号；**它是承认缺口，不是补回历史**。日常无需运行此命令。
-
-## 本地开发与周报结构
-
-只需要在本地修改源码、检查入口时，可以创建项目自己的 Python 虚拟环境；不必运行安装器，也不需要 Docker：
-
-```bash
-git clone https://github.com/daxia9522/trendradar-lite-deploy.git
-cd trendradar-lite-deploy
 python3 -m venv .venv
 .venv/bin/python -m pip install --require-hashes -r requirements.lock
+.venv/bin/python -m trendradar --help
 .venv/bin/python weekly_report/weekly_ai_report_email.py --help
 ```
 
-这只是**源码的原生运行环境**，不会注册或启用 systemd 服务、定时采集或发送邮件。`.venv/` 和 `output/` 是本地状态，不进入 Git；提交前用 `git diff` 检查源码变化。
-
-周报专用 Python 代码收敛为三个文件，调用路径保持不变：
-
-| 文件 | 职责 |
-|---|---|
-| `weekly_report/weekly_ai_report_email.py` | 参数、日期和环境配置；串联阶段；HTML/JSON 归档；调用共享渲染与邮件发送，处理退出码 |
-| `weekly_report/collection.py` | 从已有历史数据库读取新闻；去重、聚簇、评分与热榜/RSS 配额 |
-| `weekly_report/analysis.py` | 提示词组装、正文分析与解析、关键词生成及校验；`generate_report()` 与 `generate_keywords()` 是两个独立阶段 |
-
-两份提示词仍在 `config/weekly_ai_prompt.txt` 和 `config/weekly_keyword_prompt.txt`；模型鉴权、HTML 组件和 SMTP 继续使用 `trendradar` 的共享实现。运行时的报告时区在首次使用时解析并缓存，不在导入入口时加载完整运行配置。
-
-周报关键词已在三文件结构上单独更新：主模型只提供正文、主题及证据编号，短标签使用独立模型的 `label/evidence` 对象数组。Prompt 要求每个标签 2～6 字符；代码保留 2～12 字符保护范围，不截字、不用滑窗补词，接受不足 5 个标签。引用必须逐字出现在正文；这是来源校验，不保证语义蕴含或中文词边界。`.keywords.json` 记录模型、候选、引用、接受/拒绝原因和最终选择；原始模型响应属于私有报告数据，不要当作公开日志发布。
-
-实际生成周报前，需要准备所选日期的历史数据库，并通过可信方式提供 AI/邮件环境配置；clone 不会自动复制其他服务器的数据或凭据。**周报 `--dry-run` 仍会真实调用 AI，只禁止发邮件**，不是离线验证。直接运行完整周报会按配置发送邮件，命令见下节。
-
-## 手动运行
-
-按所在环境选择对应命令。⚠️ `--force-run` 会绕过推送窗口与 once 去重，**真实调用 AI 并立即发送邮件**；不会绕过未解决投递的安全检查。验证链路请优先在非推送窗口执行普通命令。
-
-**原生 Linux / 源码目录**（在仓库目录内，用安装器创建的 venv）：
-
-注意：以下是直接运行 Python 的命令，**不会自动加载 systemd 的环境文件**。需要先通过可信的环境注入方式提供配置；由 timer 启动的 service 则会自动读取 `~/.config/trendradar-lite/env`。不要为加载配置而执行来源不明的 shell 内容。
+直接执行Python不会自动读取systemd的私有env，须先通过可信方式提供环境变量；由timer启动的service会自动读取它。以下命令各自独立，按需要选择：
 
 ```bash
-cd ~/trendradar-lite-deploy
-.venv/bin/python -m trendradar --show-schedule   # 查看当前命中的调度
-.venv/bin/python -m trendradar --doctor          # 配置体检
-.venv/bin/python -m trendradar                   # 按窗口执行（等同 timer 的一班）
-.venv/bin/python -m trendradar --force-run       # 立即执行完整链路（发邮件）
-.venv/bin/python weekly_report/weekly_ai_report_email.py
+.venv/bin/python -m trendradar --show-schedule  # 调度状态
+.venv/bin/python -m trendradar --doctor         # 配置与本地存储体检
+.venv/bin/python -m trendradar                  # 按当前窗口执行真实业务
+.venv/bin/python -m trendradar --force-run      # 绕过推送窗口/once，真实AI与邮件
+.venv/bin/python weekly_report/weekly_ai_report_email.py # 真实周报与邮件
 ```
 
-**Docker Compose**（常驻容器内调度，手动执行走 exec；entrypoint 自动读取最新 `runtime/env`）：
+`--help`只显示帮助；`--doctor`可能写本地体检结果并检查存储。周报 `--dry-run`仍会采集/读取素材并调用AI，只跳过邮件。Docker手动业务入口使用 `docker compose exec trendradar python deploy/docker/entrypoint.py force-run`。
 
-```bash
-docker compose exec trendradar python deploy/docker/entrypoint.py doctor
-docker compose exec trendradar python deploy/docker/entrypoint.py force-run
-```
+### 输出文件与目录
 
-**GitHub Actions**：网页 `Actions → Get Hot News / Weekly AI Report → Run workflow`，等价于 dispatch。
-
-## 输出结构
+默认目录示例：
 
 ```text
 output/
-├── news/YYYY-MM-DD.db        # 当日热榜库
-├── rss/YYYY-MM-DD.db         # 当日 RSS 库
-├── txt/YYYY-MM-DD/HH-MM.txt  # 采集快照
-├── html/YYYY-MM-DD/HH-MM.html
-├── html/latest/              # current.html / daily.html
-├── weekly-ai-reports/        # 周报归档
-└── meta/                     # 调度与执行状态
+├── news/YYYY-MM-DD.db            # local模式热榜日库
+├── rss/YYYY-MM-DD.db             # local模式RSS日库
+├── txt/YYYY-MM-DD/HH-MM.txt      # 启用文本存储时的采集快照
+├── html/YYYY-MM-DD/HH-MM-SS-ffffff.html # 日报HTML快照
+├── weekly-ai-reports/            # 周报HTML和keywords.json
+├── ai_filter/cache.sqlite3       # 本机分类缓存
+├── publication.json             # 成功发送记录
+└── meta/                        # 调度与执行状态
 ```
+
+remote模式下news/RSS日库在R2/S3，HTML、缓存和发送记录仍保存在执行端。本地日库、筛选缓存和 `publication.json` 随 `storage.local.data_dir` 调整；日报HTML和周报归档仍在仓库 `output/` 下。新增新闻按上次成功发送的采集截止点统计。
+
+### 日志与运行核验
+
+查看定时任务、服务状态和当天日志：
+
+```bash
+systemctl --user list-timers 'trendradar*'
+systemctl --user status trendradar-lite.service trendradar-weekly.service
+journalctl --user -u trendradar-lite.service -u trendradar-weekly.service \
+  --since today --no-pager -o short-iso
+```
+
+分享日志前隐藏邮箱、密钥和私有地址。
 
 ## 许可与致谢
 
-基于 [sansan0/TrendRadar](https://github.com/sansan0/TrendRadar) 精简、修改并完成三种部署适配；本仓库非上游官方发行版，新增与修改内容由本仓库维护者负责。遵循 [GPL-3.0](./LICENSE)。
-
-- 上游项目：<https://github.com/sansan0/TrendRadar>
-- 修改要点：精简功能面，统一 GitHub Actions / 原生 Linux / Docker Compose 三套部署
+基于 [sansan0/TrendRadar](https://github.com/sansan0/TrendRadar) 修改并适配三种部署方式，非上游官方发行版。遵循 [GPL-3.0](LICENSE)，保留 [NOTICE](NOTICE) 和上游归属。

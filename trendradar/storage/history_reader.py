@@ -1,11 +1,8 @@
 # coding=utf-8
-"""历史日报 SQLite 读取（周报用）。
+"""历史日报 SQLite 投影（周报用）。
 
-读日常爬虫写入的：
-  output/news/YYYY-MM-DD.db
-  output/rss/YYYY-MM-DD.db
-
-不依赖 MCP，不做缓存服务。
+默认兼容本地 output/news、output/rss；注入共享日库 source 后也支持 remote。
+保留周报自己的 SQL/排名语义，不依赖日报的归一化投影，不做缓存服务。
 """
 
 from __future__ import annotations
@@ -14,24 +11,20 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from trendradar.storage.sqlite_mixin import connect_sqlite
+from trendradar.storage.day_snapshot import DaySnapshotSource, local_day_path, open_sqlite_snapshot
 
 
 class HistoryReader:
-    """按日期读取本地历史热榜/RSS SQLite。"""
+    """按日期读取热榜/RSS SQLite，获取方式与报告投影相互独立。"""
 
-    def __init__(self, project_root: str | Path):
+    def __init__(self, project_root: str | Path, *, source: DaySnapshotSource | None = None):
         self.project_root = Path(project_root)
+        self.source = source
 
     def _db_path(self, date: datetime, db_type: str = "news") -> Optional[Path]:
-        path = self.project_root / "output" / db_type / f"{date.strftime('%Y-%m-%d')}.db"
-        # Only absence is a missing day. Path.exists() can suppress OS errors
-        # (including permission failures on newer Python versions).
-        try:
-            path.stat()
-        except FileNotFoundError:
-            return None
-        return path
+        # Preserve the legacy stat/open seam, including CANTOPEN when a checked
+        # file disappears. Resolution and connection handling are shared.
+        return local_day_path(self.project_root / "output", db_type, date)
 
     def read_all_titles_for_date(
         self,
@@ -55,8 +48,7 @@ class HistoryReader:
         result = self._read_from_sqlite(date, platform_ids, db_type)
         if not result:
             raise FileNotFoundError(
-                f"未找到 {date.strftime('%Y-%m-%d')} 的 {db_type} 数据: "
-                f"output/{db_type}/{date.strftime('%Y-%m-%d')}.db"
+                f"未找到 {date.strftime('%Y-%m-%d')} 的 {db_type} 数据"
             )
         return result
 
@@ -66,30 +58,26 @@ class HistoryReader:
         platform_ids: Optional[List[str]],
         db_type: str,
     ) -> Optional[Tuple[Dict, Dict, Dict]]:
-        db_path = self._db_path(date, db_type)
-        if db_path is None:
-            return None
+        if self.source is None:
+            db_path = self._db_path(date, db_type)
+            if db_path is None:
+                return None
+            connection = open_sqlite_snapshot(db_path)
+        else:
+            connection = self.source.open_day(db_type, date.strftime("%Y-%m-%d"))
 
         all_titles: Dict = {}
         id_to_name: Dict = {}
         all_timestamps: Dict = {}
-        conn = None
-        try:
-            # History is a reader of crawler output, never an initializer or
-            # writer.  mode=ro prevents missing/partial databases from being
-            # silently created and query_only guards accidental writes.
-            conn = connect_sqlite(db_path, readonly=True)
+        with connection as conn:
+            if conn is None:
+                return None
             cursor = conn.cursor()
             if db_type == "news":
                 return self._read_news(cursor, platform_ids, all_titles, id_to_name, all_timestamps)
             if db_type == "rss":
                 return self._read_rss(cursor, platform_ids, all_titles, id_to_name, all_timestamps)
             return None
-        finally:
-            # Read failures must propagate, not be converted into an empty
-            # result: weekly collection only tolerates genuinely missing data.
-            if conn is not None:
-                conn.close()
 
     def _read_news(
         self,

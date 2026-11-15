@@ -1,4 +1,4 @@
-"""Daily input selection; pure view preparation and explicit history readers."""
+"""Prepare main and standalone views from captured report inputs."""
 
 from typing import Dict, List, Optional
 
@@ -20,27 +20,6 @@ def prepare_captured_hotlist(capture: Dict, mode: str) -> ModeInput:
     return ModeInput(results, capture["news_names"], title_info, new_titles)
 
 
-def prepare_current_title_info(results: Dict, time_info: str) -> Dict:
-    """从当前抓取结果构建标题信息"""
-    title_info = {}
-    for source_id, titles_data in results.items():
-        title_info[source_id] = {}
-        for title, title_data in titles_data.items():
-            ranks = title_data.get("ranks", [])
-            url = title_data.get("url", "")
-            mobile_url = title_data.get("mobileUrl", "")
-
-            title_info[source_id][title] = {
-                "first_time": time_info,
-                "last_time": time_info,
-                "count": 1,
-                "ranks": ranks,
-                "url": url,
-                "mobileUrl": mobile_url,
-            }
-    return title_info
-
-
 def prepare_standalone_data(
     results: Dict,
     id_to_name: Dict,
@@ -52,11 +31,8 @@ def prepare_standalone_data(
     """
     从原始数据中提取独立展示区数据
 
-    纯数据准备方法，不检查 display.regions.standalone 开关。
-    各消费者自行决定是否使用：
-    - AI 分析：由 ai_analysis.include_standalone 控制是否注入
-    - 通知推送：由 display.regions.standalone 控制（在 dispatcher 层门控）
-    - HTML 报告：始终包含（如果有数据）
+    仅供独立展示区使用，不注入 AI 分析。
+    HTML 组装保留原有来源、排序与限额，由展示顺序决定是否渲染。
 
     Args:
         results: 原始爬取结果 {platform_id: {title: title_data}}

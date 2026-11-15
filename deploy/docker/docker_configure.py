@@ -2,8 +2,8 @@
 
 Compose contract: setup runs root and mounts only the project at /setup;
 --runtime-config selects this adapter. TRENDRADAR_UID/GID identify
-non-root service ownership. setup needs no build stanza: install builds the
-trendradar service explicitly; configure only consumes its existing image.
+non-root service ownership. setup needs no build stanza: install/update explicitly
+acquire the trendradar image (pull or build); configure only consumes the existing image.
 """
 from __future__ import annotations
 
@@ -25,13 +25,14 @@ from deploy.docker.runtime_config import RuntimeConfigError, is_application_key,
 DOCKER_MARKER = b"# TrendRadar env format: docker\n"
 MIGRATION_ERROR = "旧 .env 含不支持的 Compose 插值或转义；未迁移。请先将应用参数改为明确字面量（美元符号用 $$ 或单引号），再重试。"
 def application_key(key: str) -> bool:
-    return key not in shared.NATIVE_ONLY_FIELDS and is_application_key(key)
+    return (key not in shared.NATIVE_ONLY_FIELDS and key not in shared.RETIRED_AI_ENV_KEYS
+            and is_application_key(key))
 
 
-def validate(values: dict[str, str], *, require_mail: bool = True, config_path: Path | None = None) -> list[str]:
+def validate(values: dict[str, str], *, require_mail: bool = True) -> list[str]:
     checked = dict(values)
     checked.setdefault("TZ", values.get("TIMEZONE") or "Asia/Shanghai")
-    errors = shared.validate(checked, "docker", config_path=config_path) if require_mail else []
+    errors = shared.validate(checked, "docker") if require_mail else []
     try:
         validate_runtime_values(values)
     except RuntimeConfigError as error:
@@ -51,7 +52,7 @@ class FieldPolicy(NamedTuple):
 # Prefix-supported future fields remain sensitive until classified here.
 PUBLIC_FIELDS = frozenset({
     "EMAIL_FROM", "EMAIL_TO", "EMAIL_SMTP_SERVER", "EMAIL_SMTP_PORT",
-    "AI_ANALYSIS_ENABLED", "AI_MODEL", "AI_API_BASE", "AI_FALLBACK_API_BASE", "AI_FALLBACK_MODELS", "AI_TIMEOUT",
+    "AI_ANALYSIS_ENABLED", "AI_FILTER_ENABLED",
     "PLATFORMS_API_URL", "PLATFORMS_API_FALLBACK_URLS", "TZ", "TIMEZONE",
     "CRAWLER_MINUTE", "MORNING_PUSH_TIME", "NOON_PUSH_TIME", "EVENING_PUSH_TIME",
     "DAILY_SUMMARY_TIME", "WEEKLY_WEEKDAY", "WEEKLY_HOUR", "WEEKLY_MINUTE", "WEEKLY_TIME",
@@ -60,7 +61,6 @@ PUBLIC_FIELDS = frozenset({
     "MAX_NEWS_PER_KEYWORD", "LOCAL_RETENTION_DAYS", "REMOTE_RETENTION_DAYS",
     "PULL_ENABLED", "PULL_DAYS", "DOCKER_CONTAINER", "SCHEDULE_ENABLED",
     "SCHEDULER_POLL_SECONDS", "SCHEDULER_MAX_ATTEMPTS", "STORAGE_TXT_ENABLED", "STORAGE_HTML_ENABLED",
-    "R2_BACKUP_ENABLED", "R2_BACKUP_TIME", "R2_BACKUP_LOOKBACK_DAYS",
 })
 FIELD_POLICIES = {key: FieldPolicy(shared.FIELD_MAP[key][1] if key in shared.FIELD_MAP else key,
                                   sensitive=key not in PUBLIC_FIELDS)
@@ -72,7 +72,7 @@ def field_policy(key: str) -> FieldPolicy:
     return FIELD_POLICIES.get(key, FieldPolicy(key))
 
 
-CREDENTIAL_URL_FIELDS = frozenset(shared.CREDENTIAL_URL_FIELDS) | {"S3_ENDPOINT_URL"}
+CREDENTIAL_URL_FIELDS = frozenset(shared.CREDENTIAL_URL_FIELDS)
 
 
 def credential_url(key: str, value: str) -> bool:
@@ -129,9 +129,8 @@ def edit_field(key: str, values: dict[str, str]) -> None:
     # Required secrets may be cleared as a draft, but full validation prevents
     # saving until required credentials are supplied again.
     while True:
-        hint = shared.FIELD_MAP[key][3] + "；" if key in shared.FALLBACK_LIST_FIELDS else ""
         entered = shared.getpass.getpass(f"{field_policy(key).label} [{display_value(key, values.get(key, ''))}]"
-                                        f"（{hint}回车保留，:cancel 取消，:clear 清空）: ")
+                                        "（回车保留，:cancel 取消，:clear 清空）: ")
         if entered in ("", ":cancel"):
             return
         value = "" if entered == ":clear" else entered
@@ -178,6 +177,9 @@ def private_runtime(path: Path, identity: tuple[int, int], *, apply: bool = True
 def legacy_values(path: Path) -> dict[str, str]:
     """Decode only application values, without evaluating Compose or host variables."""
     document = EnvDocument(path, "docker")
+    errors = shared.retired_ai_errors(document.values)
+    if errors:
+        raise ConfigError("\n".join(errors))
     values = {}
     for raw, key, value in document.records:
         if key is None or not application_key(key):
@@ -229,7 +231,6 @@ class DockerApplication:
     def __init__(self, output: Path, *, legacy: Path | None = None, defaults: Path | None = None):
         self.identity = target_identity()
         self.output = Path(output)
-        self.app_dir = Path(defaults).parent if defaults is not None else self.output.parent.parent
         self.legacy_document = None
         # Existing docker-marked documents retain their explicit old representation.
         original = snapshot(self.output)
@@ -249,7 +250,10 @@ class DockerApplication:
                 self.values.update({key: value for key, value in read_env(defaults).items() if application_key(key)})
 
     def save(self, values: dict[str, str]) -> str:
-        errors = validate(values, config_path=shared.effective_config_path(values, self.app_dir))
+        errors = shared.retired_ai_errors(self.document.values)
+        if errors:
+            raise ConfigError("\n".join(errors))
+        errors = validate(values)
         if errors:
             raise ConfigError("\n".join(errors))
         validate_document(self.document, values)
@@ -271,15 +275,14 @@ def configure_terminal(application: DockerApplication) -> bool:
     print("TrendRadar Lite Docker 分组配置（仅保存时写磁盘；不会测试邮件、AI 或采集）", flush=True)
     print(f"配置文件：{application.output}", flush=True)
     while True:
-        print("\n1 邮件推送\n2 AI 模型与接口\n3 采集与推送时间\n4 高级配置\n5 查看待保存变更\n6 R2/S3晚间备份\ns 保存配置\nq 放弃修改并退出", flush=True)
+        print("\n1 邮件推送\n2 AI 开关与连接组凭据\n3 采集与推送时间\n4 高级配置\n5 查看待保存变更\n6 存储配置\ns 保存配置\nq 放弃修改并退出", flush=True)
         choice = input("选择: ").strip().lower()
         if choice in SECTIONS:
             title, keys = SECTIONS[choice]
             while True:
                 print(f"\n[{title}]", flush=True)
                 if choice == "2":
-                    print(shared.FALLBACK_LIST_HELP, flush=True)
-                    print(shared.FALLBACK_AUTH_HELP, flush=True)
+                    print(shared.AI_SETUP_HELP, flush=True)
                 for index, key in enumerate(keys, 1):
                     current = shared._native_value(key, values)
                     pending = " [待保存]" if current != shared._native_value(key, before) else ""
@@ -299,7 +302,7 @@ def configure_terminal(application: DockerApplication) -> bool:
             print("已取消，未保存修改；安装不会继续启动服务。", flush=True)
             return False
         elif choice == "s":
-            errors = validate(values, config_path=shared.effective_config_path(values, application.app_dir))
+            errors = validate(values)
             if errors:
                 print("\n".join(errors), flush=True)
                 continue
@@ -323,6 +326,7 @@ def render(values, errors=None, saved=False, *, before=None, secret_edits=None) 
     # fields that a future shared release adds without classifying as secret.
     public = {key: value if not field_policy(key).sensitive and not credential_url(key, value) else ""
               for key, value in values.items()}
+    errors = list(dict.fromkeys([*(errors or []), *shared.retired_ai_errors(values)]))
     page = shared.render(public, errors, saved, "docker")
     for key, value in values.items():
         if credential_url(key, value):
@@ -415,14 +419,13 @@ def serve(application: DockerApplication, args) -> bool:
                     submitted[key] = form[key][0].strip()
             # Redacted URLs/invalid switches keep their server-side draft on
             # blank submits; only a replacement or explicit sentinel clears it.
-            for key in (*CREDENTIAL_URL_FIELDS, *shared.BOOLEAN_KEYS, *shared.FALLBACK_FORM_FIELDS):
+            for key in (*CREDENTIAL_URL_FIELDS, *shared.BOOLEAN_KEYS):
                 if key not in form or key in shared.NATIVE_ONLY_FIELDS:
                     continue
                 entered = form[key][0].strip()
                 if entered == shared.CLEAR_SENTINEL:
                     submitted[key] = ""
-                elif not entered and (key in shared.FALLBACK_FORM_FIELDS
-                                      or credential_url(key, current.get(key, ""))
+                elif not entered and (credential_url(key, current.get(key, ""))
                                       or shared.boolean_field_never_renders(key, current.get(key, ""))):
                     submitted[key] = current.get(key, "")
             secret_keys = {key for key in set(current) | {key for key, *_ in shared._fields_for("docker")}
@@ -444,7 +447,7 @@ def serve(application: DockerApplication, args) -> bool:
             # any validation/save branch so a blank retry never restores an old
             # credential. It is never written to disk without a valid save.
             current = submitted
-            errors.extend(validate(submitted, config_path=shared.effective_config_path(submitted, application.app_dir)))
+            errors.extend(validate(submitted))
             if errors:
                 self.send_page(render(current, errors, before=before, secret_edits=secret_edits), 400)
                 return

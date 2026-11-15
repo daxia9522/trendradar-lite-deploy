@@ -7,14 +7,13 @@
 
 import errno
 import os
-import re
 import stat
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional
 
 import yaml
 
-from trendradar.ai_config import merge_ai_settings
+from trendradar.ai_config import ModelRegistry, load_yaml_config
 from trendradar.utils.time import DEFAULT_TIMEZONE
 
 
@@ -41,33 +40,9 @@ def _get_env_int(key: str, default: int = 0) -> int:
         return default
 
 
-def _get_env_int_or_none(key: str) -> Optional[int]:
-    """从环境变量获取整数值，未设置时返回 None"""
-    value = os.environ.get(key, "").strip()
-    if not value:
-        return None
-    try:
-        return int(value)
-    except ValueError:
-        return None
-
-
 def _get_env_str(key: str, default: str = "") -> str:
     """从环境变量获取字符串值"""
     return os.environ.get(key, "").strip() or default
-
-
-def _get_env_secret(key: str, file_key: str) -> str:
-    """读取直接环境变量或受限文件中的密钥，直接变量优先。"""
-    value = _get_env_str(key)
-    if value:
-        return value
-
-    secret_path = _get_env_str(file_key)
-    if not secret_path:
-        return ""
-
-    return _read_secret_file(secret_path)
 
 
 # 密钥文件大小上限：与 deploy/docker/runtime_config.py 的 1 MiB 限制一致。
@@ -130,16 +105,12 @@ def _read_secret_file(secret_path: str) -> str:
             os.close(descriptor)
 
 
-
-
 def _load_app_config(config_data: Dict) -> Dict:
     """加载应用配置"""
     app_config = config_data.get("app", {})
     advanced = config_data.get("advanced", {})
     debug_env = _get_env_bool("DEBUG")
     return {
-        "VERSION_CHECK_URL": advanced.get("version_check_url", ""),
-        "CONFIGS_VERSION_CHECK_URL": advanced.get("configs_version_check_url", ""),
         "TIMEZONE": _get_env_str("TIMEZONE") or _get_env_str("TZ") or app_config.get("timezone", DEFAULT_TIMEZONE),
         "DEBUG": debug_env if debug_env is not None else advanced.get("debug", False),
     }
@@ -313,6 +284,14 @@ def _load_display_config(config_data: Dict) -> Dict:
     display = config_data.get("display", {})
     regions = display.get("regions", {})
     standalone = display.get("standalone", {})
+    new_items = display.get("new_items")
+    if new_items is not None:
+        if not isinstance(new_items, dict):
+            raise ValueError("display.new_items 必须为配置对象")
+        new_items = {key.upper(): new_items.get(key, 0)
+                     for key in ("max_items", "max_per_source")}
+        if any(type(value) is not int or value < 0 for value in new_items.values()):
+            raise ValueError("新增区限额必须为非负整数")
 
     # 默认区域顺序
     default_region_order = ["hotlist", "rss", "new_items", "standalone", "ai_analysis"]
@@ -329,6 +308,7 @@ def _load_display_config(config_data: Dict) -> Dict:
     return {
         # 区域显示顺序
         "REGION_ORDER": region_order,
+        "NEW_ITEMS": new_items,
         # 区域开关
         "REGIONS": {
             "HOTLIST": regions.get("hotlist", True),
@@ -346,49 +326,54 @@ def _load_display_config(config_data: Dict) -> Dict:
     }
 
 
-def _load_ai_config(config_data: Dict) -> Dict:
-    """Resolve env/YAML once; only this I/O layer may read the main secret file."""
-    ai = config_data.get("ai") or {}
-    config = merge_ai_settings(ai, os.environ)
-    config["API_KEY"] = _get_env_secret("AI_API_KEY", "AI_API_KEY_FILE") or ai.get("api_key", "")
-    return config
-
-
-def load_ai_config(config_path: Optional[str] = None) -> Dict[str, Any]:
-    """单独加载 AI 模型配置（日更与周报共用此入口）。
-
-    只解析 ai 段 + 环境变量，不牵连通知/存储/调度配置。
-    """
-    if config_path is None:
-        config_path = os.environ.get("CONFIG_PATH", "config/config.yaml")
-
-    config_data: Dict[str, Any] = {}
-    path = Path(config_path)
-    if path.exists():
-        with open(path, "r", encoding="utf-8") as f:
-            config_data = yaml.safe_load(f) or {}
-    else:
-        print(f"[AI] 配置文件 {config_path} 不存在，仅使用环境变量")
-
-    return _load_ai_config(config_data)
+def load_ai_tasks(config_path: Optional[str] = None, *, task_names=("daily_analysis",),
+                  model_overrides=None) -> Dict[str, Dict]:
+    """Read one registry snapshot and only the credentials used by requested tasks."""
+    path = Path(config_path or os.environ.get("CONFIG_PATH", "config/config.yaml"))
+    data = load_yaml_config(path.read_text(encoding="utf-8"))
+    registry = ModelRegistry(data, os.environ)
+    overrides = model_overrides or {}
+    if set(overrides) - set(task_names):
+        raise ValueError("模型覆盖引用了未请求的任务")
+    return {name: registry.resolve_task(name, _read_secret_file, model_id=overrides.get(name))
+            for name in task_names}
 
 
 def _load_ai_analysis_config(config_data: Dict) -> Dict:
-    """加载 AI 分析配置（功能配置，模型配置见 _load_ai_config）"""
+    """加载日报分析功能配置；模型及请求策略见 tasks.daily_analysis。"""
     ai_config = config_data.get("ai_analysis", {})
 
     enabled_env = _get_env_bool("AI_ANALYSIS_ENABLED")
-    raw_cap_ratio = ai_config.get("source_cap_ratio")
 
     return {
         "ENABLED": enabled_env if enabled_env is not None else ai_config.get("enabled", False),
         "LANGUAGE": ai_config.get("language", "Chinese"),
         "PROMPT_FILE": ai_config.get("prompt_file", "ai_analysis_prompt.txt"),
-        "MAX_EVENTS_FOR_ANALYSIS": ai_config.get("max_events_for_analysis", 120),
-        "SOURCE_CAP_RATIO": 0.30 if raw_cap_ratio is None else raw_cap_ratio,
         "INCLUDE_RANK_TIMELINE": ai_config.get("include_rank_timeline", False),
-        "INCLUDE_STANDALONE": ai_config.get("include_standalone", False),
     }
+
+
+def _load_ai_filter_config(config_data: Dict, config_dir: Path, registry: ModelRegistry) -> Dict:
+    """加载独立筛选配置，不继承日报模型或密钥。"""
+    section = config_data.get("ai_filter") or {}
+    if not isinstance(section, dict):
+        raise ValueError("ai_filter 必须是配置对象")
+    enabled = _get_env_bool("AI_FILTER_ENABLED")
+    if enabled is None:
+        enabled = section.get("enabled", False)
+    if type(enabled) is not bool:
+        raise ValueError("ai_filter.enabled 必须是布尔值")
+    result = {
+        "ENABLED": enabled,
+        "MIN_SCORE": section.get("min_score", 0.7),
+        "CONFIG_DIR": str(config_dir.resolve()),
+        "CACHE_PATH": str(Path(config_data.get("storage", {}).get("local", {}).get("data_dir", "output"))
+                          / "ai_filter" / "cache.sqlite3"),
+        "CLIENT": {},
+    }
+    if enabled:
+        result["CLIENT"] = registry.resolve_task("ai_filter", _read_secret_file)
+    return result
 
 
 def _load_storage_config(config_data: Dict) -> Dict:
@@ -443,7 +428,6 @@ def _load_email_config(config_data: Dict) -> Dict:
     }
 
 
-
 def _print_notification_sources(config: Dict) -> None:
     """打印通知渠道配置来源信息（仅邮件）。"""
     if config.get("EMAIL_FROM") and config.get("EMAIL_PASSWORD") and config.get("EMAIL_TO"):
@@ -472,8 +456,7 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     if not Path(config_path).exists():
         raise FileNotFoundError(f"配置文件 {config_path} 不存在")
 
-    with open(config_path, "r", encoding="utf-8") as f:
-        config_data = yaml.safe_load(f)
+    config_data = load_yaml_config(Path(config_path).read_text(encoding="utf-8"))
 
     print(f"配置文件加载成功: {config_path}")
 
@@ -508,11 +491,12 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     # RSS 配置
     config["RSS"] = _load_rss_config(config_data)
 
-    # AI 模型共享配置
-    config["AI"] = _load_ai_config(config_data)
-
-    # AI 分析配置
+    # Validate one shared registry; credentials resolved once per used group.
+    registry = ModelRegistry(config_data, os.environ)
     config["AI_ANALYSIS"] = _load_ai_analysis_config(config_data)
+    config["AI"] = (registry.resolve_task("daily_analysis", _read_secret_file)
+                    if config["AI_ANALYSIS"]["ENABLED"] else {})
+    config["AI_FILTER"] = _load_ai_filter_config(config_data, Path(config_path).parent, registry)
 
     # 推送内容显示配置
     config["DISPLAY"] = _load_display_config(config_data)

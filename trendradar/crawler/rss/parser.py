@@ -207,25 +207,6 @@ class RSSParser:
 
         return None
 
-    def parse_url(self, url: str, timeout: int = 10) -> List[ParsedRSSItem]:
-        """
-        从 URL 解析 RSS
-
-        Args:
-            url: RSS URL
-            timeout: 超时时间（秒）
-
-        Returns:
-            解析后的条目列表
-        """
-        import requests
-
-        response = requests.get(url, timeout=timeout, headers={
-            "User-Agent": "TrendRadar/2.0 RSS Reader"
-        })
-        response.raise_for_status()
-
-        return self.parse(response.content, url)
 
     def _parse_entry(self, entry: Any) -> Optional[ParsedRSSItem]:
         """解析单个条目"""

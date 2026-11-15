@@ -1,10 +1,5 @@
 # coding=utf-8
-"""
-AI 分析器模块
-
-调用 AI 大模型对热点新闻进行深度分析
-通过 AIClient（LiteLLM）调用模型
-"""
+"""AI 分析器模块"""
 
 import re
 from dataclasses import dataclass, field
@@ -12,7 +7,6 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from trendradar.ai.client import AIClient
-from trendradar.ai.selector import SelectedNewsCluster, select_ai_news
 
 
 @dataclass
@@ -37,10 +31,7 @@ AI_SECTION_FORMATS = {"events", "bullets", "lead_points", "prose"}
 # 分条序号的基数：阿拉伯数字、中文数字、单个拉丁字母。
 _POINT_ORDINAL = r"(?:\d{1,3}|[一二三四五六七八九十百]{1,4}|[A-Za-z])"
 
-# 判定「这一行是不是一条分条」。放宽到只要读者能认出是标号即可：
-# 列表符号、括号序号（（1）/[1]/【一】）、序号加分隔符（1. / 1、 / 一、 / 1) / A：）、
-# 圆圈数字、三级以上标题，以及模型常用的行首加粗小标题（**主线**：…）。
-# 样式差异属于排版问题，交给渲染层归一化；在此报错只会白花一次 API 重试。
+# 可辨识的分条标记。
 _POINT_MARKER = re.compile(
     r"^(?:"
     r"#{3,6}\s*\S"
@@ -52,8 +43,7 @@ _POINT_MARKER = re.compile(
     r")"
 )
 
-# 判定「总括句被写成了分条」。与 _POINT_MARKER 刻意不同：不含加粗分支，
-# 且列表符号后必须有空白，否则合法的 "**总括句**" 会被当成 * 列表项误杀。
+# 列表项不能充当总括句。
 _LEAD_AS_POINT = re.compile(
     r"^(?:"
     r"#{1,6}\s"
@@ -77,9 +67,8 @@ class AIAnalysisResult:
     model: str = ""                      # 本次实际调用成功的模型名
 
     # 新闻数量统计
-    total_news: int = 0                  # AI 候选标题数
-    analyzed_news: int = 0               # 事件簇数
-    max_news_limit: int = 0              # 事件簇上限
+    total_news: int = 0                  # 展示候选条数
+    analyzed_news: int = 0               # 分析条数
 
 
 class AIAnalyzer:
@@ -92,15 +81,7 @@ class AIAnalyzer:
         get_time_func: Callable,
         debug: bool = False,
     ):
-        """
-        初始化 AI 分析器
-
-        Args:
-            ai_config: AI 模型配置（MODEL / API_KEY / FALLBACK_MODELS 等）
-            analysis_config: AI 分析功能配置（language, prompt_file 等）
-            get_time_func: 获取当前时间的函数
-            debug: 是否开启调试模式
-        """
+        """初始化 AI 分析器"""
         self.ai_config = ai_config
         self.analysis_config = analysis_config
         self.get_time_func = get_time_func
@@ -115,10 +96,7 @@ class AIAnalyzer:
             print(f"[AI] 配置警告: {error}")
 
         # 从分析配置获取功能参数
-        self.max_news = analysis_config.get("MAX_EVENTS_FOR_ANALYSIS", 120)
-        self.source_cap_ratio = analysis_config.get("SOURCE_CAP_RATIO", 0.30)
         self.include_rank_timeline = analysis_config.get("INCLUDE_RANK_TIMELINE", False)
-        self.include_standalone = analysis_config.get("INCLUDE_STANDALONE", False)
         self.language = analysis_config.get("LANGUAGE", "Chinese")
 
         # 加载提示词模板及其输出模块契约
@@ -228,27 +206,12 @@ class AIAnalyzer:
         report_type: str = "当日汇总",
         platforms: Optional[List[str]] = None,
         keywords: Optional[List[str]] = None,
-        standalone_data: Optional[Dict] = None,
     ) -> AIAnalysisResult:
-        """
-        执行 AI 分析
-
-        Args:
-            stats: 热榜统计数据
-            rss_stats: RSS 统计数据
-            report_mode: 报告模式
-            report_type: 报告类型
-            platforms: 平台列表
-            keywords: 关键词列表
-            standalone_data: 独立展示区数据
-
-        Returns:
-            AIAnalysisResult: 分析结果
-        """
+        """执行 AI 分析"""
 
         # 打印配置信息方便调试（不输出 API Key 任何字符）
         model = self.ai_config.get("MODEL", "unknown")
-        api_base = self.ai_config.get("API_BASE", "")
+        api_base = self.client.api_base
         model_display = model.replace("/", "/\u200b") if model else "unknown"
 
         print(f"[AI] 模型: {model_display}")
@@ -263,7 +226,7 @@ class AIAnalyzer:
         if not self.client.api_key:
             return AIAnalysisResult(
                 success=False,
-                error="未配置 AI API Key，请在 config.yaml 或环境变量 AI_API_KEY 中设置"
+                error="未配置分析连接凭据，请检查 model_groups 中的凭据引用"
             )
 
         # 准备新闻内容并获取统计数据
@@ -279,7 +242,6 @@ class AIAnalyzer:
                 error="没有可分析的新闻内容",
                 total_news=total_news,
                 analyzed_news=0,
-                max_news_limit=self.max_news
             )
 
         # 构建提示词
@@ -288,10 +250,6 @@ class AIAnalyzer:
         # 提取关键词
         if keywords is None:
             keywords = [s.get("word", "") for s in stats if s.get("word")] if stats else []
-
-        standalone_content = ""
-        if self.include_standalone and standalone_data:
-            standalone_content = self._prepare_standalone_content(standalone_data)
 
         # system 与 user 均允许使用运行时变量；只替换已知占位符，保留其他花括号。
         prompt_values = {
@@ -302,7 +260,6 @@ class AIAnalyzer:
             "platforms": ", ".join(platforms) if platforms else "多平台",
             "keywords": ", ".join(keywords[:20]) if keywords else "无",
             "news_content": news_content,
-            "standalone_content": standalone_content,
             "language": self.language,
         }
         user_prompt = self._replace_prompt_variables(
@@ -330,16 +287,14 @@ class AIAnalyzer:
             # 填充统计数据
             result.total_news = total_news
             result.analyzed_news = analyzed_count
-            result.max_news_limit = self.max_news
             return result
         except Exception as e:
+            # Provider bodies can contain credential-bearing URLs or request details.
+            # Do not return them to the report or the runner's logs.
             error_type = type(e).__name__
-            error_msg = str(e)
-
-            # 截断过长的错误消息
-            if len(error_msg) > 200:
-                error_msg = error_msg[:200] + "..."
-            friendly_msg = f"AI 分析失败 ({error_type}): {error_msg}"
+            status = getattr(e, "status_code", None)
+            status_note = f", HTTP {status}" if type(status) is int and 100 <= status <= 599 else ""
+            friendly_msg = f"AI 分析失败 ({error_type}{status_note})"
 
             return AIAnalysisResult(
                 success=False,
@@ -347,160 +302,46 @@ class AIAnalyzer:
             )
 
     def _format_item_input_line(self, item: Dict[str, Any]) -> str:
-        """将事件簇中的一条证据标题格式化为内部 AI 输入。"""
-        title = str(item.get("title", "") or "").strip()
+        """格式化标题及采集元数据。"""
+        title = str(item.get("title", "") or "")
         source = item.get("source_name", item.get("feed_name", item.get("source", "")))
         line = f"- [{source}] {title}" if source else f"- {title}"
-        ranks = [rank for rank in self._rank_values(item) if rank > 0]
+        ranks = [rank for rank in item.get("ranks", []) or [] if type(rank) is int and rank > 0]
+        rank_range = "-"
         if ranks:
             low, high = min(ranks), max(ranks)
-            line += f" | 排名:{low if low == high else f'{low}-{high}'}"
-        time_display = item.get("time_display", "")
-        if time_display:
-            line += f" | 时间:{time_display}"
-        else:
-            line += f" | 时间:{self._format_time_range(item.get('first_time', ''), item.get('last_time', ''))}"
-        if item.get("count"):
-            line += f" | 出现:{item['count']}次"
+            rank_range = str(low) if low == high else f"{low}-{high}"
+        time_range = item.get("time_display") or self._format_time_range(
+            item.get("first_time", ""), item.get("last_time", ""),
+        )
+        line += f" | 排名:{rank_range} | 时间:{time_range} | 出现:{item.get('count', 1)}次"
         if self.include_rank_timeline:
             line += f" | 轨迹:{self._format_rank_timeline(item.get('rank_timeline', []))}"
         return line
 
     @staticmethod
-    def _rank_values(item: Dict[str, Any]) -> List[int]:
-        values: List[int] = []
-        for point in item.get("rank_timeline", []) or []:
-            rank = point.get("rank") if isinstance(point, dict) else point
-            try:
-                values.append(int(rank))
-            except (TypeError, ValueError):
-                continue
-        if values:
-            return values
-        for rank in item.get("ranks", []) or []:
-            try:
-                values.append(int(rank))
-            except (TypeError, ValueError):
-                continue
-        return values
-
-    def _format_cluster(self, index: int, cluster: SelectedNewsCluster) -> str:
-        representative = cluster.representative_item
-        title = str(representative.get("title", "") or "").strip()
-        # 不写入可引用的事件编号：编号会被模型当成稳定锚点，直接写回正文
-        # （已实测到"事件1持续位居榜首…事件6、23、33、34共同指向…"）。
-        lines = [
-            f"### {title}",
-            f"- 来源覆盖：{len(cluster.sources)} | 相关标题：{len(cluster.member_items)}",
-        ]
-        seen = set()
-        # 每个事件只保留少量不同措辞证据，避免热门事件挤占整份提示词。
-        for item in cluster.member_items[:6]:
-            item_title = str(item.get("title", "") or "").strip()
-            source = str(item.get("source_name", item.get("feed_name", item.get("source", ""))) or "")
-            key = (source, item_title)
-            if not item_title or key in seen:
-                continue
-            seen.add(key)
-            lines.append(self._format_item_input_line(item))
-        return "\n".join(lines)
-
-    @staticmethod
     def _replace_prompt_variables(template: str, values: Dict[str, str]) -> str:
-        """替换已知模板变量，不解析其他花括号。"""
-        result = template or ""
-        for key, value in values.items():
-            result = result.replace("{" + key + "}", value)
-        return result
-
-    def _prepare_standalone_content(self, standalone_data: Dict) -> str:
-        """将独立展示区统一格式化为不标注来源类型的标题级材料。"""
-        lines: List[str] = []
-
-        def append_source(source: Dict[str, Any], *, include_rank: bool) -> None:
-            name = str(source.get("name", source.get("id", "")) or "").strip()
-            items = source.get("items", []) or []
-            item_lines: List[str] = []
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                title = str(item.get("title", "") or "").strip()
-                if not title:
-                    continue
-                line = f"- {title}"
-                if include_rank:
-                    ranks = []
-                    for rank in item.get("ranks", []) or []:
-                        try:
-                            rank_value = int(rank)
-                        except (TypeError, ValueError):
-                            continue
-                        if rank_value > 0:
-                            ranks.append(rank_value)
-                    if ranks:
-                        low, high = min(ranks), max(ranks)
-                        line += f" | 排名:{low if low == high else f'{low}-{high}'}"
-                    first_time = item.get("first_time", "")
-                    last_time = item.get("last_time", "")
-                    if first_time:
-                        line += f" | 时间:{self._format_time_range(first_time, last_time)}"
-                    count = item.get("count", 1)
-                    try:
-                        count_value = int(count)
-                    except (TypeError, ValueError):
-                        count_value = 1
-                    if count_value > 1:
-                        line += f" | 出现:{count_value}次"
-                    if self.include_rank_timeline and item.get("rank_timeline"):
-                        line += f" | 轨迹:{self._format_rank_timeline(item['rank_timeline'])}"
-                else:
-                    published_at = str(item.get("published_at", "") or "").strip()
-                    if published_at:
-                        line += f" | 时间:{published_at}"
-                item_lines.append(line)
-
-            if not name or not item_lines:
-                return
-            if lines:
-                lines.append("")
-            lines.append(f"### {name}")
-            lines.extend(item_lines)
-
-        for platform in standalone_data.get("platforms", []) or []:
-            if isinstance(platform, dict):
-                append_source(platform, include_rank=True)
-        for feed in standalone_data.get("rss_feeds", []) or []:
-            if isinstance(feed, dict):
-                append_source(feed, include_rank=False)
-        return "\n".join(lines)
+        """替换模板变量，保留数据中的花括号。"""
+        pattern = r"\{" + "(?:" + "|".join(map(re.escape, values)) + ")" + r"\}"
+        return re.sub(pattern, lambda match: values[match.group()[1:-1]], template or "")
 
     def _prepare_news_content(
-        self,
-        stats: List[Dict],
-        rss_stats: Optional[List[Dict]] = None,
+        self, stats: List[Dict], rss_stats: Optional[List[Dict]] = None,
     ) -> tuple:
-        """将关键词命中标题保守聚成事件簇，再准备 AI 输入。"""
-        total_news = sum(len(stat.get("titles", [])) for stat in (stats or []))
-        total_news += sum(len(stat.get("titles", [])) for stat in (rss_stats or []))
-        selection = select_ai_news(
-            stats=stats,
-            rss_stats=rss_stats,
-            total_limit=self.max_news,
-            source_cap_ratio=self.source_cap_ratio,
-        )
-        event_content = "\n\n".join(
-            self._format_cluster(index, cluster)
-            for index, cluster in enumerate(selection.clusters, 1)
-        )
-        print(
-            f"[AI] 关键词命中标题 {total_news} 条；聚簇后输入 "
-            f"{selection.selected_count} 个事件（事件上限={self.max_news}）"
-        )
-        return (
-            event_content,
-            total_news,
-            selection.selected_count,
-        )
+        """按栏目生成新闻文本。"""
+        grouped = {}
+        for group in (stats or []) + (rss_stats or []):
+            grouped.setdefault(group["word"], []).extend(group.get("titles", []))
+        lines = []
+        total = 0
+        for word, titles in grouped.items():
+            if not titles:
+                continue
+            lines.append(f"\n**{word}** ({len(titles)}条)")
+            lines.extend(self._format_item_input_line(item) for item in titles)
+            total += len(titles)
+        print(f"[AI] 分析材料 {total} 条，{sum(bool(items) for items in grouped.values())} 个栏目")
+        return "\n".join(lines), total, total
 
     def _call_ai(self, user_prompt: str, system_prompt: Optional[str] = None) -> str:
         """调用 AI API"""
@@ -564,10 +405,7 @@ class AIAnalyzer:
         raise RuntimeError("AI 分析重试流程异常结束")
 
     def _dump_rejected_output(self, result: AIAnalysisResult, attempt: int) -> None:
-        """质检失败时保存模型原始输出到 output/meta/，供人工复盘。
-
-        存档失败不得影响分析主流程，异常全部吞掉只打日志。
-        """
+        """质检失败时保存模型原始输出到 output/meta/，供人工复盘。"""
         try:
             response = (result.raw_response or "").strip()
             if not response:
@@ -672,12 +510,7 @@ class AIAnalyzer:
 
     @staticmethod
     def _validate_no_internal_index(title: str, content: str) -> str:
-        """拦下内部事件编号泄漏。
-
-        输入侧曾用 "### 事件 N：标题" 组织事件簇，模型会把 N 当成可复用的引用
-        锚点并写回正文（如"事件6、23、33、34共同指向…"），对读者无意义。
-        输入侧已移除编号，此处作为回归兜底，命中则判失败并触发重试。
-        """
+        """拦下内部事件编号泄漏。"""
         # 仅拦截同一行内的“事件 1”引用。`\s*` 会跨越换行，把
         # “### 支撑事件\n1. 主线”误判为内部事件编号。
         match = re.search(r"事件[ \t]*\d+", content)
@@ -687,18 +520,7 @@ class AIAnalyzer:
 
     @staticmethod
     def _validate_lead_points(title: str, content: str) -> str:
-        """宽松校验「加粗总括句 + 分条拆解」。
-
-        比 events 宽松：不锁定分条语法，任何可辨识的标号都算一条——列表符号、
-        阿拉伯或中文序号、括号与圆圈变体、三级以上标题、行首加粗小标题皆可；
-        也不要求总括只写一句、不要求每条单独正文。只锁住两件真正影响可读性的事：
-        1. 首行是独立的加粗总括句（不直接从分条开头）；
-        2. 总括句后至少 1 条分条拆解。
-
-        背景：该板块原为 prose（零结构校验），实测模型把三大主线全挤进一段，
-        可读性差。而标号样式（圆点/1./一、/（1）/###）纯属排版差异，由渲染层
-        归一化；在此报错只会为排版问题白白多花一次 API 调用。
-        """
+        """宽松校验「加粗总括句 + 分条拆解」。"""
         lines = [line.strip() for line in content.splitlines() if line.strip()]
         if not lines:
             return f"{title}内容为空"

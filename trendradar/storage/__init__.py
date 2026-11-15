@@ -18,7 +18,10 @@ from trendradar.storage.base import (
 )
 from trendradar.storage.sqlite_mixin import SQLiteStorageMixin
 from trendradar.storage.local import LocalStorageBackend
-from trendradar.storage.manager import StorageManager, get_storage_manager
+from trendradar.storage.manager import (
+    StorageBackendError, StorageManager, get_storage_manager, storage_manager_options,
+)
+from trendradar.storage.day_snapshot import DaySnapshotError, DaySnapshotSource
 from trendradar.storage.history_reader import HistoryReader
 
 # 远程后端可选导入（需要 boto3）
@@ -45,7 +48,11 @@ __all__ = [
     "RemoteStorageBackend",
     "HAS_REMOTE",
     # 管理器
+    "StorageBackendError",
     "StorageManager",
     "get_storage_manager",
+    "storage_manager_options",
+    "DaySnapshotError",
+    "DaySnapshotSource",
     "HistoryReader",
 ]

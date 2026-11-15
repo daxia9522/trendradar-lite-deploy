@@ -16,9 +16,9 @@ def prepare_rss_input(
     convert_items: Callable,
     timezone: str,
     rank_threshold: int,
+    defer_grouping: bool = False,
 ) -> RSSResult:
     """Prepare current/daily pools and interval novelty from the SAME capture."""
-    from trendradar.core.analyzer import count_rss_frequency
     from trendradar.storage.base import RSSItem
     from .capture import aliases
 
@@ -39,8 +39,20 @@ def prepare_rss_input(
         raw_rows = [item for item in raw_rows if item["last_time"] == today_source.get("latest_time")]
     new_items = convert(capture["new_rss"])
     raw_items = new_items if mode == "incremental" else convert(raw_rows)
+    prepared = RSSResult(None, None, raw_items, new_items)
+    if defer_grouping:
+        return prepared
+    return group_rss_input(prepared, mode=mode, config=config, keywords=keywords,
+                           timezone=timezone, rank_threshold=rank_threshold)
+
+
+def group_rss_input(prepared, *, mode, config, keywords, timezone, rank_threshold,
+                    group_resolver=None):
+    """对已准备的RSS应用同一份筛选结果。"""
+    from trendradar.core.analyzer import count_rss_frequency
+    raw_items, new_items = prepared.raw_items, prepared.raw_new_items
     if not config.get("DISPLAY", {}).get("REGIONS", {}).get("RSS", True):
-        return RSSResult(None, None, raw_items)
+        return prepared
 
     def count(items, quiet=False):
         return count_rss_frequency(
@@ -49,12 +61,13 @@ def prepare_rss_input(
             new_items=new_items, max_news_per_keyword=config.get("MAX_NEWS_PER_KEYWORD", 0),
             sort_by_position_first=config.get("SORT_BY_POSITION_FIRST", False),
             timezone=timezone, rank_threshold=rank_threshold, quiet=quiet,
+            group_resolver=group_resolver,
         )[0]
 
     # An empty current pool must not discard off-list interval novelty.
     stats = count(raw_items) if raw_items else []
     new_stats = count(new_items, quiet=True) if new_items and mode != "incremental" else []
-    return RSSResult(stats, new_stats, raw_items)
+    return RSSResult(stats, new_stats, raw_items, new_items)
 
 
 def convert_rss_items_to_list(

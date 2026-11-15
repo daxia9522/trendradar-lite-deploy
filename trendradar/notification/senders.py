@@ -1,11 +1,5 @@
 # coding=utf-8
-"""Frozen MIME preparation and one-attempt SMTP submission.
-
-There is intentionally no internal retry loop. The publication owner persists a
-receipt before claiming another attempt for its temporary_failed subset. Losing
-a DATA response is unknown, not proof of failure; QUIT errors cannot revoke an
-acknowledged acceptance.
-"""
+"""MIME preparation and one-attempt SMTP submission."""
 from __future__ import annotations
 
 import re
@@ -17,7 +11,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr, format_datetime, make_msgid
 from pathlib import Path
-from typing import Callable, Optional, Sequence
+from typing import Callable, Optional
 
 from .models import EmailDeliveryResult, PreparedEmail
 
@@ -111,12 +105,7 @@ def _deliver_once(
     tls_context: ssl.SSLContext, prepared: PreparedEmail, password: str,
     recipients: tuple[str, ...],
 ) -> EmailDeliveryResult:
-    """Track MAIL/RCPT/DATA separately so a lost DATA reply keeps refusals.
-
-    Before DATA no message can have been accepted, even if some RCPT commands
-    succeeded. After starting DATA, only an explicit final reply is conclusive.
-    A process interruption escapes to the ledger's inflight/unknown recovery.
-    """
+    """Only the final DATA reply establishes acceptance."""
     server = None
     submitted = False
     outcomes: dict[str, str] = {}
@@ -173,18 +162,11 @@ def _deliver_once(
 
 def send_prepared_email(
     prepared: PreparedEmail, *, password: str,
-    recipients: Optional[Sequence[str]] = None,
     custom_smtp_server: Optional[str] = None,
     custom_smtp_port: Optional[int] = None,
 ) -> EmailDeliveryResult:
-    """One SMTP attempt; caller authorizes and persists each retry separately."""
-    if recipients is not None and isinstance(recipients, str):
-        raise ValueError("Recipients must be an envelope sequence")
-    requested = prepared.recipients if recipients is None else tuple(recipients)
-    if len(set(requested)) != len(requested) or not set(requested).issubset(prepared.recipients):
-        raise ValueError("Recipients must be a unique subset of the original envelope")
-    if not requested:
-        return EmailDeliveryResult(configured=bool(password))
+    """Send once; no automatic retry."""
+    requested = prepared.recipients
     if not password:
         return EmailDeliveryResult(configured=False, requested=requested, permanent_failed=requested)
     try:
@@ -209,34 +191,9 @@ def send_prepared_email(
     if result.sent:
         print("[邮件] 邮件发送成功：全部请求收件人已被 SMTP 接受")
     elif result.partially_delivered:
-        print("[邮件] 邮件部分投递：禁止整封重发")
+        print("[邮件] 邮件部分投递")
     print(
         f"[邮件] SMTP 回执：接受={len(result.accepted)}，暂时失败={len(result.temporary_failed)}，"
         f"永久失败={len(result.permanent_failed)}，未知={len(result.unknown)}"
     )
     return result
-
-
-def send_to_email(
-    from_email: str, password: str, to_email: str, report_type: str,
-    html_file_path: str, custom_smtp_server: Optional[str] = None,
-    custom_smtp_port: Optional[int] = None, *, get_time_func: Optional[Callable] = None,
-    subject_override: Optional[str] = None, sender_name_override: Optional[str] = None,
-) -> EmailDeliveryResult:
-    """Non-ledger convenience: prepare once and submit once, never auto-retry."""
-    configured = bool(from_email and password and to_email)
-    if not configured:
-        return EmailDeliveryResult(configured=False)
-    try:
-        prepared = prepare_email(
-            from_email, to_email, report_type, html_file_path,
-            get_time_func=get_time_func, subject_override=subject_override,
-            sender_name_override=sender_name_override,
-        )
-    except Exception as exc:
-        print(f"[邮件] 报告准备失败（{type(exc).__name__}）")
-        return EmailDeliveryResult(configured=True)
-    return send_prepared_email(
-        prepared, password=password, custom_smtp_server=custom_smtp_server,
-        custom_smtp_port=custom_smtp_port,
-    )

@@ -28,8 +28,9 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 # Use exactly the literal parser behind read_env / EnvDocument, on bytes from
 # our single securely opened descriptor (their path I/O would reopen the file).
 from deploy.envfile import ConfigError, _records
-from deploy.backup_settings import BackupConfigError, DEFAULT_BACKUP_TIME, load_backup_settings
-from deploy.delivery_windows import DELIVERY_DEFAULTS, DeliveryWindowError, delivery_times
+from deploy.delivery_windows import DeliveryWindowError, delivery_times
+from deploy.ai_settings import (GROUP_KEY_FIELDS, GROUP_KEY_FILE_FIELDS, GROUP_ENDPOINT_FIELDS, LEGACY_AI_ERROR,
+                               retired_ai_errors)
 
 RUNTIME_ENV_KEY = "TRENDRADAR_RUNTIME_ENV"
 DOCKER_MARKER = b"# TrendRadar env format: docker\n"
@@ -45,15 +46,13 @@ BASE_ENV_KEYS = frozenset({
 })
 APP_PREFIXES = ("AI_", "EMAIL_", "S3_", "STORAGE_", "SCHEDULE_", "SCHEDULER_", "PLATFORMS_")
 APP_KEYS = frozenset({
+    *GROUP_KEY_FIELDS, *GROUP_KEY_FILE_FIELDS, *GROUP_ENDPOINT_FIELDS,
     "TZ", "TIMEZONE", "DEBUG", "CONFIG_PATH", "FREQUENCY_WORDS_PATH",
     "SORT_BY_POSITION_FIRST", "MAX_NEWS_PER_KEYWORD", "LOCAL_RETENTION_DAYS",
     "REMOTE_RETENTION_DAYS", "PULL_ENABLED", "PULL_DAYS", "CRAWLER_MINUTE",
     "MORNING_PUSH_TIME", "NOON_PUSH_TIME", "EVENING_PUSH_TIME", "DAILY_SUMMARY_TIME",
     "WEEKLY_WEEKDAY", "WEEKLY_HOUR", "WEEKLY_MINUTE", "DOCKER_CONTAINER",
-    "R2_BACKUP_ENABLED", "R2_BACKUP_TIME", "R2_BACKUP_LOOKBACK_DAYS",
 })
-TIME_KEYS = tuple(DELIVERY_DEFAULTS)
-DEFAULT_TIMES = tuple(DELIVERY_DEFAULTS.values())
 ERRORS = {
     "path": "runtime configuration path is invalid",
     "missing": "runtime configuration file is missing",
@@ -68,8 +67,8 @@ ERRORS = {
     "locked": "runtime configuration cannot change Docker/local storage identity",
     "schedule": "runtime configuration contains invalid schedule settings",
     "delivery_overlap": "delivery windows must use different hours; each ends at HH:59",
-    "backup": "runtime configuration contains invalid backup settings",
     "value": "runtime configuration contains an invalid application setting",
+    "retired_ai": LEGACY_AI_ERROR,
 }
 
 
@@ -197,15 +196,12 @@ class ScheduleSettings:
     weekly_minute: int
     poll_seconds: int
     max_attempts: int
-    backup_enabled: bool = False
-    backup_time: str = DEFAULT_BACKUP_TIME
 
     @property
     def timing_signature(self) -> tuple:
         # Poll/retry tuning and secrets are not schedule changes.
         return (self.timezone.key, self.crawler_minute, self.push_times,
-                self.weekly_weekday, self.weekly_hour, self.weekly_minute,
-                self.backup_enabled, self.backup_time)
+                self.weekly_weekday, self.weekly_hour, self.weekly_minute)
 
 
 def schedule_settings(values: Mapping[str, str]) -> ScheduleSettings:
@@ -220,10 +216,6 @@ def schedule_settings(values: Mapping[str, str]) -> ScheduleSettings:
         times = delivery_times(values)
     except DeliveryWindowError as exc:
         raise RuntimeConfigError("delivery_overlap" if exc.code == "overlap" else "schedule") from None
-    try:
-        backup = load_backup_settings(values)
-    except BackupConfigError:
-        raise RuntimeConfigError("backup") from None
     return ScheduleSettings(
         timezone, _integer(values, "CRAWLER_MINUTE", 5, 0, 59), frozenset(times),
         _integer(values, "WEEKLY_WEEKDAY", 6, 0, 6),
@@ -231,12 +223,13 @@ def schedule_settings(values: Mapping[str, str]) -> ScheduleSettings:
         _integer(values, "WEEKLY_MINUTE", 30, 0, 59),
         max(10, _integer(values, "SCHEDULER_POLL_SECONDS", 20, 1, 86400)),
         _integer(values, "SCHEDULER_MAX_ATTEMPTS", 3, 1, 100),
-        backup.enabled, backup.time,
     )
 
 
 def validate_runtime_values(values: Mapping[str, str]) -> None:
     """Validate without side effects; does not require AI or mail credentials."""
+    if retired_ai_errors(values):
+        raise RuntimeConfigError("retired_ai")
     for key, value in values.items():
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) or not is_application_key(key):
             raise RuntimeConfigError("unsupported")
@@ -245,13 +238,13 @@ def validate_runtime_values(values: Mapping[str, str]) -> None:
     if values.get("DOCKER_CONTAINER", "true") != "true" or values.get("STORAGE_BACKEND", "local") != "local":
         raise RuntimeConfigError("locked")
     schedule_settings(values)
-    for key in ("AI_ANALYSIS_ENABLED", "DEBUG", "SORT_BY_POSITION_FIRST", "SCHEDULE_ENABLED",
+    for key in ("AI_ANALYSIS_ENABLED", "AI_FILTER_ENABLED", "DEBUG", "SORT_BY_POSITION_FIRST", "SCHEDULE_ENABLED",
                 "STORAGE_TXT_ENABLED", "STORAGE_HTML_ENABLED", "PULL_ENABLED"):
         # Match loader._get_env_bool without rewriting the literal environment:
         # whitespace-only means YAML fallback, not an explicit false override.
         if values.get(key, "").strip().lower() not in ("", "true", "false", "1", "0"):
             raise RuntimeConfigError("value")
-    for key, low, high in (("AI_TIMEOUT", 1, 2147483647), ("EMAIL_SMTP_PORT", 1, 65535)):
+    for key, low, high in (("EMAIL_SMTP_PORT", 1, 65535),):
         if values.get(key):
             try:
                 if not low <= int(values[key]) <= high:
@@ -284,8 +277,9 @@ def load_runtime_config(base_env: Mapping[str, str] | None = None) -> RuntimeSna
         environment[RUNTIME_ENV_KEY] = base[RUNTIME_ENV_KEY]
     else:
         environment = base
-    # Validate before injecting the locked Docker identity: opting in to backup
-    # must explicitly declare local storage even in historical env-only mode.
+    if retired_ai_errors(environment):
+        raise RuntimeConfigError("retired_ai")
+    # Resolve business schedules without changing historical env-only semantics.
     settings = schedule_settings(environment)
     environment.update(DOCKER_CONTAINER="true", STORAGE_BACKEND="local")
     return RuntimeSnapshot(MappingProxyType(environment), settings, external)

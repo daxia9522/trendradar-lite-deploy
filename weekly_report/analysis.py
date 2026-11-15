@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from trendradar.ai.client import AIClient, build_keyword_client
+from trendradar.ai.client import AIClient
 
 # Prompt requests 2-6 characters; this guard retains the accepted 12-character ceiling.
 KEYWORD_TOPN = 5
@@ -330,24 +330,24 @@ def validate_keyword(candidate: Any, report_text: str) -> Tuple[Optional[Dict[st
 
 
 def generate_keywords(client: AIClient, start_date: str, end_date: str, report_text: str) -> Dict[str, Any]:
-    """Dedicated first-fallback model; at most two business attempts, no rule backfill."""
+    """Explicit keyword task; at most two business attempts, no rule backfill."""
     result: Dict[str, Any] = {
         "version": 2, "source": "keyword_unavailable", "model": None,
         "final": [], "final_details": [], "attempts": [],
     }
     try:
-        # Keep the complete native fallback:1 identity, including its own auth/base.
-        # A missing slot must not silently promote the main model to label generation.
-        if not any(candidate.id == "fallback:1" for candidate in client.candidates):
-            result["reason"] = "missing_keyword_model"
+        # Explicit keyword task; never derives from the body fallback order.
+        if client.task_name != "weekly_keywords" or len(client.candidates) != 1:
+            result["reason"] = "keyword_model_contract_mismatch"
+            return result
+        valid, _ = client.validate_config()
+        if not valid:
+            result["reason"] = "keyword_setup_error"
             return result
         if not isinstance(report_text, str) or not report_text.strip():
             result["reason"] = "empty_report"
             return result
-        keyword_client = build_keyword_client(client)
-        if len(keyword_client.candidates) != 1 or keyword_client.candidates[0].id != "fallback:1":
-            result["reason"] = "keyword_model_contract_mismatch"
-            return result
+        keyword_client = client
         result["model"] = keyword_client.model
         messages = build_keyword_prompt(start_date, end_date, report_text)
     except Exception as exc:

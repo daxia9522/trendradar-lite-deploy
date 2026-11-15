@@ -6,9 +6,11 @@
 """
 
 import os
+from pathlib import Path
 from typing import Optional
 
 from trendradar.storage.base import StorageBackend, NewsData, RSSData
+from trendradar.storage.day_snapshot import DaySnapshotSource
 from trendradar.utils.time import DEFAULT_TIMEZONE
 
 
@@ -16,12 +18,46 @@ from trendradar.utils.time import DEFAULT_TIMEZONE
 _storage_manager: Optional["StorageManager"] = None
 
 
+class StorageBackendError(RuntimeError):
+    """A required storage backend could not be selected or initialized."""
+
+
+def storage_manager_options(config: dict, *, project_root: str | Path | None = None) -> dict:
+    """Map the application's normalized configuration once for all entrypoints."""
+    storage = config.get("STORAGE", {})
+    remote = storage.get("REMOTE", {})
+    local = storage.get("LOCAL", {})
+    pull = storage.get("PULL", {})
+    formats = storage.get("FORMATS", {})
+    data_dir = local.get("DATA_DIR", "output")
+    if project_root is not None:
+        path = Path(data_dir)
+        data_dir = str(path if path.is_absolute() else Path(project_root) / path)
+    return {
+        "backend_type": storage.get("BACKEND", "auto"),
+        "data_dir": data_dir,
+        "enable_txt": formats.get("TXT", True),
+        "remote_config": {
+            "bucket_name": remote.get("BUCKET_NAME", ""),
+            "access_key_id": remote.get("ACCESS_KEY_ID", ""),
+            "secret_access_key": remote.get("SECRET_ACCESS_KEY", ""),
+            "endpoint_url": remote.get("ENDPOINT_URL", ""),
+            "region": remote.get("REGION", ""),
+        },
+        "local_retention_days": local.get("RETENTION_DAYS", 0),
+        "remote_retention_days": remote.get("RETENTION_DAYS", 0),
+        "pull_enabled": pull.get("ENABLED", False),
+        "pull_days": pull.get("DAYS", 7),
+        "timezone": config.get("TIMEZONE", DEFAULT_TIMEZONE),
+    }
+
+
 class StorageManager:
     """
     存储管理器
 
     功能：
-    - 自动检测运行环境（GitHub Actions / Docker / 本地）
+    - 自动检测运行环境（GitHub Actions / 本地）
     - 根据配置选择存储后端（local / remote / auto）
     - 提供统一的存储接口
     - 支持从远程拉取数据到本地
@@ -32,7 +68,6 @@ class StorageManager:
         backend_type: str = "auto",
         data_dir: str = "output",
         enable_txt: bool = True,
-        enable_html: bool = True,
         remote_config: Optional[dict] = None,
         local_retention_days: int = 0,
         remote_retention_days: int = 0,
@@ -47,7 +82,6 @@ class StorageManager:
             backend_type: 存储后端类型 (local / remote / auto)
             data_dir: 本地数据目录
             enable_txt: 是否启用 TXT 快照
-            enable_html: 是否启用 HTML 报告
             remote_config: 远程存储配置（endpoint_url, bucket_name, access_key_id 等）
             local_retention_days: 本地数据保留天数（0 = 无限制）
             remote_retention_days: 远程数据保留天数（0 = 无限制）
@@ -55,10 +89,11 @@ class StorageManager:
             pull_days: 拉取最近 N 天的数据
             timezone: 时区配置
         """
+        if backend_type not in {"local", "remote", "auto"}:
+            raise ValueError("Storage backend must be local, remote or auto")
         self.backend_type = backend_type
         self.data_dir = data_dir
         self.enable_txt = enable_txt
-        self.enable_html = enable_html
         self.remote_config = remote_config or {}
         self.local_retention_days = local_retention_days
         self.remote_retention_days = remote_retention_days
@@ -68,29 +103,18 @@ class StorageManager:
 
         self._backend: Optional[StorageBackend] = None
         self._remote_backend: Optional[StorageBackend] = None
-        self._publication_store = None
+        self._day_source: Optional[DaySnapshotSource] = None
+
+    @classmethod
+    def from_config(cls, config: dict, *, project_root: str | Path | None = None) -> "StorageManager":
+        """Build an independently owned manager, without a process-global pin."""
+        return cls(**storage_manager_options(config, project_root=project_root))
 
     @staticmethod
     def is_github_actions() -> bool:
         """检测是否在 GitHub Actions 环境中运行"""
         return os.environ.get("GITHUB_ACTIONS") == "true"
 
-    @staticmethod
-    def is_docker() -> bool:
-        """检测是否在 Docker 容器中运行"""
-        # 方法1: 检查 /.dockerenv 文件
-        if os.path.exists("/.dockerenv"):
-            return True
-
-        # 方法2: 检查 cgroup（Linux）
-        try:
-            with open("/proc/1/cgroup", "r") as f:
-                return "docker" in f.read()
-        except (FileNotFoundError, PermissionError):
-            pass
-
-        # 方法3: 检查环境变量
-        return os.environ.get("DOCKER_CONTAINER") == "true"
 
     def _resolve_backend_type(self) -> str:
         """解析实际使用的后端类型"""
@@ -137,87 +161,48 @@ class StorageManager:
                 endpoint_url=self.remote_config.get("endpoint_url") or os.environ.get("S3_ENDPOINT_URL", ""),
                 region=self.remote_config.get("region") or os.environ.get("S3_REGION", ""),
                 enable_txt=self.enable_txt,
-                enable_html=self.enable_html,
                 timezone=self.timezone,
             )
         except ImportError as e:
-            print(f"[存储管理器] 远程后端导入失败: {e}")
+            print(f"[存储管理器] 远程后端导入失败: {type(e).__name__}")
             print("[存储管理器] 请确保已安装 boto3: pip install boto3")
             return None
         except Exception as e:
-            print(f"[存储管理器] 远程后端初始化失败: {e}")
+            print(f"[存储管理器] 远程后端初始化失败: {type(e).__name__}")
             return None
 
     def get_backend(self) -> StorageBackend:
-        """获取存储后端实例"""
+        """Select once; a selected remote backend must never become local."""
         if self._backend is None:
             resolved_type = self._resolve_backend_type()
 
             if resolved_type == "remote":
                 self._backend = self._create_remote_backend()
-                if self._backend:
-                    print(f"[存储管理器] 使用远程存储后端")
-                else:
-                    print("[存储管理器] 回退到本地存储")
-                    resolved_type = "local"
-
-            if resolved_type == "local" or self._backend is None:
+                if self._backend is None or self._backend.backend_name != "remote":
+                    self._backend = None
+                    raise StorageBackendError("Cannot initialize required remote storage backend")
+                print("[存储管理器] 使用远程存储后端")
+            else:
                 from trendradar.storage.local import LocalStorageBackend
 
                 self._backend = LocalStorageBackend(
                     data_dir=self.data_dir,
                     enable_txt=self.enable_txt,
-                    enable_html=self.enable_html,
                     timezone=self.timezone,
                 )
                 print(f"[存储管理器] 使用本地存储后端 (数据目录: {self.data_dir})")
-
+        if self.backend_type == "remote" and self._backend.backend_name != "remote":
+            raise StorageBackendError("Required remote storage cannot use a local backend")
         return self._backend
 
-    def get_publication_store(self):
-        """Lazily share the backend's durable publication ledger, never a fallback.
-
-        The news backend historically permits remote-to-local fallback. That is
-        unsafe for publication claims, so remote selection is enforced here even
-        if a previous get_backend() call already fell back to local news storage.
-        """
-        from trendradar.storage.publication import (
-            LocalPublicationStore, PublicationError, RemotePublicationStore,
-        )
-
-        if self._publication_store is not None:
-            return self._publication_store
-
-        remote_required = self._resolve_backend_type() == "remote"
-        if self._backend is None and remote_required:
-            # Do not use the legacy fallback helper: its diagnostics can include
-            # provider error text and its failure permits local initialization.
-            try:
-                from trendradar.storage.remote import RemoteStorageBackend
-
-                self._backend = RemoteStorageBackend(
-                    bucket_name=self.remote_config.get("bucket_name") or os.environ.get("S3_BUCKET_NAME", ""),
-                    access_key_id=self.remote_config.get("access_key_id") or os.environ.get("S3_ACCESS_KEY_ID", ""),
-                    secret_access_key=self.remote_config.get("secret_access_key") or os.environ.get("S3_SECRET_ACCESS_KEY", ""),
-                    endpoint_url=self.remote_config.get("endpoint_url") or os.environ.get("S3_ENDPOINT_URL", ""),
-                    region=self.remote_config.get("region") or os.environ.get("S3_REGION", ""),
-                    enable_txt=self.enable_txt,
-                    enable_html=self.enable_html,
-                    timezone=self.timezone,
-                )
-            except Exception:
-                raise PublicationError("Cannot initialize required remote publication backend") from None
-
+    def get_day_source(self) -> DaySnapshotSource:
+        """Share one read-only source and the selected backend's borrowed client."""
         backend = self.get_backend()
-        if remote_required and backend.backend_name != "remote":
-            raise PublicationError("Remote publication cannot use a local fallback backend")
-        if backend.backend_name == "remote":
-            self._publication_store = RemotePublicationStore(backend.s3_client, backend.bucket_name)
-        elif backend.backend_name == "local":
-            self._publication_store = LocalPublicationStore(backend.data_dir)
-        else:
-            raise PublicationError("Unsupported publication storage backend")
-        return self._publication_store
+        if self._resolve_backend_type() == "remote" and backend.backend_name != "remote":
+            raise StorageBackendError("Remote source cannot use a local backend")
+        if self._day_source is None:
+            self._day_source = DaySnapshotSource(backend)
+        return self._day_source
 
     def pull_from_remote(self) -> int:
         """
@@ -252,50 +237,18 @@ class StorageManager:
         """保存 RSS 数据"""
         return self.get_backend().save_rss_data(data)
 
-    def get_rss_data(self, date: Optional[str] = None) -> Optional[RSSData]:
-        """获取指定日期的所有 RSS 数据（当日汇总模式）"""
-        return self.get_backend().get_rss_data(date)
-
-    def get_latest_rss_data(self, date: Optional[str] = None) -> Optional[RSSData]:
-        """获取最新一次抓取的 RSS 数据（当前榜单模式）"""
-        return self.get_backend().get_latest_rss_data(date)
-
-    def detect_new_rss_items(self, current_data: RSSData) -> dict:
-        """检测新增的 RSS 条目（增量模式）"""
-        return self.get_backend().detect_new_rss_items(current_data)
-
-    def get_today_all_data(self, date: Optional[str] = None) -> Optional[NewsData]:
-        """获取当天所有数据"""
-        return self.get_backend().get_today_all_data(date)
-
-    def get_latest_crawl_data(self, date: Optional[str] = None) -> Optional[NewsData]:
-        """获取最新抓取数据"""
-        return self.get_backend().get_latest_crawl_data(date)
-
-    def detect_new_titles(self, current_data: NewsData) -> dict:
-        """检测新增标题"""
-        return self.get_backend().detect_new_titles(current_data)
 
     def save_txt_snapshot(self, data: NewsData) -> Optional[str]:
         """保存 TXT 快照"""
         return self.get_backend().save_txt_snapshot(data)
 
-    def save_html_report(self, html_content: str, filename: str) -> Optional[str]:
-        """保存 HTML 报告"""
-        return self.get_backend().save_html_report(html_content, filename)
-
-    def is_first_crawl_today(self, date: Optional[str] = None) -> bool:
-        """检查是否是当天第一次抓取"""
-        return self.get_backend().is_first_crawl_today(date)
 
     def cleanup(self) -> None:
-        """清理资源"""
-        if self._publication_store is not None:
-            self._publication_store.close()
-            self._publication_store = None
+        """清理资源；不执行数据库保留策略或删除业务数据。"""
+        self._day_source = None
         if self._backend:
             self._backend.cleanup()
-        if self._remote_backend:
+        if self._remote_backend and self._remote_backend is not self._backend:
             self._remote_backend.cleanup()
 
     def cleanup_old_data(self) -> int:
@@ -353,35 +306,10 @@ class StorageManager:
         return self.get_backend().flush()
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    def get_all_news_ids(self, date=None):
-        """获取所有新闻 ID 和标题"""
-        return self.get_backend().get_all_news_ids(date)
-
-    def get_all_rss_ids(self, date=None):
-        """获取所有 RSS ID 和标题"""
-        return self.get_backend().get_all_rss_ids(date)
-
-
-
 def get_storage_manager(
     backend_type: str = "auto",
     data_dir: str = "output",
     enable_txt: bool = True,
-    enable_html: bool = True,
     remote_config: Optional[dict] = None,
     local_retention_days: int = 0,
     remote_retention_days: int = 0,
@@ -397,7 +325,6 @@ def get_storage_manager(
         backend_type: 存储后端类型
         data_dir: 本地数据目录
         enable_txt: 是否启用 TXT 快照
-        enable_html: 是否启用 HTML 报告
         remote_config: 远程存储配置
         local_retention_days: 本地数据保留天数（0 = 无限制）
         remote_retention_days: 远程数据保留天数（0 = 无限制）
@@ -416,7 +343,6 @@ def get_storage_manager(
             backend_type=backend_type,
             data_dir=data_dir,
             enable_txt=enable_txt,
-            enable_html=enable_html,
             remote_config=remote_config,
             local_retention_days=local_retention_days,
             remote_retention_days=remote_retention_days,

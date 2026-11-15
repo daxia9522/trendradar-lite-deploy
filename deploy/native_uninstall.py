@@ -55,7 +55,7 @@ def remove_reports(units: Path, runner=None):
     paths = [units / name for name in REPORT_NAMES]
     # Include missing manager-visible timers, not just files found on disk.
     # The existing gate still applies to every reload, including recovery.
-    transaction = RemovalTransaction({}, runner, guard_paths=[*paths, units / "trendradar-r2-backup.timer"])
+    transaction = RemovalTransaction({}, runner, guard_paths=paths)
     transaction.preflight(initial=True)
     transaction.check()
     original = dict(transaction.before)
@@ -70,8 +70,8 @@ def remove_reports(units: Path, runner=None):
         # reload, or try to start a persistent report timer as compensation.
         transaction.call("disable", "--no-reload", "--now", *targets)
     stopped(transaction, units)
-    # Reports are deliberately stopped, not state-preserved. Keep checking that
-    # explicitly; unchanged backup timers retain UnitTransaction's calendar gate.
+    # Reports are deliberately stopped, not state-preserved. Verify that state
+    # explicitly before every removal and reload.
     for name in TIMER_NAMES:
         transaction.timers.pop(units / name)
         transaction.states.pop(name)

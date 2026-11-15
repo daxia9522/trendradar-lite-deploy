@@ -1,14 +1,61 @@
 # coding=utf-8
-"""
-报告生成模块
+"""展示数据准备与HTML快照生成。"""
 
-提供报告数据准备和 HTML 生成功能：
-- prepare_report_data: 准备报告数据
-- generate_html_report: 生成 HTML 报告
-"""
-
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Callable
+import unicodedata
+
+from trendradar.core.analyzer import calculate_news_weight
+from trendradar.utils.url import normalize_url
+
+
+def _select_new_titles(new_titles, stats, id_to_name, options, rank_threshold, weight_config):
+    """首次发现时间优先，同批次按热度排序。"""
+    if options is None:
+        return new_titles
+    total, per_source = options.get("MAX_ITEMS", 0), options.get("MAX_PER_SOURCE", 0)
+    weights = weight_config or {"RANK_WEIGHT": 0.6, "FREQUENCY_WEIGHT": 0.3, "HOTNESS_WEIGHT": 0.1}
+    name_to_id = {name: sid for sid, name in id_to_name.items()}
+
+    def identities(title, data, source_id):
+        normalized = " ".join(unicodedata.normalize("NFKC", title).split()).casefold()
+        keys = {("title", normalized)} if normalized else set()
+        for field in ("url", "mobileUrl", "mobile_url"):
+            if data.get(field):
+                keys.add(("url", normalize_url(data[field], source_id)))
+        return keys
+
+    main_keys = {key for group in stats for item in group.get("titles", [])
+                 for key in identities(item["title"], item, name_to_id.get(item.get("source_name"), ""))}
+    rows = []
+    for sid, titles in new_titles.items():
+        for title, data in titles.items():
+            ranks = list(dict.fromkeys(r for r in (data.get("ranks") or []) if type(r) is int and r > 0))
+            try:
+                count = max(1, int(data.get("count", len(ranks) or 1)))
+            except (TypeError, ValueError):
+                count = 1
+            score = round(calculate_news_weight({"ranks": ranks, "count": count}, rank_threshold, weights), 8)
+            try:
+                first_seen = datetime.fromisoformat(data.get("first_seen_at", "")).timestamp()
+            except (TypeError, ValueError, OverflowError):
+                first_seen = 0
+            rows.append((-first_seen, -score, sid, title, data.get("url", ""), data))
+
+    selected, seen, shown = {}, set(), 0
+    for _, _, sid, title, _, data in sorted(rows, key=lambda row: row[:5]):
+        keys = identities(title, data, sid)
+        if keys & (main_keys | seen):
+            continue
+        if per_source > 0 and len(selected.get(sid, {})) >= per_source:
+            continue
+        selected.setdefault(sid, {})[title] = data
+        seen.update(keys)
+        shown += 1
+        if total > 0 and shown >= total:
+            break
+    return {sid: selected[sid] for sid in new_titles if sid in selected}
 
 
 def prepare_report_data(
@@ -18,203 +65,79 @@ def prepare_report_data(
     id_to_name: Optional[Dict] = None,
     mode: str = "daily",
     rank_threshold: int = 3,
-    matches_word_groups_func: Optional[Callable] = None,
-    load_frequency_words_func: Optional[Callable] = None,
     show_new_section: bool = True,
+    new_items_options: Optional[Dict] = None,
+    weight_config: Optional[Dict] = None,
 ) -> Dict:
-    """
-    准备报告数据
-
-    Args:
-        stats: 统计结果列表
-        failed_ids: 失败的 ID 列表
-        new_titles: 新增标题
-        id_to_name: ID 到名称的映射
-        mode: 报告模式 (daily/incremental/current)
-        rank_threshold: 排名阈值
-        matches_word_groups_func: 词组匹配函数
-        load_frequency_words_func: 加载频率词函数
-        show_new_section: 是否显示新增热点区域
-
-    Returns:
-        Dict: 准备好的报告数据
-    """
+    """将已归类的主榜和新增候选整理为展示数据。"""
     processed_new_titles = []
-
-    # 在增量模式下或配置关闭时隐藏新增新闻区域
-    hide_new_section = mode == "incremental" or not show_new_section
-
-    # 只有在非隐藏模式下才处理新增新闻部分
-    if not hide_new_section:
-        filtered_new_titles = {}
-        if new_titles and id_to_name:
-            # 如果提供了匹配函数，使用它过滤
-            if matches_word_groups_func and load_frequency_words_func:
-                word_groups, filter_words, global_filters = load_frequency_words_func()
-                for source_id, titles_data in new_titles.items():
-                    filtered_titles = {}
-                    for title, title_data in titles_data.items():
-                        if matches_word_groups_func(title, word_groups, filter_words, global_filters):
-                            filtered_titles[title] = title_data
-                    if filtered_titles:
-                        filtered_new_titles[source_id] = filtered_titles
-            else:
-                # 没有匹配函数时，使用全部
-                filtered_new_titles = new_titles
-
-            # 打印过滤后的新增热点数（与推送显示一致）
-            original_new_count = sum(len(titles) for titles in new_titles.values()) if new_titles else 0
-            filtered_new_count = sum(len(titles) for titles in filtered_new_titles.values()) if filtered_new_titles else 0
-            if original_new_count > 0:
-                print(f"频率词过滤后：{filtered_new_count} 条新增热点匹配（原始 {original_new_count} 条）")
-
-        if filtered_new_titles and id_to_name:
-            for source_id, titles_data in filtered_new_titles.items():
-                source_name = id_to_name.get(source_id, source_id)
-                source_titles = []
-
-                for title, title_data in titles_data.items():
-                    url = title_data.get("url", "")
-                    mobile_url = title_data.get("mobileUrl", "")
-                    ranks = title_data.get("ranks", [])
-
-                    processed_title = {
-                        "title": title,
-                        "source_name": source_name,
-                        "time_display": "",
-                        "count": 1,
-                        "ranks": ranks,
-                        "rank_threshold": rank_threshold,
-                        "url": url,
-                        "mobile_url": mobile_url,
-                        "is_new": True,
-                    }
-                    source_titles.append(processed_title)
-
-                if source_titles:
-                    processed_new_titles.append(
-                        {
-                            "source_id": source_id,
-                            "source_name": source_name,
-                            "titles": source_titles,
-                        }
-                    )
+    if mode != "incremental" and show_new_section and new_titles and id_to_name:
+        selected = _select_new_titles(new_titles, stats, id_to_name, new_items_options,
+                                      rank_threshold, weight_config)
+        print(f"[新增展示] {sum(len(titles) for titles in selected.values())} 条")
+        for source_id, titles in selected.items():
+            if not titles:
+                continue
+            source_name = id_to_name.get(source_id, source_id)
+            processed_new_titles.append({
+                "source_id": source_id,
+                "source_name": source_name,
+                "titles": [{
+                    "title": title,
+                    "source_name": source_name,
+                    "time_display": "",
+                    "count": 1,
+                    "ranks": data.get("ranks", []),
+                    "rank_threshold": rank_threshold,
+                    "url": data.get("url", ""),
+                    "mobile_url": data.get("mobileUrl", ""),
+                    "is_new": True,
+                } for title, data in titles.items()],
+            })
 
     processed_stats = []
-    for stat in stats:
-        if stat["count"] <= 0:
+    for group in stats:
+        if group["count"] <= 0:
             continue
-
-        processed_titles = []
-        for title_data in stat["titles"]:
-            processed_title = {
-                "title": title_data["title"],
-                "source_name": title_data["source_name"],
-                "time_display": title_data["time_display"],
-                "count": title_data["count"],
-                "ranks": title_data["ranks"],
-                "rank_threshold": title_data["rank_threshold"],
-                "url": title_data.get("url", ""),
-                "mobile_url": title_data.get("mobileUrl", ""),
-                "is_new": title_data.get("is_new", False),
-                "matched_keyword": title_data.get("matched_keyword", ""),
-            }
-            processed_titles.append(processed_title)
-
-        processed_stats.append(
-            {
-                "word": stat["word"],
-                "count": stat["count"],
-                "percentage": stat.get("percentage", 0),
-                "titles": processed_titles,
-            }
-        )
-
+        processed_stats.append({
+            "word": group["word"],
+            "count": group["count"],
+            "percentage": group.get("percentage", 0),
+            "titles": [{
+                "title": item["title"],
+                "source_name": item["source_name"],
+                "time_display": item["time_display"],
+                "count": item["count"],
+                "ranks": item["ranks"],
+                "rank_threshold": item["rank_threshold"],
+                "url": item.get("url", ""),
+                "mobile_url": item.get("mobileUrl", ""),
+                "is_new": item.get("is_new", False),
+                "matched_keyword": item.get("matched_keyword", ""),
+            } for item in group["titles"]],
+        })
     return {
         "stats": processed_stats,
         "new_titles": processed_new_titles,
         "failed_ids": failed_ids or [],
-        "total_new_count": sum(
-            len(source["titles"]) for source in processed_new_titles
-        ),
+        "total_new_count": sum(len(source["titles"]) for source in processed_new_titles),
     }
 
 
 def generate_html_report(
-    stats: List[Dict],
-    failed_ids: Optional[List] = None,
-    new_titles: Optional[Dict] = None,
-    id_to_name: Optional[Dict] = None,
+    report_data: Dict,
     mode: str = "daily",
-    rank_threshold: int = 3,
     output_dir: str = "output",
     date_folder: str = "",
     time_filename: str = "",
     render_email_html_func: Optional[Callable] = None,
-    matches_word_groups_func: Optional[Callable] = None,
-    load_frequency_words_func: Optional[Callable] = None,
 ) -> str:
-    """
-    生成邮箱专用 HTML 报告
-
-    每次生成后会保存时间戳快照、latest 和 output/email.html。
-
-    Args:
-        stats: 统计结果列表
-        failed_ids: 失败的 ID 列表
-        new_titles: 新增标题
-        id_to_name: ID 到名称的映射
-        mode: 报告模式 (daily/incremental/current)
-        rank_threshold: 排名阈值
-        output_dir: 输出目录
-        date_folder: 日期文件夹名称
-        time_filename: 时间文件名
-        render_email_html_func: 邮箱 HTML 渲染函数
-        matches_word_groups_func: 词组匹配函数
-        load_frequency_words_func: 加载频率词函数
-
-    Returns:
-        str: 邮箱 HTML 时间戳快照路径
-    """
-    # 时间戳快照文件名
-    snapshot_filename = f"{time_filename}.html"
-
-    # 构建输出路径（扁平化结构：output/html/日期/）
+    """渲染并保存本轮HTML快照。"""
     snapshot_path = Path(output_dir) / "html" / date_folder
     snapshot_path.mkdir(parents=True, exist_ok=True)
-    snapshot_file = str(snapshot_path / snapshot_filename)
-
-    # 准备报告数据
-    report_data = prepare_report_data(
-        stats,
-        failed_ids,
-        new_titles,
-        id_to_name,
-        mode,
-        rank_threshold,
-        matches_word_groups_func,
-        load_frequency_words_func,
-    )
-
+    snapshot_file = str(snapshot_path / f"{time_filename}.html")
     if not render_email_html_func:
         raise ValueError("render_email_html_func is required")
-
     html_content = render_email_html_func(report_data, mode)
-
-    # 1. 保存时间戳快照（历史记录）
-    with open(snapshot_file, "w", encoding="utf-8") as f:
-        f.write(html_content)
-
-    # 2. 复制到 html/latest/{mode}.html（最新邮件报告）
-    latest_dir = Path(output_dir) / "html" / "latest"
-    latest_dir.mkdir(parents=True, exist_ok=True)
-    latest_file = latest_dir / f"{mode}.html"
-    with open(latest_file, "w", encoding="utf-8") as f:
-        f.write(html_content)
-
-    # 3. 固定入口，便于人工预览和下载。
-    output_email = Path(output_dir) / "email.html"
-    with open(output_email, "w", encoding="utf-8") as f:
-        f.write(html_content)
-
+    Path(snapshot_file).write_text(html_content, encoding="utf-8")
     return snapshot_file

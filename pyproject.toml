@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "trendradar-lite-deploy"
-version = "26.10.05"
+version = "26.11.15"
 description = "Deployment-focused TrendRadar Lite distribution"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -15,7 +15,7 @@ dependencies = [
   "PyYAML>=6.0.3,<7.0.0",
   "boto3>=1.43.103,<2.0.0",
   "feedparser>=6.0.0,<7.0.0",
-  "litellm==1.102.1",
+  "litellm==1.109.1",
   "tenacity==8.5.0",
 ]
 

@@ -276,7 +276,3 @@ def read_env(path: Path, deployment: str | None = None) -> dict[str, str]:
     if deployment is None:
         deployment = "docker" if path.exists() and path.read_bytes().startswith(b"# TrendRadar env format: docker\n") else "linux"
     return EnvDocument(path, deployment).values
-
-
-def write_env(path: Path, values: dict[str, str], deployment: str = "linux") -> None:
-    EnvDocument(path, deployment).save(values)

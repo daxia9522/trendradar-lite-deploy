@@ -7,7 +7,6 @@
 数据流程：下载当天 SQLite → 合并新数据 → 上传回远程
 """
 
-import pytz
 import re
 import shutil
 import sys
@@ -29,13 +28,13 @@ except ImportError:
     BotoConfig = None
     ClientError = Exception
 
-from trendradar.storage.base import StorageBackend, NewsData, RSSItem, RSSData
+from trendradar.storage.base import StorageBackend, NewsData, RSSData
+from trendradar.storage.day_snapshot import object_is_missing, validate_sqlite_snapshot
 from trendradar.storage.sqlite_mixin import SQLiteStorageMixin, connect_sqlite
 from trendradar.utils.time import (
     DEFAULT_TIMEZONE,
     get_configured_time,
     format_date_folder,
-    format_time_filename,
 )
 
 
@@ -53,48 +52,6 @@ def _error_summary(error: Exception) -> str:
 
 class RemoteObjectCheckError(RuntimeError):
     """HEAD could not establish existence; safe to log, never an absence signal."""
-
-
-def _is_object_not_found(error: ClientError) -> bool:
-    """Accept object absence only, not bucket errors or contradictory statuses."""
-    response = getattr(error, "response", None)
-    if not isinstance(response, dict):
-        return False
-    details = response.get("Error", {})
-    metadata = response.get("ResponseMetadata", {})
-    if not isinstance(details, dict) or not isinstance(metadata, dict):
-        return False
-    code = details.get("Code", "")
-    status = metadata.get("HTTPStatusCode")
-    if status is not None and (type(status) is not int or status != 404):
-        return False
-    return code in ("404", "NoSuchKey", "Not Found") or (code in ("", None) and status == 404)
-
-
-def _validate_sqlite_file(path: Path) -> None:
-    """发布前校验 SQLite 文件，拒绝空响应、截断页面和损坏的数据库。"""
-    with path.open("rb") as file:
-        header = file.read(100)
-    if len(header) != 100 or header[:16] != b"SQLite format 3\x00":
-        raise ValueError("Invalid SQLite header")
-
-    page_size = int.from_bytes(header[16:18], "big")
-    if page_size == 1:
-        page_size = 65536
-    if not 512 <= page_size <= 65536 or page_size & (page_size - 1):
-        raise ValueError("Invalid SQLite page size")
-    if path.stat().st_size % page_size:
-        raise ValueError("Incomplete SQLite page")
-
-    # 校验已下载完毕的独立快照，不创建或依赖 WAL/SHM 旁路文件。
-    uri = f"{path.resolve().as_uri()}?mode=ro&immutable=1"
-    with closing(sqlite3.connect(uri, uri=True)) as connection:
-        page_count = connection.execute("PRAGMA page_count").fetchone()[0]
-        # 取模只能发现半页截断，仍须拒绝缺页和额外的整页内容。
-        if path.stat().st_size != page_size * page_count:
-            raise ValueError("SQLite file size does not match its page count")
-        if connection.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
-            raise ValueError("SQLite quick_check failed")
 
 
 class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
@@ -118,7 +75,6 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
         endpoint_url: str,
         region: str = "",
         enable_txt: bool = False,  # 远程模式默认不生成 TXT
-        enable_html: bool = True,
         temp_dir: Optional[str] = None,
         timezone: str = DEFAULT_TIMEZONE,
     ):
@@ -132,7 +88,6 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
             endpoint_url: 服务端点 URL
             region: 区域（可选，部分服务商需要）
             enable_txt: 是否启用 TXT 快照（默认关闭）
-            enable_html: 是否启用 HTML 报告
             temp_dir: 临时目录路径（默认使用系统临时目录）
             timezone: 时区配置
         """
@@ -143,12 +98,7 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
         self.endpoint_url = endpoint_url
         self.region = region
         self.enable_txt = enable_txt
-        self.enable_html = enable_html
         self.timezone = timezone
-
-        # 创建临时目录
-        self.temp_dir = Path(temp_dir) if temp_dir else Path(tempfile.mkdtemp(prefix="trendradar_"))
-        self.temp_dir.mkdir(parents=True, exist_ok=True)
 
         # 初始化 S3 客户端
         # 使用 virtual-hosted style addressing（主流）
@@ -172,7 +122,20 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
         if region:
             client_kwargs["region_name"] = region
 
+        # Construct the client before allocating a temporary directory. A bad
+        # endpoint/SDK must not leave a directory behind during initialization.
         self.s3_client = boto3.client("s3", **client_kwargs)
+        self._owns_s3_client = True
+        self._s3_client_closed = False
+        try:
+            self.temp_dir = Path(temp_dir) if temp_dir else Path(tempfile.mkdtemp(prefix="trendradar_"))
+            self.temp_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            try:
+                self._close_owned_client()
+            except Exception:
+                pass
+            raise
 
         # 跟踪下载的文件（用于清理）
         self._downloaded_files: List[Path] = []
@@ -192,6 +155,15 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
     def supports_txt(self) -> bool:
         return self.enable_txt
 
+    def _close_owned_client(self) -> None:
+        """Close the client created by this backend once, never a borrowed one."""
+        if not getattr(self, "_owns_s3_client", False) or getattr(self, "_s3_client_closed", False):
+            return
+        close = getattr(self.s3_client, "close", None)
+        if callable(close):
+            close()
+        self._s3_client_closed = True
+
     # ========================================
     # SQLiteStorageMixin 抽象方法实现
     # ========================================
@@ -204,9 +176,6 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
         """格式化日期文件夹名 (ISO 格式: YYYY-MM-DD)"""
         return format_date_folder(date, self.timezone)
 
-    def _format_time_filename(self) -> str:
-        """格式化时间文件名 (格式: HH-MM)"""
-        return format_time_filename(self.timezone)
 
     def _get_remote_db_key(self, date: Optional[str] = None, db_type: str = "news") -> str:
         """
@@ -257,7 +226,7 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
             self.s3_client.head_object(Bucket=self.bucket_name, Key=r2_key)
             return True
         except ClientError as e:
-            if _is_object_not_found(e):
+            if object_is_missing(e):
                 return False
             print(f"[远程存储] 检查对象存在性失败: {_error_summary(e)}")
             # mixin/上层可能直接格式化异常；不得传播原始供应商正文或异常链。
@@ -307,26 +276,18 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
                     for chunk in body.iter_chunks(chunk_size=1024*1024):
                         f.write(chunk)
 
-            # SQLite 会把零字节文件当作空库，先核对文件头再校验完整性。
-            with open(partial_path, 'rb') as f:
-                if f.read(16) != b"SQLite format 3\x00":
-                    raise sqlite3.DatabaseError("下载文件不是 SQLite 数据库")
-            # 校验独立的只读快照，不创建或依赖 WAL/SHM 等旁路文件。
-            uri = f"{partial_path.resolve().as_uri()}?mode=ro&immutable=1"
-            with closing(sqlite3.connect(uri, uri=True)) as conn:
-                # quick_check 可能接受末页空白被截断的文件，另外核对页面总长度。
-                page_size = conn.execute("PRAGMA page_size").fetchone()[0]
-                page_count = conn.execute("PRAGMA page_count").fetchone()[0]
-                if (partial_path.stat().st_size != page_size * page_count
-                        or conn.execute("PRAGMA quick_check").fetchall() != [("ok",)]):
-                    raise sqlite3.DatabaseError("下载数据库完整性校验失败")
+            try:
+                validate_sqlite_snapshot(partial_path)
+            except ValueError:
+                # Preserve this writer method's existing SQLite error contract.
+                raise sqlite3.DatabaseError("下载数据库完整性校验失败") from None
 
             partial_path.replace(local_path)
             self._downloaded_files.append(local_path)
             print("[远程存储] 已下载数据库")
             return local_path
         except ClientError as e:
-            if _is_object_not_found(e):
+            if object_is_missing(e):
                 print("[远程存储] 文件不存在，将创建新数据库")
                 return None
             else:
@@ -532,21 +493,6 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
             print(f"[远程存储] 上传远程存储失败")
             return False
 
-    def get_today_all_data(self, date: Optional[str] = None) -> Optional[NewsData]:
-        """获取指定日期的所有新闻数据（合并后）"""
-        return self._get_today_all_data_impl(date)
-
-    def get_latest_crawl_data(self, date: Optional[str] = None) -> Optional[NewsData]:
-        """获取最新一次抓取的数据"""
-        return self._get_latest_crawl_data_impl(date)
-
-    def detect_new_titles(self, current_data: NewsData) -> Dict[str, Dict]:
-        """检测新增的标题"""
-        return self._detect_new_titles_impl(current_data)
-
-    def is_first_crawl_today(self, date: Optional[str] = None) -> bool:
-        """检查是否是当天第一次抓取"""
-        return self._is_first_crawl_today_impl(date)
 
     # ========================================
     # 时间段执行记录（调度系统）
@@ -606,45 +552,9 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
             print(f"[远程存储] RSS 上传远程存储失败")
             return False
 
-    def get_rss_data(self, date: Optional[str] = None) -> Optional[RSSData]:
-        """获取指定日期的所有 RSS 数据"""
-        return self._get_rss_data_impl(date)
-
-    def detect_new_rss_items(self, current_data: RSSData) -> Dict[str, List[RSSItem]]:
-        """检测新增的 RSS 条目"""
-        return self._detect_new_rss_items_impl(current_data)
-
-    def get_latest_rss_data(self, date: Optional[str] = None) -> Optional[RSSData]:
-        """获取最新一次抓取的 RSS 数据"""
-        return self._get_latest_rss_data_impl(date)
 
     # ========================================
-    # AI 智能筛选存储方法
-    # ========================================
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    def get_all_news_ids(self, date=None):
-        return self._get_all_news_ids_impl(date)
-
-    def get_all_rss_ids(self, date=None):
-        return self._get_all_rss_ids_impl(date)
-
-    # ========================================
-    # 远程特有功能：TXT/HTML 快照（临时目录）
+    # 远程特有功能：TXT 快照（临时目录）
     # ========================================
 
     def save_txt_snapshot(self, data: NewsData) -> Optional[str]:
@@ -693,27 +603,6 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
             print(f"[远程存储] 保存 TXT 快照失败: {_error_summary(e)}")
             return None
 
-    def save_html_report(self, html_content: str, filename: str) -> Optional[str]:
-        """保存 HTML 报告到临时目录"""
-        if not self.enable_html:
-            return None
-
-        try:
-            date_folder = self._format_date_folder()
-            html_dir = self.temp_dir / date_folder / "html"
-            html_dir.mkdir(parents=True, exist_ok=True)
-
-            file_path = html_dir / filename
-
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(html_content)
-
-            print("[远程存储] HTML 报告已保存")
-            return str(file_path)
-
-        except Exception as e:
-            print(f"[远程存储] 保存 HTML 报告失败: {_error_summary(e)}")
-            return None
 
     # ========================================
     # 远程特有功能：资源清理
@@ -752,6 +641,14 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
         downloaded_files = getattr(self, "_downloaded_files", None)
         if downloaded_files:
             downloaded_files.clear()
+
+        # The backend owns clients it constructed; day sources/publication
+        # stores only borrow them. Do not close manually supplied test/peer
+        # clients, and make explicit cleanup + destructor cleanup idempotent.
+        try:
+            self._close_owned_client()
+        except Exception as e:
+            print(f"[远程存储] 关闭客户端失败: {_error_summary(e)}")
 
     def cleanup_old_data(self, retention_days: int) -> int:
         """
@@ -882,7 +779,7 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
                             partial_path = Path(f.name)
                             for chunk in body.iter_chunks(chunk_size=1024*1024):
                                 f.write(chunk)
-                    _validate_sqlite_file(partial_path)
+                    validate_sqlite_snapshot(partial_path)
                     partial_path.replace(local_db_path)
                     print("[远程存储] 已拉取数据库")
                     pulled_count += 1
@@ -897,32 +794,3 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
 
         print(f"[远程存储] 拉取完成，共下载 {pulled_count} 个数据库文件")
         return pulled_count
-
-    def list_remote_dates(self) -> List[str]:
-        """
-        列出远程存储中所有可用的日期
-
-        Returns:
-            日期字符串列表（YYYY-MM-DD 格式）
-        """
-        dates = set()
-
-        try:
-            paginator = self.s3_client.get_paginator('list_objects_v2')
-            for db_type in ("news", "rss"):
-                pages = paginator.paginate(
-                    Bucket=self.bucket_name,
-                    Prefix=f"{db_type}/",
-                )
-                pattern = re.compile(rf'{db_type}/(\d{{4}}-\d{{2}}-\d{{2}})\.db$')
-                for page in pages:
-                    for obj in page.get('Contents', []):
-                        date_match = pattern.fullmatch(obj['Key'])
-                        if date_match:
-                            dates.add(date_match.group(1))
-
-            return sorted(dates, reverse=True)
-
-        except Exception as e:
-            print(f"[远程存储] 列出远程日期失败: {_error_summary(e)}")
-            return []

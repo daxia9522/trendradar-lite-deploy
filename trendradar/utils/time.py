@@ -65,19 +65,6 @@ def format_time_filename(timezone: str = DEFAULT_TIMEZONE) -> str:
     return get_configured_time(timezone).strftime("%H-%M")
 
 
-def get_current_time_display(timezone: str = DEFAULT_TIMEZONE) -> str:
-    """
-    获取当前时间显示 (格式: HH:MM，用于显示)
-
-    Args:
-        timezone: 时区名称
-
-    Returns:
-        格式化后的时间字符串，如 '15:30'
-    """
-    return get_configured_time(timezone).strftime("%H:%M")
-
-
 def convert_time_for_display(time_str: str) -> str:
     """
     将 HH-MM 格式转换为 HH:MM 格式用于显示

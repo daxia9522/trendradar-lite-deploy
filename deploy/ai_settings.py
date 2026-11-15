@@ -1,77 +1,46 @@
-"""Menu-side YAML defaults, without importing the application or opening secret files."""
+"""Dependency-free setup policy for grouped AI configuration.
+
+Menus edit feature switches and named group connection variables. Model IDs,
+connection references, request parameters and task policies live in config.yaml and are
+validated by the application, not by a second menu-side YAML parser.
+"""
 from __future__ import annotations
 
-from pathlib import Path
-
-from envfile import ConfigError
-from native_schedule import ScheduleError, _strip_comment, _yaml_subset
-
-
-def effective_config_path(values, app_dir: Path) -> Path:
-    path = Path(values.get("CONFIG_PATH") or "config/config.yaml")
-    # The shipped container mounts the host config directory under /app/config.
-    if path.is_absolute() and path.is_relative_to("/app/config"):
-        return Path(app_dir) / "config" / path.relative_to("/app/config")
-    return path if path.is_absolute() else Path(app_dir) / path
-
-
-def _lean_ai_defaults(text: str) -> dict:
-    """Reuse the existing fail-closed YAML subset on just the relevant AI fields.
-
-    Shipped [] is the empty fallback list. Full YAML syntax is delegated to
-    PyYAML when available rather than inventing a second general YAML parser.
-    """
-    selected = []
-    in_ai = False
-    keep = False
-    seen = False
-    for raw in text.splitlines():
-        if not raw.strip() or raw.lstrip().startswith("#"):
-            continue
-        if not raw[0].isspace():
-            line = _strip_comment(raw)
-            if line.startswith("ai:") and line != "ai:":
-                raise ScheduleError("AI flow mappings/aliases require the full YAML parser")
-            in_ai = line == "ai:"
-            keep = False
-            if in_ai:
-                if seen:
-                    raise ScheduleError("duplicate ai section")
-                seen = True
-            continue
-        if not in_ai:
-            continue
-        if "\t" in raw or raw.lstrip().startswith("<<:"):
-            raise ScheduleError("AI tabs/merge keys require the full YAML parser")
-        indent = len(raw) - len(raw.lstrip(" "))
-        if indent == 2:
-            key = raw.strip().partition(":")[0]
-            keep = key in ("model", "api_base", "fallback_models")
-            if keep and _strip_comment(raw).strip() == "fallback_models: []":
-                keep = False
-                selected.append("fallback_models: ''")
-                continue
-        if keep:
-            selected.append(raw[2:])
-    return _yaml_subset("\n".join(selected)) if selected else {}
+# Keep in sync with trendradar.ai_config.LEGACY_FIELDS without importing the
+# application (or PyYAML) before the native install has installed dependencies.
+LEGACY_FIELDS = (
+    "MODEL", "API_BASE", "API_KEY", "API_KEY_FILE", "FALLBACK_MODELS",
+    "FALLBACK_API_BASE", "FALLBACK_API_KEY", "FALLBACK_API_KEY_FILE", "TIMEOUT",
+    "EXTRA_PARAMS", "NUM_RETRIES",
+)
+RETIRED_AI_ENV_KEYS = frozenset(prefix + name
+                                for prefix in ("AI_", "AI_FILTER_")
+                                for name in LEGACY_FIELDS)
+GROUP_KEY_FIELDS = ("GEMINI_API_KEY", "CF_API_KEY")
+GROUP_KEY_FILE_FIELDS = ("GEMINI_API_KEY_FILE", "CF_API_KEY_FILE")
+GROUP_ENDPOINT_FIELDS = ("CF_API_BASE",)
+AI_SETUP_HELP = (
+    "此菜单仅保存 AI 开关与连接组变量，不编辑模型或备用列表。"
+    "请在 config/config.yaml（或 CONFIG_PATH 指定文件）的 model_groups/tasks 中维护"
+    "模型、端点、model_chain、timeout、retry 和 request_params。"
+    "GEMINI_API_KEY / CF_API_KEY 分别供对应连接组引用，不是逐模型密钥。"
+    "CF_API_BASE 由组内 api_base_env 引用，真实地址不必写入 YAML；与 api_base 二选一。"
+    "菜单不验证 YAML 或调用 AI；保存环境配置不代表模型配置已通过运行时校验。"
+)
+AI_FILE_HELP = (
+    "原生 Linux 可选用 GEMINI_API_KEY_FILE / CF_API_KEY_FILE 保存密钥文件路径；"
+    "对应组须将 api_key_env 改为 api_key_file_env 引用该变量，二者只能选择一个。"
+    "菜单不会打开密钥文件；文件权限与路径由运行时安全校验。"
+)
+LEGACY_AI_ERROR = (
+    "检测到已退役且非空的 AI 模型/连接环境字段，拒绝使用或保存。"
+    "请先手工迁移到 config.yaml 的 model_groups/tasks 和 GEMINI_API_KEY/CF_API_KEY"
+    "（或组级文件引用），再移除旧 AI_ / AI_FILTER_ 的模型、连接、备用和请求参数字段。"
+    "不会自动转换、清空或删除旧密钥；功能开关 AI_ANALYSIS_ENABLED/AI_FILTER_ENABLED 保留。"
+)
 
 
-def load_ai_defaults(path: Path | None) -> dict:
-    if path is None or not path.exists():
-        return {}
-    try:
-        text = path.read_text(encoding="utf-8")
-        try:
-            import yaml
-        except ImportError:
-            return _lean_ai_defaults(text)
-        data = yaml.safe_load(text) or {}
-        ai = data.get("ai") or {}
-        if not isinstance(ai, dict):
-            raise ValueError
-        # Menus need no YAML key value and never open AI_API_KEY_FILE.
-        return {key: ai[key] for key in ("model", "api_base", "fallback_models") if key in ai}
-    except (OSError, UnicodeError):
-        raise ConfigError("无法读取 AI 配置默认值，未保存") from None
-    except Exception:
-        raise ConfigError("AI YAML 默认值无法可靠解析；请核对配置，复杂 YAML 需项目已有的 PyYAML 依赖") from None
+def retired_ai_errors(values) -> list[str]:
+    """Match runtime's populated-field check; never return entered values."""
+    return [LEGACY_AI_ERROR] if any(str(values.get(key, "")).strip()
+                                    for key in RETIRED_AI_ENV_KEYS) else []

@@ -2,6 +2,8 @@
 .github
 .venv
 backups
+memory
+AGENTS.md
 output
 tests
 __pycache__
@@ -10,6 +12,8 @@ __pycache__
 *.db
 *.log
 .env
+.env.*
+!.env.example
 runtime
 .env.backups
 ..env.backups

@@ -1,134 +1,90 @@
+# 六分组关键词：2026-11-10试用版。
+# 文件顺序决定首命中归类；HTML独立按国内、国际、科技、财经、文娱、体育展示。
+# 上限：国内20、国际20、科技15、财经15、文娱10、体育10，主热榜最多90条。
+# 新增区和独立区另计；若以后启用RSS，其分组上限单独生效。
+# 不使用!做组内排除：当前解析器将其汇总为共同过滤。
+
 [GLOBAL_FILTER]
+# 沿用正式文件已有的全局过滤，本轮不顺带改动这一策略。
 震惊
 
 [WORD_GROUPS]
 
-# ── 企业与品牌 ──
+[财经新闻]
+@15
+/刘强东|(?<![A-Za-z0-9])JD(?![A-Za-z0-9])|Jingdong|WeBank/ => 原商业与银行别名
+/停产|停售|停止生产|终止生产|交付量/ => 产品经营变动
+/^(?!.*(?:试飞|首飞|新产品|新芯片|研发突破))(?=.*(?:华为|任正非|余承东|鸿蒙|海思|昇腾|鲲鹏|HUAWEI|HarmonyOS|HiSilicon|小米|雷军|米家|澎湃OS|SU7|YU7|Xiaomi|HyperOS|Lei Jun|比亚迪|王传福|方程豹|腾势|仰望|弗迪|刀片电池|云辇|BYD|Denza|Yangwang|大疆|汪滔|灵眸|如影|DJI|RoboMaster|Mavic|Zenmuse|腾讯|鹅厂|马化腾|微信|(?<![A-Za-z0-9])QQ(?![A-Za-z0-9])|天美|阅文集团|微众银行|Tencent|Pony Ma|WeChat|LightSpeed|WeBank|京东|刘强东|(?<![A-Za-z0-9])JD(?![A-Za-z0-9])|Jingdong|字节跳动|字节系|张一鸣|梁汝波|抖音|ByteDance|TikTok|Douyin|Lark|CapCut|宇树|王兴兴|Unitree|英伟达|黄仁勋|NVIDIA|GeForce|(?<![A-Za-z0-9])RTX(?![A-Za-z0-9])|CUDA|Jensen Huang|苏姿丰|锐龙|霄龙|(?<![A-Za-z0-9])AMD(?![A-Za-z0-9])|Ryzen|EPYC|Radeon|Lisa Su|特斯拉|马斯克|Tesla|Elon Musk|Cybertruck|Model 3|Model Y|Model S|Model X|(?<![A-Za-z0-9])FSD(?![A-Za-z0-9])|微软|Microsoft|Windows|Azure|Satya Nadella|Copilot|谷歌|皮查伊|安卓|(?<!输)油管(?!道)|Google|Alphabet|Android|Chrome|YouTube|Gemini|DeepMind|Waymo|库克|iPhone|iPad|MacBook|(?<![A-Za-z0-9])iOS(?![A-Za-z0-9])|Vision Pro|AirPods|(?<![A-Za-z0-9])Apple(?![A-Za-z0-9])|Tim Cook|深度求索|幻方量化|梁文锋|DeepSeek|qwen|minimax|glm|通义|智谱|月之暗面|Kimi|OpenAI|ChatGPT|Sora|DALL-E|Sam Altman|Greg Brockman|Anthropic|Claude|Dario Amodei|亚马逊|Amazon|Meta))(?=.*(?:涨幅|跌幅|反弹|溢价|销量|交付量|全系破万|监管|(?:涨|跌)(?:约|近|超)?\d+(?:\.\d+)?[%％])).+/ => 关注企业行情与经营
+/(?=.*(?:华为|任正非|余承东|鸿蒙|海思|昇腾|鲲鹏|HUAWEI|HarmonyOS|HiSilicon|小米|雷军|米家|澎湃OS|SU7|YU7|Xiaomi|HyperOS|Lei Jun|比亚迪|王传福|方程豹|腾势|仰望|弗迪|刀片电池|云辇|BYD|Denza|Yangwang|大疆|汪滔|灵眸|如影|DJI|RoboMaster|Mavic|Zenmuse|腾讯|鹅厂|马化腾|微信|(?<![A-Za-z0-9])QQ(?![A-Za-z0-9])|天美|阅文集团|微众银行|Tencent|Pony Ma|WeChat|LightSpeed|WeBank|京东|刘强东|(?<![A-Za-z0-9])JD(?![A-Za-z0-9])|Jingdong|字节跳动|字节系|张一鸣|梁汝波|抖音|ByteDance|TikTok|Douyin|Lark|CapCut|宇树|王兴兴|Unitree|英伟达|黄仁勋|NVIDIA|GeForce|(?<![A-Za-z0-9])RTX(?![A-Za-z0-9])|CUDA|Jensen Huang|苏姿丰|锐龙|霄龙|(?<![A-Za-z0-9])AMD(?![A-Za-z0-9])|Ryzen|EPYC|Radeon|Lisa Su|特斯拉|马斯克|Tesla|Elon Musk|Cybertruck|Model 3|Model Y|Model S|Model X|(?<![A-Za-z0-9])FSD(?![A-Za-z0-9])|微软|Microsoft|Windows|Azure|Satya Nadella|Copilot|谷歌|皮查伊|安卓|(?<!输)油管(?!道)|Google|Alphabet|Android|Chrome|YouTube|Gemini|DeepMind|Waymo|库克|iPhone|iPad|MacBook|(?<![A-Za-z0-9])iOS(?![A-Za-z0-9])|Vision Pro|AirPods|(?<![A-Za-z0-9])Apple(?![A-Za-z0-9])|Tim Cook|深度求索|幻方量化|梁文锋|DeepSeek|qwen|minimax|glm|通义|智谱|月之暗面|Kimi|OpenAI|ChatGPT|Sora|DALL-E|Sam Altman|Greg Brockman|Anthropic|Claude|Dario Amodei))(?=.*(?:劫案|失窃|被盗|货物.{0,20}失踪)).+/ => 关注企业经营安全事件
+/(?=.*(?:华为|任正非|余承东|鸿蒙|海思|昇腾|鲲鹏|HUAWEI|HarmonyOS|HiSilicon|小米|雷军|米家|澎湃OS|SU7|YU7|Xiaomi|HyperOS|Lei Jun|比亚迪|王传福|方程豹|腾势|仰望|弗迪|刀片电池|云辇|BYD|Denza|Yangwang|大疆|汪滔|灵眸|如影|DJI|RoboMaster|Mavic|Zenmuse|腾讯|鹅厂|马化腾|微信|(?<![A-Za-z0-9])QQ(?![A-Za-z0-9])|天美|阅文集团|微众银行|Tencent|Pony Ma|WeChat|LightSpeed|WeBank|京东|刘强东|(?<![A-Za-z0-9])JD(?![A-Za-z0-9])|Jingdong|字节跳动|字节系|张一鸣|梁汝波|抖音|ByteDance|TikTok|Douyin|Lark|CapCut|宇树|王兴兴|Unitree|英伟达|黄仁勋|NVIDIA|GeForce|(?<![A-Za-z0-9])RTX(?![A-Za-z0-9])|CUDA|Jensen Huang|苏姿丰|锐龙|霄龙|(?<![A-Za-z0-9])AMD(?![A-Za-z0-9])|Ryzen|EPYC|Radeon|Lisa Su|特斯拉|马斯克|Tesla|Elon Musk|Cybertruck|Model 3|Model Y|Model S|Model X|(?<![A-Za-z0-9])FSD(?![A-Za-z0-9])|微软|Microsoft|Windows|Azure|Satya Nadella|Copilot|谷歌|皮查伊|安卓|(?<!输)油管(?!道)|Google|Alphabet|Android|Chrome|YouTube|Gemini|DeepMind|Waymo|库克|iPhone|iPad|MacBook|(?<![A-Za-z0-9])iOS(?![A-Za-z0-9])|Vision Pro|AirPods|(?<![A-Za-z0-9])Apple(?![A-Za-z0-9])|Tim Cook|深度求索|幻方量化|梁文锋|DeepSeek|qwen|minimax|glm|通义|智谱|月之暗面|Kimi|OpenAI|ChatGPT|Sora|DALL-E|Sam Altman|Greg Brockman|Anthropic|Claude|Dario Amodei))(?=.*(?:留任CEO|免职|接班|继任|去留|不离职|(?:CEO|董事长|首席执行官).{0,12}(?:辞职|离任))).+/ => 关注企业治理人事
+/(?:英伟达|特斯拉|微软|腾讯|华为|小米|比亚迪|大疆|京东|字节跳动|谷歌|苹果|AMD|宇树).{0,12}(?:力保|公开支持).{0,12}(?:黄仁勋|马斯克|雷军|任正非|余承东|王传福|马化腾|张一鸣|汪滔|苏姿丰|王兴兴)/ => 公司对管理层的态度
+# 先识别经济事实，避免科技公司财报/融资自动落入科技。
+/宏观经济|经济数据|经济增长|经济形势|经济前景|国家统计局|国常会|央行|美联储|欧洲央行|逆回购|降息|加息|降准|通胀|财政政策|货币政策|赤字|国债|利率|汇率|外汇|关税|贸易战|经贸|出口管制|不可靠实体清单/ => 宏观与政策
+/(?<![A-Za-z0-9])(?:CPI|PPI|GDP|PMI|IPO|ETF)(?![A-Za-z0-9])/ => 经济指标
+/股市|股价|股票|A股|美股|港股|沪指|深成指|创业板|科创板|上证|恒生|日经|道指|纳指|标普|指数期货|市值|估值|股权|股东|证券|券商|大盘|科技股|芯片股|概念股|中概股|板块|盘前|盘后|涨停|跌停|抛售|牛市|熊市|非农|债券|收益率|股息|分红|回购|增持|减持|私募|公募|(?:股票|债券|指数|投资|主权|货币)基金|基金(?:经理|公司|净值|发行|赎回)/ => 金融市场
+/财报|营收|营业收入|年化收入|季度收入|净利润|净利|盈利|亏损|融资|并购|资产重组|上市公司|首次公开募股|收购|投资|斥资|采购合同|资本开支|破产|裁员|出口|进口|汽车销量|乘用车|房地产|楼市|房价|房贷|销售额|成交额|订单|供应链|电商|零售|消费税|京东|阿里巴巴|美团|拼多多|淘宝|天猫|微众银行/ => 企业与商业
+/董事会.{0,24}(?:调查|罢免|任命|支持|表态)|(?:CEO|首席执行官).{0,18}(?:留任|去留|免职|辞职|调查)/ => 公司治理
+/黄金|现货黄金|国际金价|金价|金饰|金条|沪金|伦敦金(?!属)|原油|石油|油价|国际油价|美油|液化石油气|布伦特|天然气|煤炭|燃料油|汽油|柴油|期货|碳酸锂|铁矿石|有色金属|伦敦金属交易所|欧佩克/ => 大宗商品
+/(?<![A-Za-z0-9])(?:WTI|OPEC|COMEX|XAUUSD|XAU|LPG)(?![A-Za-z0-9])/ => 商品市场
+/(?<![A-Za-z0-9])(?:earnings|revenue|profits?|inflation|tariffs?|bonds?|stocks?|stock market|share price|interest rates?|exchange rates?|central bank|Federal Reserve|Bank of England|acquisition|merger|bankruptcy|investment|investors?)(?![A-Za-z0-9])/ => 英文财经
 
-[华为]
-/华为|任正非|余承东|鸿蒙|海思|昇腾|鲲鹏|HUAWEI|HarmonyOS|HiSilicon/ => 华为
-
-[小米]
-/小米|雷军|米家|澎湃OS|SU7|YU7|Xiaomi|HyperOS|Lei Jun/ => 小米
-
-[比亚迪]
-/比亚迪|王传福|方程豹|腾势|仰望|弗迪|刀片电池|云辇|BYD|Denza|Yangwang/ => 比亚迪
-
-[大疆]
-/大疆|汪滔|灵眸|如影|DJI|RoboMaster|Mavic|Zenmuse/ => 大疆
-
-[腾讯]
-/腾讯|鹅厂|马化腾|微信|QQ|天美|阅文集团|微众银行|Tencent|Pony Ma|WeChat|LightSpeed|WeBank/ => 腾讯
-
-[京东]
-/京东|刘强东|(?<![A-Za-z0-9])JD(?![A-Za-z0-9])|Jingdong/ => 京东
-
-[字节跳动]
-/字节|张一鸣|梁汝波|抖音|ByteDance|TikTok|Douyin|Lark|CapCut/ => 字节跳动
-
-[宇树机器人]
-/宇树|王兴兴|Unitree/ => 宇树机器人
-
-[英伟达]
-/英伟达|黄仁勋|NVIDIA|GeForce|(?<![A-Za-z0-9])RTX(?![A-Za-z0-9])|CUDA|Jensen Huang/ => 英伟达
-
-[AMD]
-/苏姿丰|锐龙|霄龙|(?<![A-Za-z0-9])AMD(?![A-Za-z0-9])|Ryzen|EPYC|Radeon|Lisa Su/ => AMD
-
-[特斯拉]
-/特斯拉|马斯克|Tesla|Elon Musk|Cybertruck|Model 3|Model Y|Model S|Model X|(?<![A-Za-z0-9])FSD(?![A-Za-z0-9])/ => 特斯拉
-
-[微软]
-/微软|Microsoft|Windows|Azure|Satya Nadella|Copilot/ => 微软
-
-[谷歌]
-/谷歌|皮查伊|安卓|油管|Google|Alphabet|Android|Chrome|YouTube|Gemini|DeepMind|Waymo/ => 谷歌
-
-[苹果]
-/库克|iPhone|iPad|MacBook|(?<![A-Za-z0-9])iOS(?![A-Za-z0-9])|Vision Pro|AirPods|(?<![A-Za-z0-9])Apple(?![A-Za-z0-9])|Tim Cook/ => 苹果
-
-# ── 大模型 ──
-
-[国产大模型]
-/深度求索|幻方量化|梁文锋|DeepSeek/ => DeepSeek
-/qwen|minimax|glm|通义|智谱|月之暗面|Kimi/ => 其它国产模型
-
-[OpenAI / Anthropic]
-/OpenAI|ChatGPT|Sora|DALL-E|Sam Altman|Greg Brockman/ => OpenAI
-/Anthropic|Claude|Dario Amodei/ => Claude
-
-# ── 文娱 ──
-
-[文娱 IP]
-/影之刃零|梁其伟/ => 影之刃零
-/三体|流浪地球|刘慈欣|郭帆/ => 三体/流浪地球
-
-# ── 地域 ──
-
-[中国]
-国产
-中国
-生产力
-
-[亚洲]
-日本
-朝鲜
-韩国
-印度
-新加坡
-
-[北美]
-美国
-加拿大
-
-[欧洲]
-英国
-法国
-德国
-意大利
-西班牙
-
-[俄罗斯]
-/俄罗斯|俄国/ => 俄罗斯
-
-# ── 主题 ──
-
-[AI 相关]
-/(?<![A-Za-z0-9])AI(?![A-Za-z0-9])/i => AI
-人工智能
-
-[芯片]
-芯片
-光刻机
-半导体
-
-[新能源]
-水电
-雅鲁藏布江
-光伏
-太阳能
-核能
-能源
-
-[自动驾驶]
-自动驾驶
-无人驾驶
-智驾
-
-[前沿科技]
-月球
-登月
-火星
-宇宙
-飞船
-航天
-空间站
-卫星
-量子
-脑机
-基因
-
-[大宗商品]
-/黄金|金价|金饰|金条|沪金|现货黄金|国际金价|伦敦金|XAUUSD|(?<![A-Za-z0-9])XAU(?![A-Za-z0-9])|COMEX/ => 黄金
-/原油|石油|油价|布伦特|(?<![A-Za-z0-9])WTI(?![A-Za-z0-9])|美油|国际油价|汽油|柴油|液化石油气|(?<![A-Za-z0-9])LPG(?![A-Za-z0-9])|欧佩克|OPEC/ => 原油
+[体育新闻]
 @10
+# 强政治语境优先留给国际/国内，避免“UFC总裁任白宫新闻秘书”落入体育。
++/^(?!.*(?:白宫|总统|首相|国务卿|外交部|内阁|议会|中期选举|总统选举|White House|president|prime minister|电影|电视剧|首映|纪录片)).*$/
+/足球|篮球|排球|网球|乒乓|羽毛球|高尔夫|冰球|橄榄球|棒球|游泳|田径|跳水|举重|体操|击剑|赛艇|拳击|搏击|格斗|滑冰|花样滑冰|滑雪|冰上舞蹈|冬泳|铁人三项|马拉松|赛车|奥运|冬奥|亚运|全运会|世锦赛|世界杯|欧冠|亚冠|中超|英超|西甲|意甲|德甲|法甲|国足|国乒|女排|男篮|女篮|中网|澳网|法网|温网|美网|斯诺克|湘超|苏超/ => 体育项目与赛事
+/(?<![A-Za-z0-9])(?:NBA|WNBA|CBA|NBL|F1|ATP|WTA|WTT|FIFA|UEFA|NFL|MLB|NHL|UFC)(?![A-Za-z0-9])/ => 联赛与组织
+/大连英博|成都蓉城|山东泰山|北京国安|上海申花|上海海港|天津津门虎|重庆铜梁龙|皇家马德里|巴塞罗那|曼联|曼城|利物浦|阿森纳|湖人|勇士|马刺|开拓者|快船|凯尔特人|76人|国米|AC米兰/ => 运动队
+/武磊|杨瀚森|王楚钦|孙颖莎|樊振东|马龙|蒯曼|陈熠|早田希娜|张本智和|林昀儒|陈梦|郑钦文|谷爱凌|全红婵|潘展乐|梅西|C罗|姆巴佩|德约科维奇|纳达尔/ => 运动员
+/电竞赛事|电竞比赛|S赛|世界赛|(?<![A-Za-z0-9])(?:LPL|LCK)(?![A-Za-z0-9])|(?:BLG|GEN|IG|T1|英雄联盟|王者荣耀|LOL).{0,30}(?:战胜|对战|对阵|晋级|零封|淘汰|决赛|半决赛|四强|八强|横扫|比赛)/ => 电竞赛事
+/(?<![A-Za-z0-9])(?:football|basketball|tennis|volleyball|baseball|cricket|rugby|athletics|Olympics?|World Cup|Premier League|Champions League|marathon|Grand Slam)(?![A-Za-z0-9])/ => 英文体育
+
+[文娱新闻]
+@10
+# 已知艺人姓名属于正向人物识别，不是用住房等民生词一概排除。
+/蔡少芬/ => 文娱人物
+# 影视、游戏、音乐和文化；不靠逐个堆明星姓名补齐所有社媒热搜。
+/文娱|娱乐圈|影视|电影|电影院|电视剧|新剧|剧集|短剧|微短剧|漫剧|网剧|综艺|票房|演唱会|音乐节|新歌|歌单|合唱|歌手|明星|演员|艺人|影星|影帝|影后|导演|编剧|制片人|剧组|剧情|剧评|主演|台词|飙戏|杀青|上映|好莱坞|奥斯卡|金鸡奖|金像奖|金马奖|百花奖|戛纳|柏林电影节|格莱美|脱口秀/ => 影视音乐
+/游戏|手游|网游|英雄联盟|王者荣耀|电竞游戏|任天堂|暴雪娱乐|米哈游|育碧|影之刃零|梁其伟|黑神话|流浪地球|三体|刘慈欣|郭帆|动画|动漫|漫画|二次元|角色扮演|Steam|PlayStation|Xbox|Nintendo/ => 游戏与关注IP
+/博物馆|美术馆|艺术展|主题展|文物|考古|文化遗产|非遗|舞剧|话剧|音乐剧|戏曲|书展|文学奖|(?:作家|诗人).{0,16}(?:作品|新书|获奖|逝世|去世|文学|诗集)|(?:送别|缅怀).{0,16}(?:作家|诗人)/ => 文化
+/(?<![A-Za-z0-9])(?:movies?|cinema|films?|actors?|actress|singer|musician|concert|Hollywood|Oscars?|Grammy|video games?|gaming|museum|theatre|theater)(?![A-Za-z0-9])/ => 英文文娱
+
+[科技新闻]
+@15
+/米家|SU7|YU7|方程豹|腾势|弗迪|云辇|Denza|Yangwang|灵眸|锐龙|霄龙|Cybertruck|Model 3|Model Y|Model S|Model X|(?<![A-Za-z0-9])(?:FSD|iOS|Sora)(?![A-Za-z0-9])|Azure|Copilot|安卓|YouTube|DALL-E/ => 补回原产品与平台别名
+# 强社会法治/冲突语境不因工具AI、设施核电而自动归为科技。
++/^(?!.*(?:(?:核电站|火电站).{0,40}(?:遇袭|袭击|伤亡|身亡|空袭)|离婚.{0,30}(?:律师|法庭)|(?:辞退|解雇|开除).{0,50}(?:违法|仲裁|赔偿|劳动)|(?:驾照|考试).{0,30}(?:作弊|民警)|(?:立委|绿委|议员|政府).{0,12}(?:促|要求|建议|拟|将).{0,30}(?:派|选派).{0,20}(?:代表|出席|与会))).*$/
+# 主要按技术/产品识别，不把某位企业家的全部私生活都视为科技。
+/人工智能|大模型|智能体|具身智能|机器学习|深度学习|神经网络|算力|数据中心|datacentre|datacenter|data centre|data center|多模态|算法|量子计算/ => AI与计算
+/(?<![A-Za-z0-9])(?:AI|AIGC|AGI|LLM|GPU|CPU|TPU|NPU|CUDA|OpenAI|ChatGPT|Claude|Anthropic|DeepSeek|Qwen|MiniMax|ChatGLM|GLM|Kimi|Codex)(?![A-Za-z0-9])|通义|千问|智谱|月之暗面|文心一言|豆包|混元|Seedream/ => AI技术与产品
+/芯片|晶片|半导体|晶圆|光刻机|光刻胶|台积电|中芯国际|阿斯麦|海思|昇腾|鲲鹏|麒麟芯片|芯片架构/ => 半导体
+/(?<![A-Za-z0-9])(?:TSMC|SMIC|ASML|HBM|RISC-V|GeForce|RTX|Ryzen|EPYC|Radeon)(?![A-Za-z0-9])/ => 芯片与计算平台
+/机器人|机器狗|自动驾驶|无人驾驶|智驾|激光雷达|萝卜快跑|Robotaxi|宁德时代|固态电池|刀片电池|新能源|光伏|太阳能|风电|储能|水电|核能|核电|核聚变|特高压|雅鲁藏布江/ => 智能硬件与能源技术
+/航天|卫星|飞船|宇宙|月球|登月|火星|空间站|量子|脑机|室温超导|基因(?:编辑|治疗|测序|工程|组)|CRISPR|SpaceX|Starship|星舰|6G|5G/ => 航天与前沿科技
+/鸿蒙|HarmonyOS|HiSilicon|澎湃OS|HyperOS|iPhone|iPad|MacBook|macOS|AirPods|Vision Pro|Windows|Android|Chrome|DeepMind|Waymo|Mavic|Osmo|RoboMaster|Zenmuse|飞书|剪映|CapCut/ => 软件与数码产品
+/(?=.*(?:华为|任正非|余承东|鸿蒙|海思|昇腾|鲲鹏|HUAWEI|HarmonyOS|HiSilicon|小米|雷军|米家|澎湃OS|SU7|YU7|Xiaomi|HyperOS|Lei Jun|比亚迪|王传福|方程豹|腾势|仰望|弗迪|刀片电池|云辇|BYD|Denza|Yangwang|大疆|汪滔|灵眸|如影|DJI|RoboMaster|Mavic|Zenmuse|腾讯|鹅厂|马化腾|微信|(?<![A-Za-z0-9])QQ(?![A-Za-z0-9])|天美|阅文集团|微众银行|Tencent|Pony Ma|WeChat|LightSpeed|WeBank|京东|刘强东|(?<![A-Za-z0-9])JD(?![A-Za-z0-9])|Jingdong|字节跳动|字节系|张一鸣|梁汝波|抖音|ByteDance|TikTok|Douyin|Lark|CapCut|宇树|王兴兴|Unitree|英伟达|黄仁勋|NVIDIA|GeForce|(?<![A-Za-z0-9])RTX(?![A-Za-z0-9])|CUDA|Jensen Huang|苏姿丰|锐龙|霄龙|(?<![A-Za-z0-9])AMD(?![A-Za-z0-9])|Ryzen|EPYC|Radeon|Lisa Su|特斯拉|马斯克|Tesla|Elon Musk|Cybertruck|Model 3|Model Y|Model S|Model X|(?<![A-Za-z0-9])FSD(?![A-Za-z0-9])|微软|Microsoft|Windows|Azure|Satya Nadella|Copilot|谷歌|皮查伊|安卓|(?<!输)油管(?!道)|Google|Alphabet|Android|Chrome|YouTube|Gemini|DeepMind|Waymo|库克|iPhone|iPad|MacBook|(?<![A-Za-z0-9])iOS(?![A-Za-z0-9])|Vision Pro|AirPods|(?<![A-Za-z0-9])Apple(?![A-Za-z0-9])|Tim Cook|深度求索|幻方量化|梁文锋|DeepSeek|qwen|minimax|glm|通义|智谱|月之暗面|Kimi|OpenAI|ChatGPT|Sora|DALL-E|Sam Altman|Greg Brockman|Anthropic|Claude|Dario Amodei))(?=.*(?:技术|研发|研究|产品|新品|新机|新车|车型|SUV|轿车|增程车|首发|首秀|部署|token|轮毂|摄像|影像|相机|无人机|云台|航拍|发布(?:会|新|产品|模型|系统|工具|技术|芯片|功能)|推出|升级|更新|功能|测试|量产|下线|芯片|模型|系统|机器人|智驾|电池|首飞|试飞|(?<![A-Za-z0-9])(?:technology|research|product|launch|release|update|feature|chip|model)(?![A-Za-z0-9]))).+/ => 原关注企业人物的技术产品事件
+/(?=.*(?:微信|WeChat|QQ|抖音|TikTok|Douyin|Gemini))(?=.*(?:功能|版本|升级|更新|支付|小程序|隐私|漏洞|宕机|故障|模型|多模态|人工智能|(?<![A-Za-z0-9])(?:AI|features?|updates?|privacy|security|outage|model)(?![A-Za-z0-9])|Gemini\s*\d)).+/ => 平台产品与模型语境
+/(?<![A-Za-z0-9])(?:artificial intelligence|semiconductor|chipset|software|hardware|robotics?|spacecraft|satellites?|quantum|fusion|genome|genetic engineering|cybersecurity)(?![A-Za-z0-9])/ => 英文科技
+
+[国际新闻]
+@20
+# 明确国内消费主体的产地/维权争议，不因商品国名归为国际。
++/^(?!(?=.*(?:胖东来|国内商家|国内消费者))(?=.*(?:产地|造假|假货|维权|质量纠纷))).*$/
+# 不使用裸US：程序会先转小写，容易把英文代词us误认成美国。
+/美国|加拿大(?!鹅)|日本|朝鲜(?!族)|韩国|印度(?!尼西亚)|印度尼西亚|新加坡|马来西亚|泰国|越南|菲律宾|柬埔寨|缅甸|巴基斯坦|阿富汗|孟加拉|尼泊尔|斯里兰卡|伊朗|伊拉克|以色列|巴勒斯坦|加沙|黎巴嫩|叙利亚|也门|胡塞|沙特|阿联酋|卡塔尔|阿曼|土耳其/ => 亚太与中东
+/英国|法国|德国|意大利|西班牙|葡萄牙|荷兰|比利时|瑞士|瑞典|挪威|芬兰|丹麦|波兰|捷克|匈牙利|奥地利|希腊|俄罗斯|俄国|乌克兰|扎波罗热|白俄罗斯|格鲁吉亚|塞尔维亚|克罗地亚|欧洲|欧盟|北约|俄乌|(?:俄|乌)(?:方|军|政府|称|外长)|美军|美俄|美日|韩日|日韩/ => 欧洲与跨国关系
+/澳大利亚|澳洲|新西兰|巴西|阿根廷|墨西哥|智利|秘鲁|委内瑞拉|哥伦比亚|古巴|南非|埃及|苏丹|埃塞俄比亚|尼日利亚|肯尼亚|非洲|拉美/ => 其他地区
+/特朗普|拜登|哈里斯|万斯|鲁比奥|普京|泽连斯基|内塔尼亚胡|阿拉格齐|埃森科特|赫格塞思|高市早苗|石破茂|默茨|马克龙|斯塔默|莫迪|金正恩|李在明|白宫|五角大楼|克里姆林宫|联合国|安理会|众议院|参议院|美民主党|美共和党|外交部|间谍|外国情报|驻外使馆|驻华使馆|总领馆|国事访问|出访|访华|霍尔木兹海峡/ => 外交与国际政治
+/(?<![A-Za-z0-9])(?:United States|U\.S\.|American|Americans|Canada|Canadian|Japan|Japanese|North Korea|South Korea|Korean|India|Indian|Singapore|Indonesia|Vietnam|Thailand|Philippines|Iran|Iranian|Iraq|Iraqi|Israel|Israeli|Palestine|Palestinian|Gaza|Lebanon|Syria|Yemen|Saudi|Qatar|Turkey|Turkish)(?![A-Za-z0-9])/ => 英文亚太与中东
+/(?<![A-Za-z0-9])(?:United Kingdom|UK|Britain|British|England|France|French|Germany|German|Italy|Italian|Spain|Spanish|Netherlands|Dutch|Poland|Polish|Russia|Russian|Ukraine|Ukrainian|Europe|European|EU|NATO|Australia|Australian|New Zealand|Brazil|Brazilian|Argentina|Mexico|Mexican|South Africa|Egypt|Sudan)(?![A-Za-z0-9])/ => 英文其他地区
+/(?<![A-Za-z0-9])(?:Trump|Biden|Putin|Zelensky|Netanyahu|Eisenkot|Macron|Starmer|Modi|White House|Pentagon|Kremlin|United Nations|Security Council|espionage|spy|spies|foreign intelligence)(?![A-Za-z0-9])/ => 英文国际政治
+
+[国内新闻]
+@20
+# 前五组均未命中时，才接收国内公共事务、社会民生等；不设无条件兜底。
+/中国|我国|中方|全国|国产|新质生产力|党中央|中共中央|国务院|全国人大|全国政协|人大常委会|人民政府|习近平|李强|韩正|公安部|教育部|民政部|人社部|交通运输部|司法部|市场监管总局|国家卫健委|最高法|最高检|中组部|解放军|武警|中国海警|开国将军|歼-?\d+|福建舰|军事演习|落马|留置|受贿|贪污|纪委/ => 国内公共事务
+/北京|上海|天津|重庆|河北|山西|内蒙古|辽宁|吉林|黑龙江|江苏|浙江|安徽|福建|江西|山东|河南|湖北|湖南|广东|广西|海南|四川|贵州|云南|西藏|陕西|甘肃|青海|宁夏|新疆|香港|澳门|台湾|台北|台中|高雄|南京|苏州|无锡|杭州|宁波|温州|合肥|福州|厦门|济南|青岛|郑州|武汉|长沙|广州|深圳|南宁|海口|成都|贵阳|昆明|拉萨|西安|兰州|西宁|银川|乌鲁木齐|沈阳|大连|长春|哈尔滨|太原|秦皇岛|石家庄/ => 国内地区
+/民生|医保|社保|养老金|养老|退休|公积金|低保|救助|就业|失业|劳动合同|劳动争议|雇主|雇员|辞退|开除|解雇|拖欠工资|欠薪|工伤|外卖骑手|快递员|高考|中考|教育|学校|校园|学生|教师|老师|大学|中小学|上学|到校|早读|卫健局|医院|医生|护士|患者|医疗|疫苗|流感|狂犬病|心脏病|中毒|公共卫生|食品安全|消费者|消费纠纷|消费投诉|消费维权|维权/ => 社会民生
+/警方|公安|民警|法院|法庭|律师|检察院|判决|判刑|刑拘|拘留|逮捕|起诉|侵权|违法|被判|案件|嫌疑人|诈骗|骗局|反诈|辟谣|造谣|失联|走失|寻亲|拐卖|交通事故|车祸|火灾|消防|救援|遇难|地震|台风|暴雨|暴雪|寒潮|高温|降温|降雪|气象|厄尔尼诺|冷空气|预警|洪水|山洪|地质灾害|停水|停电|供暖/ => 法治与公共安全
+/居民|市民|群众|社区|乡村|农村|农业|农民|耕地|粮食|高铁|铁路|地铁|公路|高速|公交|机场|航班|住房|租房|物业|小区|垃圾分类|生态保护|环境污染|水质|空气质量|国家公园|自然保护区/ => 生活与公共服务
+/(?<![A-Za-z0-9])(?:China|Chinese|Beijing|Shanghai|Shenzhen|Guangzhou|Hong Kong|Macau|Taiwan)(?![A-Za-z0-9])/ => 英文涉华综合
