@@ -48,6 +48,4 @@ jobs:
       - name: Prepare Compose environment
         run: cp .env.example .env
       - name: Validate Compose
-        run: docker compose config --quiet
-      - name: Build image
-        run: docker build --tag trendradar-lite-deploy:ci .
+        run: docker compose --profile setup config --quiet

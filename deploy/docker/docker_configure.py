@@ -2,8 +2,8 @@
 
 Compose contract: setup runs root and mounts only the project at /setup;
 --runtime-config selects this adapter. TRENDRADAR_UID/GID identify
-non-root service ownership. setup needs no build stanza: install/update explicitly
-acquire the trendradar image (pull or build); configure only consumes the existing image.
+non-root service ownership. Compose has no build stanza: installation explicitly
+builds the local image; configuration only consumes the existing image.
 """
 from __future__ import annotations
 

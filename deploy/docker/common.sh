@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Shared host operations. Requires Bash, Docker Compose v2, ordinary coreutils;
-# Python is deliberately only used inside the already-selected image.
+# Python is deliberately only used inside the locally built image.
+
+APP_IMAGE=trendradar-lite-deploy:local
 
 fail() { printf '%s\n' "$*" >&2; exit 2; }
 
@@ -40,55 +42,27 @@ set_identity() {
   export TRENDRADAR_UID=$uid TRENDRADAR_GID=$gid
 }
 
-resolve_setup_image() {
-  local image
-  # Compose >= v2.24 accepts the setup service as a positional selector for
-  # `config --images`. Older v2 releases reject or silently ignore it and
-  # print one image per service, so fall back to the whole-project listing
-  # deduplicated; every setup-profile service references one image variable.
-  if image=$(docker compose --profile setup config --images setup 2>/dev/null) && [[ -n $image && $image != *$'\n'* ]]; then
-    :
-  else
-    image=$(docker compose --profile setup config --images | sort -u) || fail "Cannot resolve the setup image."
-  fi
-  [[ -n $image && $image != *$'\n'* ]] || fail "Expected exactly one setup image."
-  printf '%s\n' "$image"
-}
-
-build_selected_image() {
-  local image
-  image=$(resolve_setup_image) || return
-  # Digests cannot be build targets; keep local builds separate from published
-  # latest too. Preserve other explicit tags. Save the choice only after valid
-  # configuration, never when a build fails or a draft is cancelled.
-  if [[ $image == *@* || $image == ghcr.io/daxia9522/trendradar-lite-deploy:latest ]]; then
-    image=trendradar-lite-deploy:local
-  fi
-  export TREND_RADAR_IMAGE=$image TRENDRADAR_BUILD_IMAGE=$image
-  docker compose build trendradar
-}
-
 require_local_setup_image() {
-  local image compatibility
-  image=$(resolve_setup_image) || return
-  compatibility=$(docker image inspect --format '{{ index .Config.Labels "org.trendradar.runtime-config" }}' "$image" 2>/dev/null) || fail "Setup image is not available locally. Configuration never pulls/builds images; run install.sh --build or update.sh explicitly."
-  [[ $compatibility == 1 ]] || fail "Local image does not support runtime configuration (org.trendradar.runtime-config=1). Build/install a compatible image explicitly; configuration will not update it."
+  local compatibility
+  compatibility=$(docker image inspect --format '{{ index .Config.Labels "org.trendradar.runtime-config" }}' "$APP_IMAGE" 2>/dev/null) || fail "Local image is missing. Run deploy/docker/install.sh first; configuration never pulls or builds images."
+  [[ $compatibility == 1 ]] || fail "Local image does not support runtime configuration (org.trendradar.runtime-config=1). Reinstall from source explicitly; configuration will not rebuild it."
 }
 
-# Compose 'run' has --pull never but no --no-build. The setup service intentionally
-# has no build stanza; install/update explicitly build the trendradar image first.
+# All Compose services consume the same local image and have no build stanza.
+# Only the installer builds it; setup and normal starts cannot build or pull it.
+# Management commands never read stdin; leave it for the configuration menu.
 run_manage() {
   if [[ ${1:-} == init-volume ]]; then
     # This service mounts only the output volume (no project/config mount and
     # no network). Ordinary setup/configuration never creates that volume.
     [[ $# == 1 ]] || fail "init-volume does not accept path overrides."
     docker compose --profile setup run --rm --pull never --no-deps -T \
-      -e TRENDRADAR_UID -e TRENDRADAR_GID volume-init
+      -e TRENDRADAR_UID -e TRENDRADAR_GID volume-init </dev/null
     return
   fi
   docker compose --profile setup run --rm --pull never --no-deps -T \
-    -e TRENDRADAR_UID -e TRENDRADAR_GID -e TRENDRADAR_BUILD_IMAGE --entrypoint python setup \
-    deploy/docker/manage.py "$@" --root /setup
+    -e TRENDRADAR_UID -e TRENDRADAR_GID --entrypoint python setup \
+    deploy/docker/manage.py "$@" --root /setup </dev/null
 }
 
 run_configure() {

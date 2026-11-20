@@ -25,18 +25,16 @@ fi
 for path in "$APP_DIR/runtime" "$APP_DIR/.env.backups"; do
   [[ ! -L $path ]] || fail "Refusing to purge a symlinked configuration directory."
 done
-selected_image=
-if [[ $MODE == purge-all ]]; then
-  # Resolve while .env still exists; never delete an unrelated hardcoded tag.
-  selected_image=$(resolve_setup_image) || exit
-fi
 docker compose --profile setup down --volumes --remove-orphans
 rm -f -- "$APP_DIR/.env"
 rm -rf -- "$APP_DIR/runtime" "$APP_DIR/.env.backups"
 remove_launcher
 echo "Docker data volume, runtime configuration, legacy .env, private backups and owned launcher removed."
 if [[ $MODE == purge-all ]]; then
-  docker image rm -- "$selected_image" 2>/dev/null || true
-  echo "Selected local TrendRadar image removed when not used by another container."
+  if docker image rm -- "$APP_IMAGE" 2>/dev/null; then
+    echo "Local TrendRadar image removed."
+  else
+    echo "Local TrendRadar image retained or unavailable; no forced removal was attempted."
+  fi
 fi
 echo "The Git clone was preserved. Remove $APP_DIR separately if it is no longer needed."

@@ -15,10 +15,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from docker_configure import DockerApplication, private_runtime, target_identity, validate, validate_document
-from envfile import ConfigError, EnvDocument, atomic_write, literal
+from envfile import ConfigError, EnvDocument, atomic_write
 
 
-def persist_identity(root: Path, identity: tuple[int, int], *, image: str | None = None) -> None:
+def persist_identity(root: Path, identity: tuple[int, int]) -> None:
     path = root / ".env"
     document = EnvDocument(path, "docker")
     if document.original is None:
@@ -26,8 +26,6 @@ def persist_identity(root: Path, identity: tuple[int, int], *, image: str | None
         # deployment metadata must contain no app defaults before the user saves.
         content = ("# Deployment settings only; application configuration: runtime/env\n"
                    f'TRENDRADAR_UID="{identity[0]}"\nTRENDRADAR_GID="{identity[1]}"\n')
-        if image:
-            content += f"TREND_RADAR_IMAGE={literal(image, 'docker')}\n"
         atomic_write(path, content.encode("utf-8"))
         if os.geteuid() == 0:
             os.chown(path, *identity)
@@ -35,8 +33,6 @@ def persist_identity(root: Path, identity: tuple[int, int], *, image: str | None
     # Preserve deployment expressions and unrelated legacy lines verbatim.
     # Existing root .env must never be sourced by a shell.
     updates = {"TRENDRADAR_UID": str(identity[0]), "TRENDRADAR_GID": str(identity[1])}
-    if image:
-        updates["TREND_RADAR_IMAGE"] = image
     document.save(updates)
     os.chmod(path, 0o600)
     if os.geteuid() == 0:
@@ -98,7 +94,7 @@ def main(argv=None) -> int:
             # Defend this public command too: no metadata writes without a
             # previously saved and valid authoritative runtime document.
             check(args.root)
-            persist_identity(args.root, identity, image=os.environ.get("TRENDRADAR_BUILD_IMAGE"))
+            persist_identity(args.root, identity)
             private_runtime(args.root / "runtime/env", identity)
         else:
             init_volume(identity)

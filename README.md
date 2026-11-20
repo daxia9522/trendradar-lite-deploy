@@ -1,6 +1,6 @@
 # TrendRadar Lite Deploy
 
-> 源码版本 **v26.11.15** ｜ [Releases](https://github.com/daxia9522/trendradar-lite-deploy/releases) ｜ 镜像 `ghcr.io/daxia9522/trendradar-lite-deploy`
+> 源码版本 **v26.11.15**
 
 聚合热榜与 RSS → 六栏筛选 → AI 日报/周报分析 → HTML 与邮件推送。基于 [sansan0/TrendRadar](https://github.com/sansan0/TrendRadar) 的非官方精简发行版。
 
@@ -79,7 +79,7 @@ SMTP服务器和端口都留空时按发件邮箱域名识别；内置支持Gmai
 
 | 变量 | 填写方法 |
 |---|---|
-| `STORAGE_BACKEND` | 原生可选 `local`、`remote`或`auto`；Actions固定remote，官方Docker固定local |
+| `STORAGE_BACKEND` | 原生可选 `local`、`remote`或`auto`；Actions固定remote，Docker固定local |
 | `S3_BUCKET_NAME` | 已创建的存储桶名称 |
 | `S3_ENDPOINT_URL` | S3接口根地址；R2通常为 `https://<account-id>.r2.cloudflarestorage.com` |
 | `S3_ACCESS_KEY_ID` | 对象存储Access Key ID |
@@ -89,7 +89,7 @@ SMTP服务器和端口都留空时按发件邮箱域名识别；内置支持Gmai
 - `local`：新闻/RSS日库保存在 `storage.local.data_dir`，默认 `output/`。
 - `remote`：新闻/RSS日库直接保存在R2/S3的 `news/`、`rss/`；读取时下载到临时目录，需配置S3变量。
 - `auto`：本机选local；Actions远程配置齐全时选remote，否则选local。Actions业务工作流明确使用remote。
-- 官方Docker的运行配置锁定local，应用数据保存在持久卷中。
+- Docker的运行配置锁定local，应用数据保存在持久卷中。
 - 同一组日库只保留一个采集写入端；交接前先停原写入端，核对所需历史日库，再启新端。
 
 <details>
@@ -233,7 +233,7 @@ systemctl --user enable --now trendradar-lite.timer trendradar-weekly.timer
 4. 在 **Actions → 工作流 → Run workflow** 手动运行一次首验。这会真实调用AI并发送邮件。
 5. 外部定时器按需要发送的时刻dispatch。Actions会绕过日报推送时间窗和once去重，不要照搬本机每小时采集频率。
 
-同一组日库不要同时启用本机和Actions采集。排队超过30分钟的日报、超过6小时的周报会跳过，手动重跑除外。CI仅检查依赖、语法、入口及容器构建；镜像发布由版本标签或 `Release Container Image` 手动工作流触发。源码版本号不代表同名镜像已经发布。
+同一组日库不要同时启用本机和Actions采集。排队超过30分钟的日报、超过6小时的周报会跳过，手动重跑除外。CI仅检查依赖、语法、入口和Compose配置，不构建或发布镜像。
 
 ### 华为云函数调用模板
 
@@ -312,14 +312,15 @@ def handler(event, context):
 
 要求Docker Engine和Compose v2。按 [Docker官方安装说明](https://docs.docker.com/engine/install/)安装；非root用户需具备Docker权限，加入docker组意味着较高的主机权限。
 
-克隆仓库后，根据实际来源选择一种安装方式，不要两条一起执行：
+克隆仓库后直接安装，无需选择镜像来源：
 
 ```bash
-./deploy/docker/install.sh --build      # 从当前源码构建并安装
-./deploy/docker/install.sh --pull       # 拉取已发布且与配置匹配的镜像
+./deploy/docker/install.sh
 ```
 
-安装器打开分组配置菜单并启动容器。`--no-start`只准备不启动；需要指定界面时加 `--terminal` 或 `--web`。
+安装器从当前源码构建一次本机架构的 `trendradar-lite-deploy:local` 镜像，确认运行配置、初始化数据卷并启动容器。首次配置会打开分组菜单；已有有效配置则沿用。首次构建需联网下载Docker官方Python基础镜像及锁定依赖，不拉取GitHub成品镜像。
+
+`--no-start`仍完成构建、配置和数据卷准备，但不启动常驻服务；之后可直接运行 `docker compose up -d --no-build --pull never trendradar`。需要指定配置界面时加 `--terminal` 或 `--web`。
 
 ```bash
 trendradar-docker                       # 修改runtime/env
@@ -332,21 +333,20 @@ Docker的应用变量在宿主机 `runtime/env`，根目录 `.env` 用于部署�
 
 | 根 `.env` 变量 | 用途 |
 |---|---|
-| `TREND_RADAR_IMAGE` | 镜像标签；默认 `ghcr.io/daxia9522/trendradar-lite-deploy:latest` |
 | `TRENDRADAR_UID` / `TRENDRADAR_GID` | 安装器沿用已存身份，首次通常取当前非root用户UID/GID；直接Compose回退1000/1000 |
 | `SETUP_PORT` | 配置网页宿主机回环端口，默认8765 |
 | `SETUP_SSH_USER` / `SETUP_SSH_HOST` / `SETUP_SSH_PORT` | 可选，用于配置页面显示SSH转发连接信息 |
 
-### 镜像更新、调度与数据
+### 更新、调度与数据
 
-以下更新方式二选一：
+更新源码后仍使用同一个安装器重建镜像并替换容器，不另设镜像拉取或更新入口。重装会替换服务容器，先确认任务空闲；以下命令按需执行：
 
 ```bash
-./deploy/docker/update.sh --build       # 当前源码构建并重建容器
-./deploy/docker/update.sh --pull        # 拉取所选镜像并重建容器
+git pull --ff-only                     # 先确认没有需要保留的本地源码改动
+./deploy/docker/install.sh              # 从更新后的源码重建并安装
 ```
 
-从官方latest或digest执行源码构建时，安装器会将镜像选择保存为本地标签；使用自定义标签时保留该选择。切换预构建版本时在 `.env` 设置所需 `TREND_RADAR_IMAGE`，同时检查同名shell变量是否覆盖它。`latest`指向最近成功发布的镜像，普通源码push不会自动发布镜像。
+Compose固定使用本地镜像，不定义构建步骤，并设置 `pull_policy: never`。修改配置、日常启停不会构建或拉取应用镜像；缺少本地镜像时会报错，须先执行安装器。根目录 `.env` 只用于部署参数，不再选择远端镜像版本。
 
 Docker使用 `TZ` 与前文时间变量调度；持久化数据保存在 `trendradar-output` 卷。调度器不会因修改时间立即补跑当前分钟，错过的业务任务也不会自动补跑。
 
@@ -357,7 +357,7 @@ docker compose stop trendradar
 docker compose start trendradar
 ```
 
-停止容器会终止其中正在执行的任务，操作前确认空闲。普通卸载 `./deploy/docker/uninstall.sh` 保留数据卷、运行配置和源码；`--purge-data`删除数据卷、配置及本安装入口；`--purge-all`再尝试删除所选本地镜像。清理参数具有破坏性，只在明确不再需要这些数据时使用。
+停止容器会终止其中正在执行的任务，操作前确认空闲。普通卸载 `./deploy/docker/uninstall.sh` 保留数据卷、运行配置和源码；`--purge-data`删除数据卷、配置及本安装入口；`--purge-all`再尝试删除本地 `trendradar-lite-deploy:local` 镜像。清理参数具有破坏性，只在明确不再需要这些数据时使用。
 
 ## 本地维护与手动运行
 
@@ -367,7 +367,7 @@ docker compose start trendradar
 | `weekly_report/` | 素材整理、正文分析、短标签及周报入口 |
 | `config/` | 可调整的业务配置与提示词 |
 | `deploy/` | 安装、配置、更新、卸载、数据维护工具 |
-| `.github/` | CI、业务触发及镜像发布 |
+| `.github/` | CI和业务触发 |
 
 只建立源码运行环境而不安装定时器：
 

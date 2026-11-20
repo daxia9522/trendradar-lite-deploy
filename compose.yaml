@@ -1,9 +1,9 @@
 services:
   setup:
     profiles: ["setup"]
-    # Published multi-architecture image; explicit updates pull the current latest.
-    image: ${TREND_RADAR_IMAGE:-ghcr.io/daxia9522/trendradar-lite-deploy:latest}
-    pull_policy: missing
+    # The installer builds this local image once; Compose never pulls or builds it.
+    image: trendradar-lite-deploy:local
+    pull_policy: never
     user: "0:0"
     security_opt: ["no-new-privileges:true"]
     cap_drop: ["ALL"]
@@ -35,8 +35,8 @@ services:
 
   volume-init:
     profiles: ["setup"]
-    image: ${TREND_RADAR_IMAGE:-ghcr.io/daxia9522/trendradar-lite-deploy:latest}
-    pull_policy: missing
+    image: trendradar-lite-deploy:local
+    pull_policy: never
     user: "0:0"
     security_opt: ["no-new-privileges:true"]
     cap_drop: ["ALL"]
@@ -45,14 +45,16 @@ services:
     network_mode: none
     entrypoint: ["python", "deploy/docker/manage.py", "init-volume"]
     volumes:
-      # Only explicit installation/update can initialize data-volume ownership.
-      - trendradar-output:/app/output
+      # Only explicit installation can initialize data-volume ownership.
+      - type: volume
+        source: trendradar-output
+        target: /app/output
+        volume:
+          nocopy: true
 
   trendradar:
-    build:
-      context: .
-    image: ${TREND_RADAR_IMAGE:-ghcr.io/daxia9522/trendradar-lite-deploy:latest}
-    pull_policy: missing
+    image: trendradar-lite-deploy:local
+    pull_policy: never
     restart: unless-stopped
     user: "${TRENDRADAR_UID:-1000}:${TRENDRADAR_GID:-1000}"
     security_opt: ["no-new-privileges:true"]
@@ -66,7 +68,12 @@ services:
       - ./config:/app/config:ro
       # Mount the directory, not the file: atomic saves replace the env inode.
       - ./runtime:/app/runtime:ro
-      - trendradar-output:/app/output
+      # Preserve the installer-selected UID/GID even while the volume is empty.
+      - type: volume
+        source: trendradar-output
+        target: /app/output
+        volume:
+          nocopy: true
 
 volumes:
   trendradar-output:
